@@ -373,6 +373,26 @@ class ApprovalScreenTest {
             assertTrue(vm.state.value.values.isEmpty())
         }
     }
+    @Test fun closingLocallyExpiredFormClearsItsRetainedAnswers() {
+        val vm = wizardVm()
+        lateinit var expiring: RequestForm
+        compose.runOnIdle {
+            expiring = wizardForm().copy(expiresAt = System.currentTimeMillis() + 1_500)
+            vm.showLoaded(expiring); vm.change("category", "travel"); vm.next(); vm.change("note", "Expired trip")
+            vm.next(); vm.change("confirmed", true); vm.next()
+            assertTrue(vm.state.value.reviewing)
+            assertEquals("Expired trip", vm.state.value.values["note"])
+        }
+        compose.waitUntil(5_000) { vm.state.value.now >= expiring.expiresAt }
+        compose.runOnIdle {
+            vm.close()
+            assertEquals(expiring.id, vm.state.value.form?.id)
+            assertTrue(vm.state.value.values.isEmpty())
+            assertEquals(null, vm.state.value.stepId)
+            assertFalse(vm.state.value.reviewing)
+            assertTrue(vm.state.value.fieldErrors.isEmpty())
+        }
+    }
     @Test fun wizardReviewScreenshotAndPreviousStepRetainAnswers() {
         val vm = wizardVm()
         compose.runOnIdle {

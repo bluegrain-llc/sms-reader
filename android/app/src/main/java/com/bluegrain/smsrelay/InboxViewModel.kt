@@ -98,7 +98,11 @@ class InboxViewModel(application: Application) : AndroidViewModel(application) {
         mutable.update { it.copy(form = form, values = draft?.values.orEmpty(), stepId = draft?.stepId,
             reviewing = draft?.reviewing ?: false, fieldErrors = emptyMap(), error = null) }
     }
-    fun close() { saveDraft(); refresh() }
+    fun close() {
+        val form = state.value.form
+        if (form != null && state.value.now >= form.expiresAt) showLoaded(form) else saveDraft()
+        refresh()
+    }
     fun rendered(id: String) { if (state.value.foreground && state.value.form?.id == id) reportObservation(app, id, "request.opened") }
     fun change(id: String, value: Any) {
         if (state.value.busy || state.value.form?.status != "pending") return
