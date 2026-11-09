@@ -195,10 +195,26 @@ Executed on an isolated API 36 Google APIs emulator using an unconfigured debug 
 | Android JVM unit suite | **18 passed**, including destination restoration, return policy, waiting through authentication/registration and both busy sessions, and abandoning a queued target |
 | Compose/activity suite | **28 passed**, zero skipped, at normal 411×914dp and compact 360×640dp with 1.3 font scaling |
 | Entry/lifecycle coverage | Cold notification, entry from Inbox/Settings, repeated taps, rotation, connection-link routing, retained wizard answers/step, and Close backgrounding without finishing the activity |
-| Response coverage | System Back/Close during SMS upload, explicit Cancel, manual code validation/Send, candidate selection, server-confirmed success, form actions/confirmation, wizard validation/review, expiry and competing-phone outcomes |
+| Response coverage | System Back/Close with busy response state, explicit Cancel, manual code validation/Send, candidate selection, server-confirmed success, form actions/confirmation, wizard validation/review, expiry and competing-phone outcomes |
 | Layout coverage | Inbox rows match safe list width and keep SMS/forms ordering; completed/expired entries are absent; arriving SMS does not interrupt Settings |
 | Visual checks | Inbox, Settings and SMS response exercised and captured at normal size, compact with large text, 640×360dp landscape and dark theme; **12 additional layout/screenshot cases passed** |
 | Debug build and instrumentation APK | Passed `assembleDebug assembleDebugAndroidTest` |
 | Lint | Passed `lintDebug`: zero errors and 15 dependency-version warnings |
 
 [UX documentation and checked-in screenshots](UX.md) describe the updated behavior. Manual-entry instrumentation exercises keyboard/focus and scrolling. State-driven response tests verify submission callbacks and acknowledged outcomes; they do not establish authenticated backend upload, real FCM delivery, real SMS consent or carrier/two-phone races for this change. Those remain physical acceptance cases in [PILOT.md](PILOT.md). No production service, signed release or physical-phone installation was changed.
+
+## SMS discovery and navigation regression coverage — 2026-11-09
+
+Unopened SMS discovery now follows the device's current server request on Refresh, including replacement or removal after remote termination, without starting reception. An unopened cached request does not block opening a different notification; a bound active listening session still does.
+
+Executed with an unconfigured debug build and synthetic data:
+
+| Check | Result |
+| --- | --- |
+| Android JVM unit suite | **24 passed**, including six discovery checks for successor replacement, an empty server pointer, remote terminal status, bound-session preservation, a listener binding during a fetch, and notification conflict rules |
+| Compose/activity suite | **29 passed**, zero skipped, on an isolated API 36 emulator at 411×914dp and at 360×640dp with 1.3 font scaling |
+| Activity navigation | Exact request ID, kind and origin asserted after notification entry and recreation; notification Back waits for the activity to stop while remaining unfinished |
+| Draft retention | Actual Inbox Close and system Back retain the same RelayViewModel, request, code draft and busy state; state is seeded in memory, with no real upload or SMS listener started |
+| Debug builds and lint | `assembleDebug assembleDebugAndroidTest` and `lintDebug` passed; zero lint errors and 15 dependency-version warnings |
+
+The busy-state Compose check asserts navigation and cancellation callbacks only. The activity check separately exercises the production navigation handlers and mutable ViewModel draft. Discovery uses deterministic server-response fixtures. Authenticated uploads, real SMS reception/consent, FCM delivery and physical-phone races remain outside these checks.

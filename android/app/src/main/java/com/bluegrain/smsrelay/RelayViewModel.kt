@@ -114,11 +114,8 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
             GrantRow(g.getString("grantId"), g.getString("callerName"), g.getBoolean("revoked"), g.getLong("expiresAt"), g.optBoolean("formsApproved")) } },
             history = (0 until history.length()).map { history.getJSONObject(it).let { h -> HistoryRow(h.optString("callerName"), h.getString("status"), h.nullString("reason")) } }) }
         // Discover missed requests for Inbox; only an explicit open starts SMS reception.
-        d?.nullString("activeRequestId")?.let { id ->
-            if (state.value.request?.active != true) {
-                val request = repo.request(id)
-                mutable.update { if (it.request?.active == true) it else it.copy(request = request) }
-            }
+        refreshSmsDiscovery(d?.nullString("activeRequestId"), { boundId != null }, repo::request) { request ->
+            mutable.update { if (request == null && it.request?.active != true) it else it.copy(request = request) }
         }
     }
     private suspend fun recover() = recoveryMutex.withLock {
@@ -184,7 +181,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
     fun open(id: String) = viewModelScope.async {
         while (state.value.busy || opening) delay(50)
         if (!RelayNotifications.validId.matches(id) || !app.configured || !repo.signedIn) return@async false
-        if (state.value.request?.active == true && state.value.request?.id != id) { error("Finish or cancel the current request first."); return@async false }
+        if (state.value.request.blocksSmsOpen(boundId, id)) { error("Finish or cancel the current request first."); return@async false }
         opening = true
         mutable.update { it.copy(busy = true, error = null) }
         var loaded = false

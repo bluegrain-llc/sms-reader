@@ -67,7 +67,7 @@ class NavigationScreenTest {
         compose.onNodeWithText("SMS assistant").assertIsDisplayed()
     }
 
-    @Test fun smsCloseAndSystemBackPreserveTheDraftDuringUploadAndCancelIsExplicit() {
+    @Test fun smsCloseAndSystemBackInvokeNavigationWhileBusyAndCancelIsExplicit() {
         var closes = 0
         var cancels = 0
         val state = session.copy(request = request, busy = true, codeDraft = "123456")
@@ -76,7 +76,7 @@ class NavigationScreenTest {
             onBack = { closes++ }, onCancel = { cancels++ }) } }
         compose.onNodeWithText("Close").performClick()
         compose.runOnUiThread { compose.activity.onBackPressedDispatcher.onBackPressed() }
-        assertEquals(2, closes); assertEquals(0, cancels); assertEquals("123456", state.codeDraft)
+        assertEquals(2, closes); assertEquals(0, cancels)
         compose.onNodeWithText("Cancel request").performScrollTo().performClick(); assertEquals(1, cancels)
     }
 

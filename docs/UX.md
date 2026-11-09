@@ -4,13 +4,13 @@ The app has three destinations in one activity: **Inbox**, **Settings**, and a f
 
 ## Inbox
 
-Inbox shows pending work only in one scrolling list: the active SMS request first, then pending forms in their existing order. Each entire row is tappable and spans the safe content width, with no enclosing card or outer horizontal gutter. Rows have 16dp internal horizontal padding and 12dp vertical padding. Caller, title, request type/status and expiry wrap naturally. Completed outcomes live in Settings → History.
+Inbox shows pending work only in one scrolling list: the active SMS request first, then pending forms in their existing order. Each entire row is tappable and spans the safe content width, with no enclosing card or outer horizontal gutter. Rows have 16dp internal horizontal padding and 12dp vertical padding. Caller, title, request type/status and expiry wrap naturally. Completed SMS outcomes live in Settings → History. A form's outcome remains in its response until closed and is not included in History.
 
 Refresh discovers requests without opening them, starting SMS reception or redirecting Settings. The owner must explicitly open an SMS request to start listening. The compact toolbar provides Refresh and Settings. Setup and account controls live in Settings; an unconnected Inbox offers an Open Settings action.
 
 ## Settings
 
-A compact toolbar and Access/Devices/History selector stay above the scrolling configuration content. Access reviews connection links or comparison codes, approves/declines connections, controls interactive-request permission and revokes callers. Devices holds phone registration, availability, pause/resume, removal and account controls. History lists metadata-only outcomes across phones; codes and answers never appear here.
+A compact toolbar and Access/Devices/History selector stay above the scrolling configuration content. Access reviews connection links or comparison codes, approves/declines connections, controls interactive-request permission and revokes callers. Devices holds phone registration, availability, pause/resume, removal and account controls. History lists metadata-only SMS outcomes across phones; codes and answers never appear here.
 
 Configuration has one 12dp horizontal content inset, 16dp section gaps and 8dp control gaps. Fields and primary actions fill the width. Switches occupy full-width rows. Sections have no nested rounded-card padding or oversized introductory heading. Device/account deletion retains explicit confirmation.
 
