@@ -1,5 +1,12 @@
 # Pilot privacy disclosure
 
+## Interactive request inbox
+
+Connections can additionally request information or decisions only after explicit form approval in Admin. These requests process the requesting app’s Markdown message, immutable form definition, chosen action and entered values. General forms always require explicit submission, including after SMS autofill; the existing SMS-only automatic consent flow remains compatible. The full SMS is never uploaded. Answers are available only to the originating connection for 24 hours after submission. Definitions, outcomes and metadata-only events are retained for seven days after termination. Pending general requests expire after 24 hours by default, up to seven days.
+
+The app reports notification taps and foreground rendering separately. These observations do not confirm agreement or that the whole message was read. Owner-bound background retries store observation IDs and times, never response values or SMS content. Senders may subscribe to metadata events over signed HTTPS webhooks; answers are retrieved separately. Google Cloud Tasks wakes delivery workers; scheduled maintenance recovers missed wakeups. Account deletion includes form answers, events, callback jobs and webhook signing secrets. See the [interactive-request contract](REQUEST_INBOX.md).
+
+
 **Draft for a private pilot.** The operator must add its legal name, privacy contact, public policy URL, and public account-deletion request URL before distributing outside the pilot or submitting to Google Play.
 
 SMS Code Relay lets a caller you authorize ask for one upcoming verification code. It does not read your SMS inbox. You open the request, Android listens for a new eligible message, and Android asks permission to give that message to the app. If you approve, the app extracts candidates on your phone and automatically sends a single code. Multiple candidates require you to choose which code to send. You can also enter a code manually, including after declining Android message access; manual entry requires Send. Only the code you submit is sent to the caller’s relay request.

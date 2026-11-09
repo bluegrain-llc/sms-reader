@@ -13,7 +13,7 @@ import type { Server } from 'node:http';
 const enabled = !!process.env.FIRESTORE_EMULATOR_HOST && !!process.env.FIREBASE_AUTH_EMULATOR_HOST;
 if (!enabled) throw new Error('Integration tests require Firestore and Auth emulators. Run npm run test:integration from the repository root.');
 const integration = test;
-const collections = ['devices', 'grants', 'managers', 'managerCallers', 'connections', 'connectionCodes', 'connectionRates', 'requests', 'results', 'audit', 'accounts'];
+const collections = ['devices', 'grants', 'managers', 'managerCallers', 'connections', 'connectionCodes', 'connectionRates', 'requests', 'results', 'audit', 'accounts', 'formRequests', 'formResults', 'requestEvents', 'deliveryOutbox'];
 let firebase: ReturnType<typeof initializeApp>, db: ReturnType<typeof getFirestore>, relay: Relay;
 let time: number, sends: string[], token: string, grantId: string;
 const uid = 'owner', did = 'installation', second = 'second-phone';
@@ -299,7 +299,7 @@ integration('REST role separation and bearer-authenticated MCP, including queued
     assert.equal(page.status, 200); assert.ok((await page.text()).includes('smsrelay://connect?code='));
     const links = await fetch(base + '/.well-known/assetlinks.json'); assert.equal(links.status, 200);
     await client.connect(new StreamableHTTPClientTransport(new URL(base + '/mcp'), { requestInit: { headers: { authorization: `Bearer ${child.token}` } } }));
-    assert.equal((await client.listTools()).tools.length, 3);
+    assert.equal((await client.listTools()).tools.length, 8);
     const tool = async (name: string, args: Record<string, unknown>) => {
       const result = await client.callTool({ name, arguments: args }); return JSON.parse((result.content as { text: string }[])[0]!.text);
     };
@@ -323,6 +323,13 @@ integration('REST role separation and bearer-authenticated MCP, including queued
     assert.equal((await manualEvent({ status: 'completed', source: 'manual', code: '12345678901' })).status, 400);
     assert.equal((await manualEvent({ status: 'completed', source: 'manual', code: 'A12b34' })).status, 200);
     assert.equal((await tool('get_sms_code_request', { requestId: q.requestId })).code, 'A12b34');
+    const { execFile } = await import('node:child_process');
+    const { promisify } = await import('node:util');
+    const { fileURLToPath } = await import('node:url');
+    const smoke = await promisify(execFile)(process.execPath, [fileURLToPath(new URL('../../examples/mcp-smoke.mjs', import.meta.url))], {
+      env: { ...process.env, RELAY_URL: base, RELAY_TOKEN: child.token }, timeout: 20_000,
+    });
+    assert.match(smoke.stdout, /Authenticated MCP create\/cancel passed/);
     const { connectSmsRelay } = await import('../../examples/connect.mjs');
     const saved: { token: string; status: string }[] = [];
     const paired = await connectSmsRelay({ baseUrl: base, callerName: 'Example app', purpose: 'Connect from helper',
@@ -351,4 +358,205 @@ integration('account deletion removes pairings and all phones, and prevents stal
   for (const c of collections.filter(c => c !== 'accounts' && c !== 'connectionRates')) assert.equal((await db.collection(c).where('ownerId', '==', uid).get()).empty, true);
   await assert.rejects(relay.register(uid, 'brand-new', 'Stale phone', 'fcm'), reason('account_deleted'));
   await assert.rejects(relay.connections.poll(c.connectionToken), reason('invalid_connection_token'));
+});
+
+const formInput = (key: string) => ({ title: 'Review invoice', body: '**Invoice** details', idempotencyKey: key,
+  fields: [{ id: 'note', label: 'Note', type: 'text' as const, required: true }],
+  actions: [{ id: 'approve', label: 'Approve', type: 'approve' as const }, { id: 'decline', label: 'Decline', type: 'decline' as const }] });
+const formUpload = (id: string, note = 'Approved') => ({ submissionId: id, action: 'approve', values: { note } });
+async function allowForms() { await relay.forms.approve(uid, grantId, true); }
+integration('general requests require separate approval and coexist with SMS and other forms', async () => {
+  await assert.rejects(relay.forms.create(token, formInput('forms-permission')), reason('forms_approval_required'));
+  await allowForms();
+  const sms = await relay.create(token, input('sms-alongside-form'));
+  const forms = await Promise.all(['form-concurrent-1', 'form-concurrent-2', 'form-concurrent-3'].map(k => relay.forms.create(token, formInput(k))));
+  assert.ok(forms.every(r => r.status === 'pending'));
+  const inbox = await relay.forms.inbox(uid, did);
+  assert.equal(inbox.length, 3);
+  assert.equal('body' in inbox[0]!, false); assert.equal('fields' in inbox[0]!, false); // The list carries summaries only.
+  assert.equal((await relay.get(token, sms.requestId)).status, 'pending_phone');
+  const anotherSms = await relay.create(token, input('sms-quota-independent-of-forms'));
+  assert.equal(anotherSms.status, 'queued');
+  assert.deepEqual(await relay.forms.create(token, formInput('form-concurrent-1')), forms[0]);
+  await assert.rejects(relay.forms.create(token, { ...formInput('form-concurrent-1'), body: 'Changed' }), reason('idempotency_conflict'));
+  const before = await relay.forms.events(token);
+  await relay.forms.get(phone, forms[0]!.requestId);
+  assert.deepEqual(await relay.forms.events(token), before); // Fetching is never opening.
+  assert.equal((await relay.forms.get({ secret: token }, forms[0]!.requestId)).firstOpenedAt, null);
+});
+integration('taps and foreground openings dedupe per device and preserve offline observed times', async () => {
+  await allowForms(); const r = await relay.forms.create(token, formInput('tap-open-distinct'));
+  await relay.forms.observe(uid, did, r.requestId, { type: 'notification.tapped', occurredAt: time });
+  assert.equal((await relay.forms.get({ secret: token }, r.requestId)).firstOpenedAt, null);
+  time += 1000;
+  await relay.forms.observe(uid, second, r.requestId, { type: 'request.opened', occurredAt: time });
+  time += 1000;
+  await relay.forms.submit(uid, did, r.requestId, formUpload('offline-upload'));
+  await Promise.all([1, 2].map(() => relay.forms.observe(uid, did, r.requestId, { type: 'request.opened', occurredAt: time - 1500 })));
+  const opened = await relay.forms.get({ secret: token }, r.requestId); assert.equal(opened.firstOpenedAt, time - 1500);
+  const events = (await relay.forms.events(token)).events;
+  assert.equal(events.filter(e => e.type === 'request.opened').length, 2);
+  assert.equal(events.filter(e => e.type === 'notification.tapped').length, 1);
+  assert.deepEqual(events.map(e => e.sequence), [1, 2, 3, 4, 5]);
+  assert.ok(!JSON.stringify(events).includes('Approved'));
+  const independent = new Relay(db, async () => {}, () => time);
+  assert.deepEqual((await independent.forms.events(token, events[1]!.id)).events, events.slice(2));
+});
+integration('first valid form submission wins across phones; retries are bound to ID and payload', async () => {
+  await allowForms(); const r = await relay.forms.create(token, formInput('first-form-wins'));
+  await assert.rejects(relay.forms.submit(uid, did, r.requestId, { submissionId: 'invalid', action: 'approve', values: {} }), reason('required_field'));
+  const uploads = [formUpload('upload-a', 'First'), formUpload('upload-b', 'Second')];
+  const responses = await Promise.all([relay.forms.submit(uid, did, r.requestId, uploads[0]!), relay.forms.submit(uid, second, r.requestId, uploads[1]!)]);
+  assert.ok(responses.every(r => r.status === 'submitted'));
+  const stored = (await db.collection('formRequests').doc(r.requestId).get()).data()!;
+  const winner = stored.winner.deviceId === did ? 0 : 1, device = winner === 0 ? did : second;
+  assert.equal((await relay.forms.result(token, r.requestId)).result?.values.note, uploads[winner]!.values.note);
+  assert.equal((await relay.forms.events(token)).events.filter(e => e.type === 'request.submitted').length, 1);
+  await relay.forms.submit(uid, device, r.requestId, uploads[winner]!);
+  await assert.rejects(relay.forms.submit(uid, device, r.requestId, { ...uploads[winner]!, values: { note: 'Changed' } }), reason('submission_conflict'));
+  time += 24 * 60 * MINUTE;
+  assert.equal((await relay.forms.result(token, r.requestId)).result, null);
+  assert.equal((await relay.forms.get({ secret: token }, r.requestId)).status, 'submitted');
+  await relay.forms.maintenance(); assert.equal((await db.collection('formResults').doc(r.requestId).get()).exists, false);
+});
+integration('form requests, answers, events, cursors, and subscriptions are caller-isolated', async () => {
+  await allowForms(); const r = await relay.forms.create(token, formInput('isolated-form'));
+  const other = await relay.createGrant(uid, '', 'Other caller', 30); await relay.forms.approve(uid, other.grantId, true);
+  await relay.forms.submit(uid, did, r.requestId, formUpload('private-answer'));
+  for (const op of [() => relay.forms.get({ secret: other.token }, r.requestId), () => relay.forms.result(other.token, r.requestId), () => relay.forms.cancel(other.token, r.requestId)]) await assert.rejects(op(), reason('request_not_found'));
+  assert.deepEqual((await relay.forms.events(other.token)).events, []);
+  await assert.rejects(relay.forms.events(other.token, (await relay.forms.events(token)).events[0]!.id), reason('invalid_cursor'));
+  await relay.register('unrelated', 'unrelated-phone', 'Unrelated', 'fcm');
+  await assert.rejects(relay.forms.get({ uid: 'unrelated', deviceId: 'unrelated-phone' }, r.requestId), reason('request_not_found'));
+  assert.equal((await relay.forms.inbox('unrelated', 'unrelated-phone')).length, 0);
+  await assert.rejects(relay.forms.approve('unrelated', grantId, true), reason('grant_not_found'));
+});
+integration('decline, cancellation races, expiry and removal of form access never revive requests', async () => {
+  await allowForms();
+  const declined = await relay.forms.create(token, formInput('form-decline'));
+  assert.equal((await relay.forms.submit(uid, did, declined.requestId, { submissionId: 'declining', action: 'decline', values: {} })).status, 'declined');
+  assert.equal((await relay.forms.result(token, declined.requestId)).result, null);
+  const race = await relay.forms.create(token, formInput('form-cancel-race'));
+  await Promise.all([relay.forms.cancel(token, race.requestId), relay.forms.submit(uid, did, race.requestId, formUpload('racing-upload'))]);
+  const result = await relay.forms.result(token, race.requestId);
+  assert.ok(['submitted', 'cancelled'].includes(result.status)); assert.equal(result.status === 'submitted', !!result.result);
+  const exp = await relay.forms.create(token, { ...formInput('form-short-expiry'), expiresInSeconds: 60 });
+  time += MINUTE;
+  assert.equal((await relay.forms.submit(uid, did, exp.requestId, formUpload('too-late'))).status, 'expired');
+  const pending = await relay.forms.create(token, formInput('remove-forms-access'));
+  await relay.forms.approve(uid, grantId, false);
+  assert.equal((await relay.forms.get(phone, pending.requestId)).status, 'cancelled');
+  await assert.rejects(relay.forms.events(token), reason('forms_approval_required'));
+  await relay.checkAgent(token); // SMS permission remains valid.
+});
+integration('SMS helper readiness and timeout are independent of the form deadline and SMS capture is serialized', async () => {
+  await allowForms();
+  const r = await relay.forms.create(token, { ...formInput('form-sms-helper'), fields: [{ id: 'code', type: 'text', input: 'sms_code', label: 'Code', required: true }] });
+  const next = await relay.forms.create(token, { ...formInput('form-next-helper'), fields: [{ id: 'code', type: 'text', input: 'sms_code', label: 'Code' }] });
+  const ready = { type: 'input.ready' as const, fieldId: 'code', listenerStartedAt: time };
+  await relay.forms.observe(uid, did, r.requestId, ready);
+  await relay.forms.observe(uid, did, r.requestId, ready);
+  await assert.rejects(relay.forms.observe(uid, did, next.requestId, ready), reason('sms_listener_busy'));
+  const sms = await relay.create(token, input('helper-blocks-legacy-listener'));
+  await assert.rejects(relay.transition(phone, sms.requestId, 'ready', null, undefined, time), reason('sms_listener_busy'));
+  await relay.forms.submit(uid, second, next.requestId, { submissionId: 'manual-no-listener', action: 'approve', values: { code: '123456' } });
+  time += 5 * MINUTE; await relay.forms.maintenance(); await relay.forms.maintenance();
+  assert.equal((await relay.forms.get(phone, r.requestId)).status, 'pending');
+  await assert.rejects(relay.forms.observe(uid, did, r.requestId, { ...ready, listenerStartedAt: time }), reason('input_already_started'));
+  const events = (await relay.forms.events(token)).events.filter(e => e.requestId === r.requestId);
+  assert.equal(events.filter(e => e.type === 'input.ready').length, 1);
+  assert.equal(events.filter(e => e.type === 'input.timeout').length, 1);
+  await relay.forms.submit(uid, did, r.requestId, { submissionId: 'after-helper-timeout', action: 'approve', values: { code: '654321' } });
+  assert.equal((await relay.forms.result(token, r.requestId)).result?.values.code, '654321');
+});
+integration('transactional outbox leases tolerate duplicate workers, failures and a lost wakeup', async () => {
+  await allowForms();
+  const { Forms } = await import('../src/forms.js');
+  let callbacks: { id: string; type: string }[] = [], fail = true;
+  const forms = new Forms(relay, async () => { throw Error('tasks temporarily down'); }, async (_url, _secret, event) => {
+    callbacks.push(event as { id: string; type: string }); if (fail) { fail = false; throw Error('timeout'); }
+  });
+  const hook = await forms.registerWebhook(token, { url: 'https://8.8.8.8/callback', events: ['request.created', 'request.submitted', 'notification.accepted'] });
+  assert.ok(hook.secret); assert.equal('secret' in (await forms.webhooks(token))[0]!, false);
+  const r = await forms.create(token, formInput('durable-outbox'));
+  const jobs = await db.collection('deliveryOutbox').get(); assert.equal(jobs.size, 3);
+  await Promise.all(jobs.docs.flatMap(d => [forms.deliver(d.id), forms.deliver(d.id)]));
+  assert.equal(sends.length, 2); assert.equal(callbacks.length, 1);
+  await forms.submit(uid, did, r.requestId, formUpload('webhook-submit'));
+  await forms.maintenance(); // Submission callback can arrive before the failed created callback.
+  assert.ok(callbacks.some(e => e.type === 'request.submitted'));
+  time += MINUTE; await forms.maintenance();
+  const created = callbacks.filter(e => e.type === 'request.created');
+  assert.equal(created.length, 2); assert.equal(created[0]!.id, created[1]!.id);
+  assert.equal((await db.collection('deliveryOutbox').get()).size, 0);
+  const events = (await forms.events(token)).events;
+  assert.equal(events.filter(e => e.type === 'notification.accepted').length, 2);
+  assert.ok(!JSON.stringify(callbacks).includes('Approved'));
+  await forms.webhooks(token, hook.id); assert.equal((await forms.webhooks(token)).length, 0);
+});
+integration('v2 REST, MCP, and SSE authenticate, replay from durable storage and close before request timeout', async () => {
+  await allowForms(); let server: Server | undefined, secondServer: Server | undefined;
+  const options = { verifyOwner: async (secret: string) => { if (secret !== 'owner-session') throw Error('bad owner'); return { uid, authTime: time / 1000 }; },
+    verifyScheduler: async () => { throw Error('bad worker'); }, deleteIdentity: async () => {}, sseDurationMs: 100 };
+  const client = new Client({ name: 'forms-test', version: '1' });
+  try {
+    server = app(relay, options).listen(0, '127.0.0.1');
+    secondServer = app(new Relay(db, async () => {}, () => time), options).listen(0, '127.0.0.1');
+    await Promise.all([server, secondServer].map(s => new Promise<void>(resolve => s!.once('listening', resolve))));
+    const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+    const base2 = `http://127.0.0.1:${(secondServer.address() as { port: number }).port}`;
+    const headers = { authorization: `Bearer ${token}`, 'content-type': 'application/json' };
+    const created = await fetch(base + '/v2/requests', { method: 'POST', headers, body: JSON.stringify(formInput('rest-forms')) }); assert.equal(created.status, 201);
+    const r = await created.json() as { requestId: string };
+    assert.equal((await fetch(base + `/v2/devices/${did}/inbox`, { headers })).status, 401);
+    assert.equal((await fetch(base + `/v2/devices/${did}/inbox`, { headers: { authorization: 'Bearer owner-session' } })).status, 200);
+    const first = await fetch(base + '/v2/events/stream', { headers });
+    const stream = await first.text(); assert.ok(stream.includes('event: request.created')); assert.ok(stream.includes(': heartbeat'));
+    const cursor = (await relay.forms.events(token)).cursor!;
+    const submit = await fetch(base + `/v2/devices/${did}/requests/${r.requestId}/submissions`, { method: 'POST', headers: { ...headers, authorization: 'Bearer owner-session' }, body: JSON.stringify(formUpload('rest-upload')) }); assert.equal(submit.status, 200);
+    const replay = await fetch(base2 + '/v2/events/stream', { headers: { ...headers, 'Last-Event-ID': cursor } });
+    const replayed = await replay.text(); assert.ok(replayed.includes('event: request.submitted')); assert.ok(!replayed.includes('event: request.created')); assert.ok(!replayed.includes('Approved'));
+    assert.equal((await fetch(base + '/v2/events/stream?cursor=bogus', { headers })).status, 400);
+    await client.connect(new StreamableHTTPClientTransport(new URL(base + '/mcp'), { requestInit: { headers } }));
+    const result = await client.callTool({ name: 'get_request_result', arguments: { requestId: r.requestId } });
+    assert.equal(JSON.parse((result.content as { text: string }[])[0]!.text).result.values.note, 'Approved');
+    assert.equal((await fetch(base + '/internal/delivery', { method: 'POST', headers })).status, 401);
+  } finally { await client.close(); await Promise.all([server, secondServer].map(s => new Promise<void>(resolve => s ? s.close(() => resolve()) : resolve()))); }
+});
+integration('general request data and webhook credentials are removed with the account; retained metadata expires', async () => {
+  await allowForms(); const r = await relay.forms.create(token, formInput('form-delete-account'));
+  await relay.forms.submit(uid, did, r.requestId, formUpload('delete-answer'));
+  const terminal = time; time += 7 * 24 * 60 * MINUTE;
+  await assert.rejects(relay.forms.get(phone, r.requestId), reason('request_not_found'));
+  assert.equal((await relay.forms.events(token)).events.length, 0);
+  await relay.forms.maintenance(); assert.equal((await db.collection('formRequests').doc(r.requestId).get()).exists, false);
+  assert.equal((await db.collection('requestEvents').where('requestId', '==', r.requestId).get()).size, 0);
+  time = terminal; await relay.forms.create(token, formInput('form-account-delete'));
+  await relay.deleteAccount(uid);
+  for (const collection of ['formRequests', 'formResults', 'requestEvents', 'deliveryOutbox', 'grants']) assert.equal((await db.collection(collection).where('ownerId', '==', uid).get()).size, 0);
+});
+
+integration('delivery leases recover a dead worker and a grant cancellation resumes after process loss', async () => {
+  await allowForms(); const r = await relay.forms.create(token, formInput('worker-process-loss'));
+  const jobs = await db.collection('deliveryOutbox').get();
+  for (const doc of jobs.docs) await doc.ref.update({ lease: 'dead-worker', nextAt: time + MINUTE, attempts: 1 });
+  await relay.forms.dispatch(); assert.equal(sends.length, 0);
+  time += MINUTE;
+  const restarted = new Relay(db, async fcm => { sends.push(fcm); }, () => time);
+  await restarted.forms.dispatch(); assert.equal(sends.length, 2);
+  await db.collection('grants').doc(grantId).update({ formsApproved: false, formsCancellationPending: true });
+  await restarted.forms.maintenance();
+  assert.equal((await restarted.forms.get(phone, r.requestId)).status, 'cancelled');
+  assert.equal((await db.collection('grants').doc(grantId).get()).data()?.formsCancellationPending, false);
+});
+integration('a slow expired-event page cannot hide retained events from polling', async () => {
+  await allowForms();
+  const first = await relay.forms.create(token, formInput('old-retained-events'));
+  await relay.forms.cancel(token, first.requestId);
+  const expired = await db.collection('requestEvents').get();
+  for (const doc of expired.docs) await doc.ref.update({ purgeAt: new Date(time - 1) });
+  const next = await relay.forms.create(token, formInput('new-retained-events'));
+  const page = await relay.forms.events(token);
+  assert.equal(page.events.length, 1); assert.equal(page.events[0]!.requestId, next.requestId);
+  assert.equal(page.cursor, page.events[0]!.id);
 });

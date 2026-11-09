@@ -33,6 +33,7 @@ fun SmsRequestScreen(
     Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
         Column(Modifier.fillMaxSize().safeDrawingPadding().imePadding().verticalScroll(rememberScrollState())
             .padding(20.dp), verticalArrangement = Arrangement.spacedBy(20.dp)) {
+            if (request.active) TextButton(onClick = onClose) { Text("Back to inbox") }
             Text("${request.caller} — ${request.title}", style = MaterialTheme.typography.headlineSmall,
                 fontWeight = FontWeight.SemiBold)
             MarkdownMessage(request.purpose)

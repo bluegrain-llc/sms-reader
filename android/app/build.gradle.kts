@@ -14,8 +14,8 @@ android {
         applicationId = "com.bluegrain.smsrelay"
         minSdk = 26
         targetSdk = 36
-        versionCode = 6
-        versionName = "0.4.2"
+        versionCode = 7
+        versionName = "0.5.0"
         manifestPlaceholders["relayHost"] = runCatching { URI(setting("RELAY_URL")).host }.getOrNull() ?: "relay.invalid"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         for (key in listOf("RELAY_URL", "FIREBASE_APP_ID", "FIREBASE_API_KEY", "FIREBASE_PROJECT_ID", "FIREBASE_SENDER_ID", "GOOGLE_WEB_CLIENT_ID")) {

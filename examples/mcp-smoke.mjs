@@ -8,7 +8,10 @@ try {
     requestInit: { headers: { authorization: `Bearer ${token}` } },
   }));
   const tools = await client.listTools();
-  if (tools.tools.length !== 3) throw Error('Unexpected tool list');
+  const names = new Set(tools.tools.map(tool => tool.name));
+  for (const name of ['request_sms_code', 'get_sms_code_request', 'cancel_sms_code_request']) {
+    if (!names.has(name)) throw Error(`Missing SMS tool: ${name}`);
+  }
   const result = await client.callTool({ name: 'request_sms_code', arguments: { purpose: 'MCP connection smoke test — no SMS needed', idempotencyKey: crypto.randomUUID() } });
   if (result.isError) throw Error('Request failed');
   const { requestId } = JSON.parse(result.content[0].text);

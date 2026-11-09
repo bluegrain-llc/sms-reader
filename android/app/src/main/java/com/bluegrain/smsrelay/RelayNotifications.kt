@@ -26,13 +26,13 @@ object RelayNotifications {
     val validId = Regex("^[a-f0-9]{64}$")
     fun createChannel(context: Context) {
         context.getSystemService(NotificationManager::class.java).createNotificationChannel(
-            NotificationChannel(CHANNEL, "Code approval requests", NotificationManager.IMPORTANCE_HIGH)
-                .apply { description = "Open the app to approve an upcoming code" })
+            NotificationChannel(CHANNEL, "Requests", NotificationManager.IMPORTANCE_HIGH)
+                .apply { description = "Information, decisions and SMS code requests" })
     }
     fun enabled(context: Context): Boolean = NotificationManagerCompat.from(context).areNotificationsEnabled() &&
         context.getSystemService(NotificationManager::class.java).getNotificationChannel(CHANNEL)?.importance != NotificationManager.IMPORTANCE_NONE &&
         (Build.VERSION.SDK_INT < 33 || ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED)
-    fun show(context: Context, id: String, consent: Boolean = false) {
+    fun show(context: Context, id: String, consent: Boolean = false, kind: String? = null) {
         if (!validId.matches(id) || !enabled(context)) return
         val prefs = context.getSharedPreferences("notification_dedupe", Context.MODE_PRIVATE)
         val now = System.currentTimeMillis()
@@ -43,12 +43,12 @@ object RelayNotifications {
             putLong(id, now)
         }
         val tap = PendingIntent.getActivity(context, 0, Intent(context, MainActivity::class.java)
-            .setData("smsrelay://request/$id".toUri()).putExtra("requestId", id), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+            .setData("smsrelay://request/$id".toUri()).putExtra("requestId", id).putExtra("kind", kind).putExtra("notificationTap", true), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
         val notification = NotificationCompat.Builder(context, CHANNEL).setSmallIcon(com.bluegrain.smsrelay.R.drawable.ic_relay)
-            .setContentTitle(if (consent) "Review your SMS approval" else "A code has been requested")
+            .setContentTitle(if (consent) "Review your SMS approval" else if (kind == "form") "A response has been requested" else "A code has been requested")
             .setContentText("Open SMS Code Relay to review and continue.").setContentIntent(tap)
             .setVisibility(NotificationCompat.VISIBILITY_PRIVATE).setAutoCancel(true).setOnlyAlertOnce(true)
-            .setTimeoutAfter(10 * 60_000).build()
+            .setTimeoutAfter(if (kind == "form") 24 * 60 * 60_000L else 10 * 60_000L).build()
         try { NotificationManagerCompat.from(context).notify(id, 1, notification) }
         catch (_: SecurityException) {
             // Permission can be revoked between the eligibility check and posting.
@@ -62,8 +62,8 @@ class RelayMessagingService : FirebaseMessagingService() {
     override fun onMessageReceived(message: RemoteMessage) {
         val id = message.data["requestId"] ?: return
         if (!RelayNotifications.validId.matches(id)) return
-        if (RelayNotifications.enabled(this)) RelayNotifications.show(this, id)
-        else enqueue(id)
+        if (RelayNotifications.enabled(this)) RelayNotifications.show(this, id, kind = message.data["kind"])
+        else if (message.data["kind"] != "form") enqueue(id)
     }
     override fun onNewToken(token: String) { enqueue(null) }
     private fun enqueue(requestId: String?) {

@@ -185,4 +185,80 @@ class ApprovalScreenTest {
         compose.onNodeWithText("Review connection").performScrollTo().performClick()
         assertEquals("ABCDE-FG234", retried)
     }
+    private fun form() = RequestForm("form-1", "Expense assistant", "Review invoice", "## Invoice details\n\nChoose a category and approve.",
+        "pending", 600_000, listOf(
+            FormField("note", "Comment", "multiline", true, 1000, null, null, emptyList(), false),
+            FormField("category", "Category", "single_choice", true, 1000, null, null, listOf("food" to "Meals", "travel" to "Travel"), false),
+            FormField("code", "Verification code", "text", false, 10, null, null, emptyList(), true)),
+        listOf(FormAction("approve", "Approve invoice", "approve"), FormAction("decline", "Decline invoice", "decline")), null)
+
+    @Test fun generalFormNeedsExplicitSubmissionAfterManualEntryOrAutofill() {
+        var submissions = 0
+        var listened = false
+        var ui by androidx.compose.runtime.mutableStateOf(InboxState(form = form(), now = 0, foreground = true))
+        compose.setContent { RelayTheme { RequestFormScreen(ui, "phone", {},
+            { id, value -> ui = ui.copy(values = ui.values + (id to value)) }, { submissions++ }, {}, { listened = true }, {}) } }
+        compose.onNodeWithText("Invoice details").assertIsDisplayed()
+        compose.onNodeWithText("Comment *").performScrollTo().performTextInput("Business lunch")
+        compose.onNodeWithText("Meals").performScrollTo().performClick()
+        compose.onNodeWithText("Autofill from an upcoming SMS").performScrollTo().performClick()
+        compose.runOnIdle { assertEquals(true, listened); assertEquals(0, submissions); ui = ui.copy(values = ui.values + ("code" to "123456")) }
+        compose.onNodeWithText("Approve invoice").performScrollTo().performClick()
+        assertEquals(1, submissions)
+        assertEquals("Business lunch", ui.values["note"])
+        assertEquals("food", ui.values["category"])
+    }
+    @Test fun formBackLeavesPendingAndOpeningRequiresForegroundRendering() {
+        var backs = 0
+        var opens = 0
+        var submissions = 0
+        var ui by androidx.compose.runtime.mutableStateOf(InboxState(form = form(), now = 0))
+        compose.setContent { RelayTheme { RequestFormScreen(ui, "phone", { backs++ }, { _, _ -> }, { submissions++ }, { opens++ }, {}, {}) } }
+        compose.runOnIdle { assertEquals(0, opens); ui = ui.copy(foreground = true) }
+        compose.waitUntil { opens == 1 }
+        compose.onNodeWithText("Back to inbox").performScrollTo().performClick()
+        assertEquals(1, backs); assertEquals(0, submissions); assertEquals("pending", ui.form?.status)
+    }
+    @Test fun generalFormExpiryDisablesActionsAndReportsCompetingPhone() {
+        var ui by androidx.compose.runtime.mutableStateOf(InboxState(form = form(), now = 600_001))
+        compose.setContent { RelayTheme { RequestFormScreen(ui, "phone", {}, { _, _ -> }, {}, {}, {}, {}) } }
+        compose.onNodeWithText("This request has expired.").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("Approve invoice").assertDoesNotExist()
+        compose.runOnIdle { ui = ui.copy(form = form().copy(status = "submitted", completedBy = "other-phone")) }
+        compose.onNodeWithText("Answered on another phone.").performScrollTo().assertIsDisplayed()
+    }
+    @Test fun inboxRemainsAvailableWhileSmsIsListeningAndFormPermissionIsExplicit() {
+        var opened: String? = null
+        var approved = false
+        compose.setContent { RelayTheme { RelayScreen(RelayUiState(configured = true, signedIn = true, registered = true,
+            showSmsRequest = false, request = PhoneRequest("sms", "ready", "SMS bot", "SMS", null, 600_000, 300_000, null), now = 0,
+            grants = listOf(GrantRow("grant", "Expense assistant", false, 600_000))),
+            inbox = listOf(form()), onOpenForm = { opened = it }, onApproveForms = { _, value -> approved = value }) } }
+        compose.onNodeWithText("Return to SMS request").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("Open request").performScrollTo().performClick()
+        assertEquals("form-1", opened)
+        compose.onNodeWithText("Admin").performScrollTo().performClick()
+        compose.onNodeWithText("SMS requests only").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("Allow interactive requests").performScrollTo().performClick()
+        assertEquals(true, approved)
+    }
+
+    @Test fun formRendersNumberCheckboxMultipleChoiceAndNativeDateControl() {
+        val fields = listOf(
+            FormField("amount", "Amount", "number", true, 1000, 1.0, 100.0, emptyList(), false),
+            FormField("confirmed", "Confirmed", "checkbox", true, 1000, null, null, emptyList(), false),
+            FormField("tags", "Tags", "multiple_choice", false, 1000, null, null, listOf("tax" to "Tax", "work" to "Work"), false),
+            FormField("date", "Invoice date", "date", false, 1000, null, null, emptyList(), false))
+        var ui by androidx.compose.runtime.mutableStateOf(InboxState(form = form().copy(fields = fields), now = 0))
+        compose.setContent { RelayTheme { RequestFormScreen(ui, "phone", {}, { id, value -> ui = ui.copy(values = ui.values + (id to value)) }, {}, {}, {}, {}) } }
+        compose.onNodeWithText("Amount *").performScrollTo().performTextInput("42.50")
+        compose.onNodeWithText("Confirmed *").performScrollTo().performClick()
+        compose.onNodeWithText("Tax").performScrollTo().performClick()
+        compose.onNodeWithText("Work").performScrollTo().performClick()
+        compose.onNodeWithText("Choose a date").performScrollTo().assertIsEnabled()
+        assertEquals("42.50", ui.values["amount"])
+        assertEquals(true, ui.values["confirmed"])
+        assertEquals(setOf("tax", "work"), ui.values["tags"])
+    }
+
 }

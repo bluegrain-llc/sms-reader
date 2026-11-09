@@ -41,6 +41,7 @@ class RelayRepository(context: Context) {
     private val prefs = context.getSharedPreferences("installation", Context.MODE_PRIVATE)
     private val auth get() = FirebaseAuth.getInstance()
     private val client = OkHttpClient.Builder().callTimeout(15, TimeUnit.SECONDS).build()
+    val ownerId get() = auth.currentUser?.uid.orEmpty()
     val signedIn get() = auth.currentUser != null
     val email get() = auth.currentUser?.email.orEmpty()
     val deviceId: String get() = prefs.getString("id", null) ?: UUID.randomUUID().toString().also { prefs.edit(commit = true) { putString("id", it) } }
@@ -83,6 +84,11 @@ class RelayRepository(context: Context) {
         autoConnect = true
         return r
     }
+    suspend fun inbox() = JSONArray(call("GET", "/v2/devices/$deviceId/inbox")).objects().map(RequestForm::from)
+    suspend fun form(id: String) = RequestForm.from(JSONObject(call("GET", "/v2/devices/$deviceId/requests/$id")))
+    suspend fun formObservation(id: String, body: JSONObject) = JSONObject(call("POST", "/v2/devices/$deviceId/requests/$id/events", body))
+    suspend fun submitForm(id: String, body: JSONObject) = RequestForm.from(JSONObject(call("POST", "/v2/devices/$deviceId/requests/$id/submissions", body)))
+    suspend fun approveForms(id: String, approved: Boolean) { call("PUT", "/v2/grants/$id/forms", JSONObject().put("approved", approved)) }
     suspend fun devices() = JSONArray(call("GET", "/v1/devices"))
     suspend fun grants() = JSONArray(call("GET", "/v1/callers"))
     suspend fun reviewConnection(code: String) = ConnectionReview.from(JSONObject(call("POST", "/v1/connections/review", JSONObject().put("userCode", code))))
