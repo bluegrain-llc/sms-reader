@@ -120,6 +120,11 @@ jobs:
           log-accepted-android-sdk-licenses: false
       - uses: gradle/actions/setup-gradle@v4
       - run: sdkmanager 'platforms;android-36' 'build-tools;36.0.0'
+      - name: Free unused toolchains for emulator storage
+        run: |
+          : "${ANDROID_HOME:?Android SDK location is required}"
+          sudo rm -rf /usr/share/dotnet "$ANDROID_HOME/ndk"
+          df -h "$ANDROID_HOME"
       - name: Enable KVM
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
