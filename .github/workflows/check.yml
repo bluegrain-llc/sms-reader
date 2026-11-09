@@ -130,6 +130,8 @@ jobs:
           api-level: 36
           arch: x86_64
           target: google_apis
+          disk-size: 2048M
+          emulator-boot-timeout: 300
           disable-animations: true
           working-directory: android
           script: ./gradlew connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=com.bluegrain.smsrelay.ApprovalScreenTest --console=plain
