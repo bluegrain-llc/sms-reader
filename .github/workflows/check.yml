@@ -1,0 +1,174 @@
+name: CI and delivery
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  group: verify-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  server-unit:
+    name: Server unit tests and type check
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: npm run test:unit
+      - run: npm audit --omit=dev
+
+  server-integration:
+    name: Firestore, Auth, REST and MCP integration tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - run: npm ci
+      - run: npm run test:integration
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: firebase-emulator-logs
+          path: '*-debug.log'
+          retention-days: 7
+
+  container:
+    name: Container build and HTTP smoke test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -f server/Dockerfile -t sms-code-relay:local .
+      - run: scripts/container-smoke.sh
+      - run: docker save sms-code-relay:local | gzip > /tmp/relay-image.tar.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: relay-container
+          path: /tmp/relay-image.tar.gz
+          retention-days: 7
+
+  android-unit:
+    name: Android unit tests, lint and build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - uses: android-actions/setup-android@v3
+      - uses: gradle/actions/setup-gradle@v4
+      - run: sdkmanager 'platforms;android-36' 'build-tools;36.0.0'
+      - run: ./gradlew testDebugUnitTest lintDebug assembleDebug assembleDebugAndroidTest --console=plain
+        working-directory: android
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: android-unit-and-lint-reports
+          path: android/app/build/reports/
+          retention-days: 7
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-debug-apks
+          path: |
+            android/app/build/outputs/apk/debug/*.apk
+            android/app/build/outputs/apk/androidTest/debug/*.apk
+          if-no-files-found: error
+          retention-days: 14
+
+  android-integration:
+    name: Android emulator UI integration tests
+    needs: android-unit
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - uses: android-actions/setup-android@v3
+      - uses: gradle/actions/setup-gradle@v4
+      - run: sdkmanager 'platforms;android-36' 'build-tools;36.0.0'
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 36
+          arch: x86_64
+          target: google_apis
+          disable-animations: true
+          working-directory: android
+          script: ./gradlew connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=com.bluegrain.smsrelay.ApprovalScreenTest --console=plain
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: android-integration-reports
+          path: |
+            android/app/build/reports/androidTests/
+            android/app/build/outputs/androidTest-results/
+          retention-days: 7
+
+  deliver:
+    name: Publish tested container
+    needs: [server-unit, server-integration, container, android-unit, android-integration]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: relay-container
+          path: /tmp/relay-container
+      - name: Load and tag the tested image
+        env:
+          REPOSITORY: ${{ github.repository }}
+          COMMIT_SHA: ${{ github.sha }}
+        run: |
+          gzip -dc /tmp/relay-container/relay-image.tar.gz | docker load
+          image="ghcr.io/${REPOSITORY,,}"
+          echo "RELAY_IMAGE=$image" >> "$GITHUB_ENV"
+          docker tag sms-code-relay:local "$image:$COMMIT_SHA"
+          docker tag sms-code-relay:local "$image:latest"
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Push versioned and latest images
+        env:
+          COMMIT_SHA: ${{ github.sha }}
+        run: |
+          docker push "$RELAY_IMAGE:$COMMIT_SHA"
+          docker push "$RELAY_IMAGE:latest"
+          echo "Container: \`$RELAY_IMAGE:$COMMIT_SHA\`" >> "$GITHUB_STEP_SUMMARY"

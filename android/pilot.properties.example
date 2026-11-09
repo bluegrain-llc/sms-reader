@@ -1,0 +1,13 @@
+# Put these in ~/.gradle/gradle.properties or pass through environment variables.
+# Do not commit live values or signing passwords.
+RELAY_URL=https://your-cloud-run-service.run.app
+FIREBASE_APP_ID=1:1234567890:android:your-app-id
+FIREBASE_API_KEY=your-android-firebase-api-key
+FIREBASE_PROJECT_ID=your-firebase-project
+FIREBASE_SENDER_ID=1234567890
+# OAuth WEB application client ID, not Android client ID.
+GOOGLE_WEB_CLIENT_ID=1234567890-example.apps.googleusercontent.com
+RELAY_KEYSTORE=/absolute/private/path/sms-relay-pilot.jks
+RELAY_KEY_ALIAS=pilot
+RELAY_STORE_PASSWORD=provide-privately
+RELAY_KEY_PASSWORD=provide-privately

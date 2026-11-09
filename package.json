@@ -1,0 +1,20 @@
+{
+  "name": "sms-code-relay",
+  "private": true,
+  "workspaces": [
+    "server"
+  ],
+  "scripts": {
+    "build": "npm run build -w server",
+    "test": "npm run test:unit",
+    "test:unit": "npm run test:unit -w server",
+    "test:integration": "firebase emulators:exec --project demo-sms-relay --only auth,firestore 'npm run test:integration -w server'",
+    "test:emulator": "npm run test:integration"
+  },
+  "devDependencies": {
+    "firebase-tools": "^15.35.0"
+  },
+  "overrides": {
+    "rimraf": "^6.1.4"
+  }
+}

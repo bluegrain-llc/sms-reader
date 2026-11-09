@@ -1,0 +1,8 @@
+**
+!package.json
+!package-lock.json
+!server/
+!server/package.json
+!server/tsconfig.json
+!server/src/
+!server/src/**
