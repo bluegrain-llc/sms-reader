@@ -163,7 +163,7 @@ export class Relay {
         if (!active(r.status)) { tx.set(this.ref('accounts', uid), { queueIds: rest, hasWork: !!rest.length }, { merge: true }); return true; }
         // Android has no listener cancellation API. Do not activate the next caller
         // while every available phone may still be bound to a previous window.
-        if (!devices.some(d => (d.listenerUntil ?? 0) <= this.now())) return false;
+        if ((a.formListenerUntil ?? 0) > this.now() || !devices.some(d => (d.listenerUntil ?? 0) <= this.now())) return false;
         r.status = 'pending_phone'; r.deviceIds = devices.map(d => d.id); r.phones = Object.fromEntries(devices.map(d => [d.id, phonePending()]));
         r.notificationSent = false; r.nextNotificationAt = this.now();
         tx.set(this.ref('requests', id), r); this.audit(tx, r, r.status);
@@ -184,7 +184,7 @@ export class Relay {
       ensure(devices.length, 409, 'devices_unavailable');
       const queue = a.queueIds ?? []; ensure(queue.length < 20, 429, 'queue_full');
       const ownerRate = bump(a.rate ?? { start: this.now(), count: 0 }, this.now(), 5), grantRate = bump(g.rate, this.now(), 3);
-      const status = a.activeRequestId || queue.length || !devices.some(d => (d.listenerUntil ?? 0) <= this.now()) ? 'queued' : 'pending_phone';
+      const status = a.activeRequestId || queue.length || (a.formListenerUntil ?? 0) > this.now() || !devices.some(d => (d.listenerUntil ?? 0) <= this.now()) ? 'queued' : 'pending_phone';
       const r: CodeRequest = { id, ownerId: g.ownerId, deviceId: devices[0]!.id, deviceIds: devices.map(d => d.id),
         phones: Object.fromEntries(devices.map(d => [d.id, phonePending()])), grantId: g.id, callerName: g.callerName,
         purpose: input.purpose, title: input.title ?? 'Verification code', senderPhone: input.senderPhone ?? null, fingerprint, status, reason: null,

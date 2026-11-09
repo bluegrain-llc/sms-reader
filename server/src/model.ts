@@ -27,7 +27,7 @@ export interface Grant {
   revoked: boolean; expiresAt: number; createdAt: number; rate: Rate;
   managerId?: string; callerId?: string; formRate?: Rate;
 }
-export interface Account { deleting?: boolean; activeRequestId?: string | null; queueIds?: string[]; hasWork?: boolean; formRate?: Rate; rate?: Rate; connectionRate?: Rate }
+export interface Account { formListenerRequestId?: string; formListenerUntil?: number; deleting?: boolean; activeRequestId?: string | null; queueIds?: string[]; hasWork?: boolean; formRate?: Rate; rate?: Rate; connectionRate?: Rate }
 export interface PhoneState {
   status: Status; reason: string | null; listeningDeadline: number | null;
   sent: boolean; lease: number; attempts: number; nextAt: number;

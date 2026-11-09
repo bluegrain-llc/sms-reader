@@ -2,7 +2,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { Transaction } from 'firebase-admin/firestore';
 import { z } from 'zod';
 import type { Relay } from './relay.js';
-import { bump, ensure, Grant, hash, HISTORY, MINUTE } from './model.js';
+import { Account, bump, ensure, Grant, hash, HISTORY, MINUTE } from './model.js';
 import { DAY, FormRequest, formSchema, formView, observationSchema, RelayEvent, Submission, submissionSchema, validateSubmission, webhookSchema } from './forms-model.js';
 import { sendWebhook, validateDestination } from './webhooks.js';
 
@@ -35,10 +35,11 @@ export class Forms {
   }
   async context(tx: Transaction, id: string, auth: { secret: string } | { uid: string; deviceId: string }) {
     let g: FormGrant, device;
+    let account: Account;
     if ('secret' in auth) {
-      g = (await this.agent(tx, auth.secret)).grant;
+      const identity = await this.agent(tx, auth.secret); g = identity.grant; account = identity.account;
     } else {
-      await this.relay.account(tx, auth.uid); device = await this.relay.device(tx, auth.uid, auth.deviceId);
+      account = await this.relay.account(tx, auth.uid); device = await this.relay.device(tx, auth.uid, auth.deviceId);
     }
     const r = (await tx.get(this.ref('formRequests', id))).data() as FormRequest | undefined;
     ensure(r && ('secret' in auth ? r.grantId === g!.id && r.ownerId === g!.ownerId : r.ownerId === auth.uid), 404, 'request_not_found');
@@ -46,7 +47,7 @@ export class Forms {
     if (!('secret' in auth)) g = (await tx.get(this.ref('grants', r.grantId))).data() as FormGrant;
     ensure(g!, 409, 'grant_unavailable');
     const valid = !!g! && !!g!.formsApproved && await this.relay.validGrant(tx, g!);
-    return { r, g: g!, device, valid };
+    return { r, g: g!, device, valid, account };
   }
   event(tx: Transaction, r: FormRequest, g: FormGrant, type: RelayEvent['type'], extra: { deviceId?: string; fieldId?: string; observedAt?: number } = {}) {
     const sequence = (g.eventSequence ?? 0) + 1; g.eventSequence = sequence; r.sequence++;
@@ -114,7 +115,8 @@ export class Forms {
   async observe(uid: string, deviceId: string, id: string, input: z.infer<typeof observationSchema>) {
     const data = observationSchema.parse(input);
     const result = await this.db.runTransaction(async tx => {
-      const { r, g, device, valid } = await this.context(tx, id, { uid, deviceId });
+      const { r, g, device, valid, account } = await this.context(tx, id, { uid, deviceId });
+      const devices = data.type === 'input.ready' ? await this.relay.devices(tx, uid) : [];
       await this.expire(tx, r, g, valid);
       if (data.type === 'input.ready') {
         if (r.status !== 'pending') return formView(r);
@@ -124,10 +126,14 @@ export class Forms {
         const old = r.helpers[deviceId];
         if (old) { ensure(old.startedAt === data.listenerStartedAt, 409, 'input_already_started'); return formView(r); }
         ensure(data.listenerStartedAt <= this.now() + 5000 && data.listenerStartedAt > this.now() - MINUTE, 409, 'listener_start_stale');
+        const held = (account.formListenerUntil ?? 0) > this.now();
+        ensure(!account.activeRequestId && (held ? account.formListenerRequestId === r.id : !(account.queueIds?.length) && devices.every(d => (d.listenerUntil ?? 0) <= this.now())), 409, 'sms_listener_busy');
         ensure((device!.listenerUntil ?? 0) <= this.now(), 409, 'sms_listener_busy');
-        const until = Math.min(r.expiresAt, data.listenerStartedAt + 5 * MINUTE, this.now() + 5 * MINUTE);
+        // Form expiry cannot cancel Android's five-minute platform listener.
+        const until = Math.min(data.listenerStartedAt + 5 * MINUTE, this.now() + 5 * MINUTE);
         r.helpers[deviceId] = { fieldId: data.fieldId, readyAt: this.now(), startedAt: data.listenerStartedAt, until };
         tx.update(this.ref('devices', deviceId), { listenerUntil: until, formListenerUntil: until });
+        tx.set(this.ref('accounts', uid), { formListenerRequestId: r.id, formListenerUntil: Math.max(account.formListenerUntil ?? 0, until) }, { merge: true });
         r.helperNextAt = Math.min(r.helperNextAt ?? until, until);
         this.event(tx, r, g, data.type, { deviceId, fieldId: data.fieldId });
       } else {

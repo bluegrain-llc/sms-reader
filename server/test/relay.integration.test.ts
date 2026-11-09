@@ -457,15 +457,18 @@ integration('SMS helper readiness and timeout are independent of the form deadli
   await relay.forms.observe(uid, did, r.requestId, ready);
   await relay.forms.observe(uid, did, r.requestId, ready);
   await assert.rejects(relay.forms.observe(uid, did, next.requestId, ready), reason('sms_listener_busy'));
+  await assert.rejects(relay.forms.observe(uid, second, next.requestId, ready), reason('sms_listener_busy'));
+  await relay.forms.observe(uid, second, r.requestId, ready); // Multiple phones can listen for the same helper.
   const sms = await relay.create(token, input('helper-blocks-legacy-listener'));
-  await assert.rejects(relay.transition(phone, sms.requestId, 'ready', null, undefined, time), reason('sms_listener_busy'));
+  assert.equal(sms.status, 'queued');
+  await assert.rejects(relay.transition(phone, sms.requestId, 'ready', null, undefined, time), reason('request_not_ready'));
   await relay.forms.submit(uid, second, next.requestId, { submissionId: 'manual-no-listener', action: 'approve', values: { code: '123456' } });
   time += 5 * MINUTE; await relay.forms.maintenance(); await relay.forms.maintenance();
   assert.equal((await relay.forms.get(phone, r.requestId)).status, 'pending');
   await assert.rejects(relay.forms.observe(uid, did, r.requestId, { ...ready, listenerStartedAt: time }), reason('input_already_started'));
   const events = (await relay.forms.events(token)).events.filter(e => e.requestId === r.requestId);
-  assert.equal(events.filter(e => e.type === 'input.ready').length, 1);
-  assert.equal(events.filter(e => e.type === 'input.timeout').length, 1);
+  assert.equal(events.filter(e => e.type === 'input.ready').length, 2);
+  assert.equal(events.filter(e => e.type === 'input.timeout').length, 2);
   await relay.forms.submit(uid, did, r.requestId, { submissionId: 'after-helper-timeout', action: 'approve', values: { code: '654321' } });
   assert.equal((await relay.forms.result(token, r.requestId)).result?.values.code, '654321');
 });
@@ -559,4 +562,35 @@ integration('a slow expired-event page cannot hide retained events from polling'
   const page = await relay.forms.events(token);
   assert.equal(page.events.length, 1); assert.equal(page.events[0]!.requestId, next.requestId);
   assert.equal(page.cursor, page.events[0]!.id);
+});
+
+integration('a general SMS helper cannot start during legacy capture and queued SMS waits through form completion', async () => {
+  await allowForms();
+  const legacy = await relay.create(token, input('legacy-helper-exclusion'));
+  const form = await relay.forms.create(token, { ...formInput('owner-helper-exclusion'), fields: [{ id: 'code', type: 'text', input: 'sms_code', label: 'Code' }] });
+  await assert.rejects(relay.forms.observe(uid, second, form.requestId, { type: 'input.ready', fieldId: 'code', listenerStartedAt: time }), reason('sms_listener_busy'));
+  await relay.transition({ secret: token }, legacy.requestId, 'cancelled');
+  await relay.forms.observe(uid, did, form.requestId, { type: 'input.ready', fieldId: 'code', listenerStartedAt: time });
+  const queued = await relay.create(token, input('queued-during-form-helper'));
+  assert.equal(queued.status, 'queued');
+  await relay.forms.submit(uid, second, form.requestId, { submissionId: 'form-done-helper-still-alive', action: 'approve', values: { code: '123456' } });
+  await relay.maintenance(); assert.equal((await relay.get(token, queued.requestId)).status, 'queued');
+  time += 5 * MINUTE; await relay.maintenance();
+  assert.equal((await relay.get(token, queued.requestId)).status, 'pending_phone');
+});
+integration('competing forms on different phones cannot both become SMS-ready', async () => {
+  await allowForms();
+  const definition = (key: string) => ({ ...formInput(key), expiresInSeconds: 60, fields: [{ id: 'code', type: 'text' as const, input: 'sms_code' as const, label: 'Code' }] });
+  const requests = await Promise.all([relay.forms.create(token, definition('concurrent-helper-one')), relay.forms.create(token, definition('concurrent-helper-two'))]);
+  const outcomes = await Promise.allSettled(requests.map((r, i) => relay.forms.observe(uid, i === 0 ? did : second, r.requestId, { type: 'input.ready', fieldId: 'code', listenerStartedAt: time })));
+  assert.equal(outcomes.filter(o => o.status === 'fulfilled').length, 1);
+  const rejected = outcomes.find(o => o.status === 'rejected') as PromiseRejectedResult;
+  assert.ok(reason('sms_listener_busy')(rejected.reason));
+  assert.equal((await relay.forms.events(token)).events.filter(e => e.type === 'input.ready').length, 1);
+  assert.equal((await relay.forms.inbox(uid, did)).length, 2);
+  time += MINUTE; await relay.forms.maintenance();
+  const next = await relay.forms.create(token, { ...definition('after-short-form-expiry'), expiresInSeconds: 600 });
+  await assert.rejects(relay.forms.observe(uid, second, next.requestId, { type: 'input.ready', fieldId: 'code', listenerStartedAt: time }), reason('sms_listener_busy'));
+  time += 4 * MINUTE;
+  await relay.forms.observe(uid, second, next.requestId, { type: 'input.ready', fieldId: 'code', listenerStartedAt: time });
 });
