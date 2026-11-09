@@ -238,7 +238,8 @@ class ApprovalScreenTest {
         compose.onNodeWithText("Open request").performScrollTo().performClick()
         assertEquals("form-1", opened)
         compose.onNodeWithText("Admin").performScrollTo().performClick()
-        compose.onNodeWithText("SMS requests only").performScrollTo().assertIsDisplayed()
+        compose.onNode(hasScrollAction()).performScrollToNode(hasText("SMS requests only"))
+        compose.onNodeWithText("SMS requests only").assertIsDisplayed()
         compose.onNodeWithText("Allow interactive requests").performScrollTo().performClick()
         assertEquals(true, approved)
     }
