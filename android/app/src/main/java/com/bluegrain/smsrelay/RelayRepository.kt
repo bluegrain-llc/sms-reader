@@ -79,7 +79,7 @@ class RelayRepository(context: Context) {
     }
     suspend fun register(): JSONObject {
         val fcm = FirebaseMessaging.getInstance().token.await()
-        val r = JSONObject(call("PUT", "/v1/devices/$deviceId", JSONObject().put("name", "${Build.MANUFACTURER} ${Build.MODEL}").put("fcmToken", fcm)))
+        val r = JSONObject(call("PUT", "/v1/devices/$deviceId", JSONObject().put("name", "${Build.MANUFACTURER} ${Build.MODEL}").put("fcmToken", fcm).put("wizardVersion", 1)))
         registered = true
         autoConnect = true
         return r

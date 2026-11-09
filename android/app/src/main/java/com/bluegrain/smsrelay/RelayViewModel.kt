@@ -107,6 +107,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         val d = (0 until devices.length()).map { devices.getJSONObject(it) }.find { it.optString("deviceId") == repo.deviceId }
         if (d == null && repo.registered) repo.autoConnect = false
         repo.registered = d != null
+        if (d != null && d.optInt("wizardVersion") != 1) repo.register()
         mutable.update { it.copy(registered = d != null, autoConnect = repo.autoConnect, paused = d?.getBoolean("paused") ?: false,
             devices = (0 until devices.length()).map { devices.getJSONObject(it).let { row ->
                 DeviceRow(row.getString("deviceId"), row.getString("name"), row.getBoolean("paused"), row.getString("deviceId") == repo.deviceId) } }) }

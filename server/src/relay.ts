@@ -60,7 +60,7 @@ export class Relay {
     } else if (r.status === 'completed' && (r.resultExpiresAt ?? 0) <= this.now()) this.finish(tx, r, a, 'expired', 'result_expired');
     return r;
   }
-  async register(uid: string, id: string, name: string, fcmToken: string) {
+  async register(uid: string, id: string, name: string, fcmToken: string, wizardVersion?: 1) {
     return this.db.runTransaction(async tx => {
       await this.account(tx, uid);
       const old = (await tx.get(this.ref('devices', id))).data() as Device | undefined;
@@ -71,6 +71,7 @@ export class Relay {
         id, ownerId: uid, name, fcmToken, paused: false, deleted: false, activeRequestId: null,
         rate: { start: this.now(), count: 0 }, updatedAt: this.now(),
       };
+      d.wizardVersion = wizardVersion ?? null;
       tx.set(this.ref('devices', id), d);
       return { deviceId: id, name, paused: d.paused, activeRequestId: null };
     });
@@ -91,7 +92,7 @@ export class Relay {
     const id = account.data()?.activeRequestId as string | undefined;
     const r = id ? (await this.ref('requests', id).get()).data() as CodeRequest | undefined : undefined;
     return snap.docs.map(s => s.data() as Device).filter(d => !d.deleted).map(d => ({
-      deviceId: d.id, name: d.name, paused: d.paused,
+      deviceId: d.id, name: d.name, paused: d.paused, wizardVersion: d.wizardVersion ?? null,
       activeRequestId: r && active(r.status) && !d.paused && this.ids(r).includes(d.id) && active(this.phones(r)[d.id]?.status ?? 'failed') ? r.id : null,
     }));
   }

@@ -2,7 +2,7 @@
 
 ## Interactive requests
 
-The additive `/v2` interface supports native forms, separate opening observations, authenticated answer retrieval, event polling/SSE and signed webhooks. See the [v2 API and delivery contract](REQUEST_INBOX.md). Existing routes and SMS tools below preserve the legacy compatibility path.
+The additive `/v2` interface supports native forms and multi-step wizards, separate opening observations, authenticated answer retrieval, event polling/SSE and signed webhooks. See the [v2 API and delivery contract](REQUEST_INBOX.md). Wizard definitions use `steps` with field IDs and optional predicates on earlier answers; Android advertises `wizardVersion: 1` during device registration. Existing routes and SMS tools below preserve the legacy compatibility path.
 
 
 Production uses HTTPS with `Cache-Control: no-store`. JSON bodies are limited to 32 KiB. Errors contain only `{ "error": "machine_readable_reason" }`. Owner Firebase sessions and individual caller credentials have separate authority.

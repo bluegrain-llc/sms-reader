@@ -12,9 +12,15 @@ export const fieldSchema = z.discriminatedUnion('type', [
   z.object({ ...base, type: z.literal('date') }).strict(),
 ]);
 export const actionSchema = z.object({ id: idSchema, label: z.string().trim().min(1).max(80), type: z.enum(['submit', 'approve', 'decline', 'acknowledge']) }).strict();
+export const stepSchema = z.object({ id: idSchema, title: z.string().trim().min(1).max(120), body: z.string().max(4000).optional(),
+  fieldIds: z.array(idSchema).max(30), when: z.union([
+    z.object({ fieldId: idSchema, equals: z.union([z.string().max(4000), z.number().finite(), z.boolean()]) }).strict(),
+    z.object({ fieldId: idSchema, contains: idSchema }).strict(),
+  ]).optional() }).strict();
 export const formSchema = z.object({
   title: z.string().trim().min(1).max(80), body: z.string().min(1).max(16000),
   fields: z.array(fieldSchema).max(30).default([]), actions: z.array(actionSchema).min(1).max(8),
+  steps: z.array(stepSchema).min(2).max(12).optional(),
   expiresInSeconds: z.number().int().min(60).max(7 * 86400).default(86400),
   idempotencyKey: z.string().min(8).max(128),
 }).strict().superRefine((form, ctx) => {
@@ -25,9 +31,49 @@ export const formSchema = z.object({
     if (f.type === 'number' && f.min !== undefined && f.max !== undefined && f.min > f.max) ctx.addIssue({ code: 'custom', message: 'Invalid number bounds' });
   }
   if (form.fields.filter(f => 'input' in f && f.input === 'sms_code').length > 1) ctx.addIssue({ code: 'custom', message: 'Only one SMS helper per request' });
+  if (form.steps) {
+    const seen = new Set<string>();
+    if (!unique(form.steps.map(s => s.id))) ctx.addIssue({ code: 'custom', message: 'Duplicate step IDs' });
+    for (const step of form.steps) {
+      if (step.when) {
+        const condition = step.when, source = form.fields.find(f => f.id === condition.fieldId);
+        const value = 'equals' in condition ? condition.equals : condition.contains;
+        const compatible = source && ('contains' in condition
+          ? source.type === 'multiple_choice' && source.options.some(o => o.id === value)
+          : source.type === 'checkbox' ? typeof value === 'boolean'
+          : source.type === 'number' ? typeof value === 'number'
+          : source.type === 'single_choice' ? source.options.some(o => o.id === value)
+          : source.type !== 'multiple_choice' && typeof value === 'string');
+        if (!seen.has(condition.fieldId) || !compatible) ctx.addIssue({ code: 'custom', message: 'Step conditions must reference a compatible field from an earlier step' });
+      }
+      for (const id of step.fieldIds) {
+        if (seen.has(id) || !form.fields.some(f => f.id === id)) ctx.addIssue({ code: 'custom', message: 'Each wizard field must belong to exactly one step' });
+        seen.add(id);
+      }
+    }
+    if (seen.size !== form.fields.length) ctx.addIssue({ code: 'custom', message: 'All wizard fields must belong to a step' });
+  }
 });
 export type Definition = z.infer<typeof formSchema>;
 export type Values = Record<string, string | number | boolean | string[]>;
+export function visibleSteps(def: Definition, values: Values) {
+  const available = new Set<string>();
+  return (def.steps ?? []).filter(step => {
+    const c = step.when;
+    if (c) {
+      if (!available.has(c.fieldId)) return false;
+      const source = def.fields.find(f => f.id === c.fieldId)!;
+      const value = values[c.fieldId] ?? (source.type === 'checkbox' ? false : undefined);
+      if ('equals' in c ? value !== c.equals : !Array.isArray(value) || !value.includes(c.contains)) return false;
+    }
+    step.fieldIds.forEach(id => available.add(id)); return true;
+  });
+}
+export function visibleFields(def: Definition, values: Values) {
+  if (!def.steps) return def.fields;
+  const ids = new Set(visibleSteps(def, values).flatMap(s => s.fieldIds));
+  return def.fields.filter(f => ids.has(f.id));
+}
 export const submissionSchema = z.object({ submissionId: idSchema, action: idSchema,
   values: z.record(idSchema, z.union([z.string().max(4000), z.number().finite(), z.boolean(), z.array(idSchema).max(40)])) }).strict();
 export type Submission = z.infer<typeof submissionSchema>;
@@ -52,8 +98,10 @@ export interface RelayEvent {
 export function validateSubmission(def: Definition, input: Submission): 'submitted' | 'declined' {
   const action = def.actions.find(a => a.id === input.action); ensure(action, 400, 'unknown_action');
   if (action.type === 'decline') { ensure(!Object.keys(input.values).length, 400, 'decline_has_values'); return 'declined'; }
+  const fields = visibleFields(def, input.values);
   ensure(Object.keys(input.values).every(id => def.fields.some(f => f.id === id)), 400, 'unknown_field');
-  for (const f of def.fields) {
+  ensure(Object.keys(input.values).every(id => fields.some(f => f.id === id)), 400, 'hidden_field');
+  for (const f of fields) {
     const v = input.values[f.id], missing = v === undefined || v === '' || (Array.isArray(v) && !v.length);
     ensure(!f.required || !missing, 400, 'required_field');
     if (v === undefined) continue;

@@ -44,8 +44,8 @@ export function app(relay: Relay, options: HttpOptions) {
   app.get('/v1/devices', async (req, res) => { res.json(await relay.listDevices((await owner(req)).uid)); });
   app.put('/v1/devices/:deviceId', async (req, res) => {
     const { uid } = await owner(req);
-    const b = body(req, z.object({ name: z.string().trim().min(1).max(80), fcmToken: z.string().min(1).max(4096) }).strict());
-    res.json(await relay.register(uid, device(req), b.name, b.fcmToken));
+    const b = body(req, z.object({ name: z.string().trim().min(1).max(80), fcmToken: z.string().min(1).max(4096), wizardVersion: z.literal(1).optional() }).strict());
+    res.json(await relay.register(uid, device(req), b.name, b.fcmToken, b.wizardVersion));
   });
   app.patch('/v1/devices/:deviceId', async (req, res) => {
     const { uid } = await owner(req); const b = body(req, z.object({ paused: z.boolean() }).strict());
@@ -139,7 +139,7 @@ export function app(relay: Relay, options: HttpOptions) {
   app.post('/mcp', async (req, res) => {
     const secret = bearer(req); await relay.checkAgent(secret);
     // New stateless server per HTTP request; identity is never shared between clients.
-    const server = new McpServer({ name: 'sms-code-relay', version: '0.5.0' });
+    const server = new McpServer({ name: 'sms-code-relay', version: '0.6.0' });
     const tool = (fn: () => Promise<unknown>) => fn().then(result => ({
       content: [{ type: 'text' as const, text: JSON.stringify(result) }], structuredContent: result as Record<string, unknown>,
     })).catch(error => ({ isError: true, content: [{ type: 'text' as const, text: JSON.stringify({ error: error instanceof RelayError ? error.reason : 'internal_error' }) }] }));
@@ -153,7 +153,7 @@ export function app(relay: Relay, options: HttpOptions) {
     server.registerTool('cancel_sms_code_request', {
       description: 'Cancel this token’s request.', inputSchema: { requestId: idSchema },
     }, input => tool(() => relay.transition({ secret }, input.requestId, 'cancelled')));
-    server.registerTool('create_request', { description: 'Create an interactive request. Requires owner approval for forms in Admin.', inputSchema: formSchema.shape }, input => tool(() => relay.forms.create(secret, input)));
+    server.registerTool('create_request', { description: 'Create a form or multi-step wizard with optional conditional steps and one final submission. Requires owner approval for forms in Admin.', inputSchema: formSchema.shape }, input => tool(() => relay.forms.create(secret, input)));
     server.registerTool('inspect_request', { description: 'Inspect your request without marking it opened.', inputSchema: { requestId: idSchema } }, input => tool(() => relay.forms.get({ secret }, input.requestId)));
     server.registerTool('cancel_request', { description: 'Cancel your pending request.', inputSchema: { requestId: idSchema } }, input => tool(() => relay.forms.cancel(secret, input.requestId)));
     server.registerTool('get_request_result', { description: 'Retrieve accepted answers, retained for 24 hours.', inputSchema: { requestId: idSchema } }, input => tool(() => relay.forms.result(secret, input.requestId)));

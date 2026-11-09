@@ -43,6 +43,7 @@ export class Forms {
     }
     const r = (await tx.get(this.ref('formRequests', id))).data() as FormRequest | undefined;
     ensure(r && ('secret' in auth ? r.grantId === g!.id && r.ownerId === g!.ownerId : r.ownerId === auth.uid), 404, 'request_not_found');
+    ensure(!r.definition.steps || !device || device.wizardVersion === 1, 409, 'wizard_app_update_required');
     ensure(this.retained(r.purgeAt), 404, 'request_not_found');
     if (!('secret' in auth)) g = (await tx.get(this.ref('grants', r.grantId))).data() as FormGrant;
     ensure(g!, 409, 'grant_unavailable');
@@ -81,9 +82,9 @@ export class Forms {
       const id = hash(`v2:${g.id}:${definition.idempotencyKey}`), fingerprint = hash(canonical(definition));
       const old = (await tx.get(this.ref('formRequests', id))).data() as FormRequest | undefined;
       if (old) { ensure(this.retained(old.purgeAt), 410, 'request_retention_ended'); ensure(old.fingerprint === fingerprint, 409, 'idempotency_conflict'); await this.expire(tx, old, g, true); return formView(old); }
-      const devices = await this.relay.devices(tx, g.ownerId);
+      const devices = (await this.relay.devices(tx, g.ownerId)).filter(d => !definition.steps || d.wizardVersion === 1);
       const pending = await tx.get(this.db.collection('formRequests').where('ownerId', '==', g.ownerId).where('status', '==', 'pending').limit(101));
-      ensure(devices.length, 409, 'devices_unavailable'); ensure(pending.size < 100, 429, 'inbox_full');
+      ensure(devices.length, 409, definition.steps ? 'wizard_devices_unavailable' : 'devices_unavailable'); ensure(pending.size < 100, 429, 'inbox_full');
       const rate = bump(g.formRate ?? { start: this.now(), count: 0 }, this.now(), 30), ownerRate = bump(account.formRate ?? { start: this.now(), count: 0 }, this.now(), 100);
       const r: FormRequest = { id, grantId: g.id, ownerId: g.ownerId, callerName: g.callerName, definition, fingerprint, status: 'pending',
         createdAt: this.now(), expiresAt: this.now() + definition.expiresInSeconds * 1000, nextCheckAt: Math.min(g.expiresAt, this.now() + definition.expiresInSeconds * 1000), terminatedAt: null, resultExpiresAt: null,
@@ -100,8 +101,9 @@ export class Forms {
   }
   async inbox(uid: string, deviceId: string) {
     const ids = await this.db.runTransaction(async tx => {
-      await this.relay.account(tx, uid); await this.relay.device(tx, uid, deviceId);
-      return (await tx.get(this.db.collection('formRequests').where('ownerId', '==', uid).where('status', '==', 'pending').limit(100))).docs.map(d => d.id);
+      await this.relay.account(tx, uid); const device = await this.relay.device(tx, uid, deviceId);
+      return (await tx.get(this.db.collection('formRequests').where('ownerId', '==', uid).where('status', '==', 'pending').limit(100))).docs
+        .filter(d => !d.data().definition.steps || device.wizardVersion === 1).map(d => d.id);
     });
     return (await Promise.all(ids.map(id => this.get({ uid, deviceId }, id)))).filter(r => r.status === 'pending')
       .sort((a, b) => b.createdAt - a.createdAt).map(r => ({ requestId: r.requestId, callerName: r.callerName, title: r.title, status: r.status, expiresAt: r.expiresAt, createdAt: r.createdAt }));
@@ -213,7 +215,7 @@ export class Forms {
       const e = (await tx.get(this.ref('requestEvents', j.eventId))).data() as RelayEvent | undefined;
       const d = j.deviceId ? (await tx.get(this.ref('devices', j.deviceId))).data() : null;
       const hook = g?.webhooks?.find(h => h.id === j.hookId);
-      if (!r || !e || !this.retained(j.purgeAt) || account?.deleting || !g?.formsApproved || !await this.relay.validGrant(tx, g) || (j.kind === 'push' && (r.status !== 'pending' || r.expiresAt <= this.now() || !d || d.deleted || d.paused || d.ownerId !== j.ownerId)) || (j.kind === 'webhook' && !hook)) {
+      if (!r || !e || !this.retained(j.purgeAt) || account?.deleting || !g?.formsApproved || !await this.relay.validGrant(tx, g) || (j.kind === 'push' && (r.status !== 'pending' || r.expiresAt <= this.now() || !d || d.deleted || d.paused || d.ownerId !== j.ownerId || (r.definition.steps && d.wizardVersion !== 1))) || (j.kind === 'webhook' && !hook)) {
         tx.delete(this.ref('deliveryOutbox', id)); return null;
       }
       tx.update(this.ref('deliveryOutbox', id), { lease, nextAt: this.now() + MINUTE, attempts: j.attempts + 1 });
