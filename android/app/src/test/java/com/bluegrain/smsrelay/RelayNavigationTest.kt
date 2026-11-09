@@ -59,4 +59,21 @@ class RelayNavigationTest {
         assertFalse(withTimeout(1000) { second.await() })
         assertEquals(listOf("second"), opened)
     }
+    @Test fun retainedFormDoesNotRequireAnotherFetchButADifferentTargetDoes() = runBlocking {
+        val session = MutableStateFlow(RelayUiState(configured = true, signedIn = true, registered = true))
+        val form = RequestForm("retained", "Assistant", "Review", "", "submitted", Long.MAX_VALUE,
+            emptyList(), emptyList(), null)
+        val inbox = MutableStateFlow(InboxState(form = form, busy = true))
+        val opened = mutableListOf<String>()
+        var entries = 0
+        suspend fun unavailable(id: String): Boolean { opened.add(id); return false }
+        assertTrue(withTimeout(1000) { loadResponseWhenReady(RequestTarget(form.id, RequestKind.Form),
+            session, inbox, ::unavailable, ::unavailable, { entries++ }) })
+        assertTrue(opened.isEmpty())
+        assertEquals(1, entries)
+        inbox.value = inbox.value.copy(busy = false)
+        assertFalse(loadResponseWhenReady(RequestTarget("different", RequestKind.Form),
+            session, inbox, ::unavailable, ::unavailable))
+        assertEquals(listOf("different"), opened)
+    }
 }

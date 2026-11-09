@@ -31,6 +31,14 @@ import org.junit.Assert.assertFalse
 
 class ApprovalScreenTest {
     @get:Rule val compose = createComposeRule()
+    private fun hideKeyboard(view: android.view.View) {
+        compose.runOnIdle { androidx.core.view.ViewCompat.getWindowInsetsController(view)?.hide(androidx.core.view.WindowInsetsCompat.Type.ime()) }
+        compose.waitUntil(5_000) {
+            var visible = true
+            compose.runOnIdle { visible = androidx.core.view.ViewCompat.getRootWindowInsets(view)?.isVisible(androidx.core.view.WindowInsetsCompat.Type.ime()) == true }
+            !visible
+        }
+    }
     @Test fun focusedRequestRendersMarkdownAndCandidateSelectionSubmitsOnce() {
         var selected: String? = null
         var ui by androidx.compose.runtime.mutableStateOf(RelayUiState(configured = true, signedIn = true, registered = true,
@@ -280,15 +288,23 @@ class ApprovalScreenTest {
             FormField("tags", "Tags", "multiple_choice", false, 1000, null, null, listOf("tax" to "Tax", "work" to "Work"), false),
             FormField("date", "Invoice date", "date", false, 1000, null, null, emptyList(), false))
         var ui by androidx.compose.runtime.mutableStateOf(InboxState(form = form().copy(fields = fields), now = 0))
-        compose.setContent { RelayTheme { RequestFormScreen(ui, "phone", {}, { id, value -> ui = ui.copy(values = ui.values + (id to value)) }, {}, {}, {}, {}) } }
+        lateinit var view: android.view.View
+        compose.setContent {
+            view = androidx.compose.ui.platform.LocalView.current
+            RelayTheme { RequestFormScreen(ui, "phone", {}, { id, value -> ui = ui.copy(values = ui.values + (id to value)) }, {}, {}, {}, {}) }
+        }
         compose.onNodeWithText("Amount *").performScrollTo().performTextInput("42.50")
+        hideKeyboard(view)
         compose.onNodeWithText("Confirmed *").performScrollTo().performClick()
+        compose.runOnIdle { assertEquals(true, ui.values["confirmed"]) }
         compose.onNodeWithText("Tax").performScrollTo().performClick()
         compose.onNodeWithText("Work").performScrollTo().performClick()
         compose.onNodeWithText("Choose a date").performScrollTo().assertIsEnabled()
-        assertEquals("42.50", ui.values["amount"])
-        assertEquals(true, ui.values["confirmed"])
-        assertEquals(setOf("tax", "work"), ui.values["tags"])
+        compose.runOnIdle {
+            assertEquals("42.50", ui.values["amount"])
+            assertEquals(true, ui.values["confirmed"])
+            assertEquals(setOf("tax", "work"), ui.values["tags"])
+        }
     }
 
     private val wizardStores = mutableListOf<ViewModelStore>()
@@ -307,8 +323,9 @@ class ApprovalScreenTest {
     @Test fun wizardValidatesStepsReviewsOnceAndPrunesChangedBranches() {
         val vm = wizardVm()
         var submissions = 0
+        lateinit var view: android.view.View
         compose.runOnIdle { vm.showLoaded(wizardForm()) }
-        compose.setContent { val s by vm.state.collectAsState(); RelayTheme {
+        compose.setContent { val s by vm.state.collectAsState(); view = androidx.compose.ui.platform.LocalView.current; RelayTheme {
             RequestFormScreen(s, "phone", vm::close, vm::change, { submissions++ }, {}, {}, {}, vm::next, vm::previous)
         } }
         compose.onNodeWithText("Step 1 of 2").performScrollTo().assertIsDisplayed()
@@ -320,6 +337,7 @@ class ApprovalScreenTest {
         compose.onNodeWithText("Next").performScrollTo().performClick()
         compose.onNodeWithText("Step 2 of 3").performScrollTo().assertIsDisplayed()
         compose.onNodeWithText("Comment *").performScrollTo().performTextInput("Flight to Santo Domingo")
+        hideKeyboard(view)
         compose.onNodeWithText("Next").performScrollTo().performClick()
         compose.onNodeWithText("Confirmed *").performScrollTo().performClick()
         compose.onNodeWithText("Review response").performScrollTo().performClick()

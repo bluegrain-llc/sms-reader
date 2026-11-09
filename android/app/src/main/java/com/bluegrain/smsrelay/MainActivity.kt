@@ -81,9 +81,8 @@ class MainActivity : ComponentActivity() {
                 if (response != null && state.configured) {
                     responseLoading = true
                     val loaded = loadResponseWhenReady(response.target, vm.state, inbox.state,
-                        openSms = { vm.open(it).await() }, openForm = {
+                        openSms = { vm.open(it).await() }, openForm = { inbox.open(it).await() }, onFormEntry = {
                             if (response.origin == RequestOrigin.Notification) recordTap(intent)
-                            inbox.open(it).await()
                         })
                     if (loaded) loadedTarget = response.target
                     responseLoading = false

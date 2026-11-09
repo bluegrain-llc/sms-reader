@@ -36,11 +36,17 @@ internal suspend fun loadResponseWhenReady(
     inbox: StateFlow<InboxState>,
     openSms: suspend (String) -> Boolean,
     openForm: suspend (String) -> Boolean,
+    onFormEntry: () -> Unit = {},
 ): Boolean {
     session.first { it.configured && it.signedIn && it.registered && !it.busy }
+    // Rotation keeps the current form, draft and confirmation in the same ViewModel.
+    if (target.kind == RequestKind.Form && inbox.value.form?.id == target.id) {
+        onFormEntry()
+        return true
+    }
     inbox.first { !it.busy }
     return when (target.kind) {
         RequestKind.Sms -> openSms(target.id)
-        RequestKind.Form -> openForm(target.id)
+        RequestKind.Form -> { onFormEntry(); openForm(target.id) }
     }
 }

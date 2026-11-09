@@ -18,12 +18,20 @@ class NotificationNavigationTest {
     private fun notification(kind: String = "form", id: String = "a".repeat(64)) = Intent(context, MainActivity::class.java)
         .putExtra("requestId", id).putExtra("kind", kind).putExtra("notificationTap", true)
     private fun isolatedBuild() = assumeFalse((context.applicationContext as RelayApplication).configured)
-    private fun assertTarget(scenario: ActivityScenario<MainActivity>, id: String, kind: RequestKind) {
+    private fun destination(scenario: ActivityScenario<MainActivity>): RelayDestination? {
+        var destination: RelayDestination? = null
         scenario.onActivity { activity ->
-            val destination = MainActivity::class.java.getDeclaredMethod("getDestination")
-                .apply { isAccessible = true }.invoke(activity)
-            assertEquals(RelayDestination.Response(RequestTarget(id, kind), RequestOrigin.Notification), destination)
+            destination = MainActivity::class.java.getDeclaredMethod("getDestination")
+                .apply { isAccessible = true }.invoke(activity) as RelayDestination
         }
+        return destination
+    }
+    private fun awaitDestination(scenario: ActivityScenario<MainActivity>, expected: RelayDestination) {
+        compose.waitUntil(5_000) { destination(scenario) == expected }
+        assertEquals(expected, destination(scenario))
+    }
+    private fun assertTarget(scenario: ActivityScenario<MainActivity>, id: String, kind: RequestKind) {
+        awaitDestination(scenario, RelayDestination.Response(RequestTarget(id, kind), RequestOrigin.Notification))
     }
 
     @Test fun coldNotificationSurvivesRecreationAndCloseBackgroundsWithoutFinishing() {
@@ -47,14 +55,15 @@ class NotificationNavigationTest {
         ActivityScenario.launch<MainActivity>(Intent(context, MainActivity::class.java)).use { scenario ->
             compose.onNodeWithText("Inbox").assertIsDisplayed()
             scenario.onActivity { it.startActivity(notification("sms").addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)) }
-            compose.onNodeWithText("Request response").assertIsDisplayed()
             assertTarget(scenario, "a".repeat(64), RequestKind.Sms)
+            compose.onNodeWithText("Request response").assertIsDisplayed()
             scenario.onActivity { it.startActivity(Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)) }
+            awaitDestination(scenario, RelayDestination.Inbox)
             compose.onNodeWithText("Settings").performClick()
             compose.onNodeWithText("Access").assertIsDisplayed()
             scenario.onActivity { it.startActivity(notification(id = "b".repeat(64)).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)) }
-            compose.onNodeWithText("Request response").assertIsDisplayed()
             assertTarget(scenario, "b".repeat(64), RequestKind.Form)
+            compose.onNodeWithText("Request response").assertIsDisplayed()
             scenario.onActivity { activity ->
                 repeat(3) { activity.startActivity(notification(id = "b".repeat(64)).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)) }
             }
@@ -138,6 +147,49 @@ class NotificationNavigationTest {
                 assertEquals("second", vm.state.value.stepId)
                 assertEquals("pending", vm.state.value.form?.status)
             }
+        }
+    }
+    @Test fun retainedFormDraftAndConfirmationStayVisibleAcrossRecreationWithoutServiceAccess() {
+        isolatedBuild()
+        val field = FormField("note", "Note", "text", false, 1000, null, null, emptyList(), false)
+        val form = RequestForm("retained", "Demo assistant", "Review", "", "pending", System.currentTimeMillis() + 600_000,
+            listOf(field), emptyList(), null)
+        ActivityScenario.launch<MainActivity>(Intent(context, MainActivity::class.java)).use { scenario ->
+            var original: InboxViewModel? = null
+            scenario.onActivity { activity ->
+                val vm = androidx.lifecycle.ViewModelProvider(activity)[RelayViewModel::class.java]
+                @Suppress("UNCHECKED_CAST")
+                val state = RelayViewModel::class.java.getDeclaredField("mutable").apply { isAccessible = true }
+                    .get(vm) as kotlinx.coroutines.flow.MutableStateFlow<RelayUiState>
+                state.value = state.value.copy(configured = true, signedIn = true, registered = true)
+                val inbox = androidx.lifecycle.ViewModelProvider(activity)[InboxViewModel::class.java]
+                original = inbox
+                inbox.showLoaded(form); inbox.change("note", "In-memory draft")
+                MainActivity::class.java.getDeclaredMethod("openFromInbox", String::class.java, RequestKind::class.java)
+                    .apply { isAccessible = true }.invoke(activity, form.id, RequestKind.Form)
+            }
+            compose.onNodeWithText("In-memory draft").assertIsDisplayed()
+            scenario.recreate()
+            compose.onNodeWithText("In-memory draft").assertIsDisplayed()
+            compose.onNodeWithText("Retry").assertDoesNotExist()
+            scenario.onActivity { activity ->
+                val inbox = androidx.lifecycle.ViewModelProvider(activity)[InboxViewModel::class.java]
+                assertSame(original, inbox)
+                assertNull(inbox.state.value.error)
+                inbox.showLoaded(form.copy(status = "submitted"))
+            }
+            compose.onNodeWithText("Your response was accepted.").assertIsDisplayed()
+            scenario.recreate()
+            compose.onNodeWithText("Your response was accepted.").assertIsDisplayed()
+            compose.onNodeWithText("Retry").assertDoesNotExist()
+            scenario.onActivity { activity ->
+                val inbox = androidx.lifecycle.ViewModelProvider(activity)[InboxViewModel::class.java]
+                assertSame(original, inbox)
+                assertEquals("submitted", inbox.state.value.form?.status)
+                assertNull(inbox.state.value.error)
+            }
+            compose.onNodeWithText("Close").performClick()
+            compose.onNodeWithText("Inbox").assertIsDisplayed()
         }
     }
 }
