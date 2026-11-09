@@ -39,7 +39,7 @@ data class RelayUiState(
     val request: PhoneRequest? = null, val grants: List<GrantRow> = emptyList(), val history: List<HistoryRow> = emptyList(),
     val candidates: List<String> = emptyList(), val codeDraft: String = "", val autofillDeclined: Boolean = false, val error: String? = null,
     val devices: List<DeviceRow> = emptyList(), val connection: ConnectionReview? = null, val connectionCode: String? = null,
-    val autoConnect: Boolean = true,
+    val autoConnect: Boolean = true, val discoveredRequest: PhoneRequest? = null,
     val consentAvailable: Boolean = false, val now: Long = System.currentTimeMillis(), val foreground: Boolean = false,
 )
 class RelayViewModel(application: Application) : AndroidViewModel(application) {
@@ -115,7 +115,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
             history = (0 until history.length()).map { history.getJSONObject(it).let { h -> HistoryRow(h.optString("callerName"), h.getString("status"), h.nullString("reason")) } }) }
         // Discover missed requests for Inbox; only an explicit open starts SMS reception.
         refreshSmsDiscovery(d?.nullString("activeRequestId"), { boundId != null }, repo::request) { request ->
-            mutable.update { if (request == null && it.request?.active != true) it else it.copy(request = request) }
+            mutable.update { it.withSmsDiscovery(request) }
         }
     }
     private suspend fun recover() = recoveryMutex.withLock {
@@ -341,6 +341,6 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         mutable.update { it.copy(candidates = emptyList(), codeDraft = "", autofillDeclined = false, consentAvailable = false) }
     }
     private fun unregisterReceiver() { receiver?.let { app.unregisterReceiver(it) }; receiver = null }
-    private fun clearLocal() { poll?.cancel(); blocked = true; clearSensitive(); unregisterReceiver(); boundId = null; mutable.update { it.copy(request = null) } }
+    private fun clearLocal() { poll?.cancel(); blocked = true; clearSensitive(); unregisterReceiver(); boundId = null; mutable.update { it.copy(request = null, discoveredRequest = null) } }
     override fun onCleared() { unregisterReceiver(); clearSensitive(); super.onCleared() }
 }

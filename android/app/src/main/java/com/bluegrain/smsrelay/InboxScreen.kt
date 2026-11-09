@@ -55,7 +55,7 @@ fun InboxScreen(state: RelayUiState, forms: List<RequestForm>, onSettings: () ->
                         Button(onClick = onSettings, modifier = Modifier.fillMaxWidth()) { Text("Open Settings") }
                     }
                 }
-                val sms = state.request?.takeIf { it.active && (it.listeningDeadline ?: it.expiresAt) > state.now }
+                val sms = state.pendingSms?.takeIf { (it.listeningDeadline ?: it.expiresAt) > state.now }
                 sms?.let { request -> item(key = "sms:${request.id}") {
                     InboxRow("sms:${request.id}", request.caller, request.title,
                         "SMS · ${requestStatusLabel(request.status)}", request.listeningDeadline ?: request.expiresAt) { onOpenSms(request.id) }

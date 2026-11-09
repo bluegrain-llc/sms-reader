@@ -102,6 +102,19 @@ class NavigationScreenTest {
         compose.onNodeWithText("Close").performScrollTo().performClick(); assertEquals(1, closes)
     }
 
+    @Test fun discoveringASuccessorKeepsTheTerminalOutcomeUntilCloseAndThenShowsTheInboxEntry() {
+        var state by mutableStateOf(session.copy(request = request.copy(status = "cancelled")))
+        var route by mutableStateOf<RelayDestination>(RelayDestination.Response(RequestTarget("sms", RequestKind.Sms), RequestOrigin.Inbox))
+        compose.setContent { RelayTheme { RelayScreen(state, route, responseReady = true, onBack = { route = RelayDestination.Inbox }) } }
+        compose.runOnIdle { state = state.withSmsDiscovery(request.copy(id = "next", title = "Next sign in")) }
+        compose.onNodeWithText("Request cancelled").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("Could not open this request.").assertDoesNotExist()
+        compose.onNodeWithText("Close").performScrollTo().performClick()
+        compose.onNodeWithText("Inbox").assertIsDisplayed()
+        compose.onNodeWithTag("sms:next").assertIsDisplayed()
+        compose.onNodeWithTag("sms:sms").assertDoesNotExist()
+    }
+
     private fun preview(name: String) {
         compose.mainClock.advanceTimeBy(500)
         val bitmap = compose.onRoot().captureToImage().asAndroidBitmap()

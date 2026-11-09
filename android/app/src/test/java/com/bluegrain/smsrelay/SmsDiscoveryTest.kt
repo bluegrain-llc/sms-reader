@@ -65,4 +65,27 @@ class SmsDiscoveryTest {
         assertFalse(stale.blocksSmsOpen("old", "old"))
         assertFalse(stale.copy(status = "completed").blocksSmsOpen("old", "next"))
     }
+
+    @Test fun successorDiscoveryPreservesTerminalResponseAndKeepsTheInboxCurrent() = runBlocking {
+        for (status in listOf("cancelled", "failed", "expired", "completed")) {
+            val terminal = request("old", status)
+            var state = RelayUiState(request = terminal)
+            refreshSmsDiscovery("next", { false }, { request(it) }) { state = state.withSmsDiscovery(it) }
+            assertSame(terminal, state.request)
+            assertEquals("next", state.pendingSms?.id)
+            refreshSmsDiscovery(null, { false }, { error("No active request") }) { state = state.withSmsDiscovery(it) }
+            assertSame(terminal, state.request)
+            assertNull(state.pendingSms)
+        }
+    }
+
+    @Test fun completingTheDiscoveredSuccessorDoesNotRestoreItsStaleInboxEntry() {
+        val next = request("next")
+        val discovered = RelayUiState(request = request("old", "cancelled")).withSmsDiscovery(next)
+        val opened = discovered.copy(request = next)
+        assertEquals("next", opened.pendingSms?.id)
+        val completed = opened.copy(request = next.copy(status = "completed"))
+        assertEquals("completed", completed.request?.status)
+        assertNull(completed.pendingSms)
+    }
 }
