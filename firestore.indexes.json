@@ -77,6 +77,80 @@
           "order": "DESCENDING"
         }
       ]
+    },
+    {
+      "collectionGroup": "formRequests",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "ownerId",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "status",
+          "order": "ASCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "formRequests",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "grantId",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "status",
+          "order": "ASCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "formRequests",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "status",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "nextCheckAt",
+          "order": "ASCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "formRequests",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "status",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "helperNextAt",
+          "order": "ASCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "requestEvents",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "grantId",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "sequence",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "purgeAt",
+          "order": "ASCENDING"
+        }
+      ]
     }
   ],
   "fieldOverrides": [
@@ -179,6 +253,80 @@
     {
       "collectionGroup": "connections",
       "fieldPath": "codeHash",
+      "indexes": []
+    },
+    {
+      "collectionGroup": "formRequests",
+      "fieldPath": "purgeAt",
+      "ttl": true,
+      "indexes": [
+        {
+          "order": "ASCENDING",
+          "queryScope": "COLLECTION"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "formResults",
+      "fieldPath": "purgeAt",
+      "ttl": true,
+      "indexes": [
+        {
+          "order": "ASCENDING",
+          "queryScope": "COLLECTION"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "requestEvents",
+      "fieldPath": "purgeAt",
+      "ttl": true,
+      "indexes": [
+        {
+          "order": "ASCENDING",
+          "queryScope": "COLLECTION"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "deliveryOutbox",
+      "fieldPath": "purgeAt",
+      "ttl": true,
+      "indexes": [
+        {
+          "order": "ASCENDING",
+          "queryScope": "COLLECTION"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "formRequests",
+      "fieldPath": "definition",
+      "indexes": []
+    },
+    {
+      "collectionGroup": "formRequests",
+      "fieldPath": "helpers",
+      "indexes": []
+    },
+    {
+      "collectionGroup": "formRequests",
+      "fieldPath": "taps",
+      "indexes": []
+    },
+    {
+      "collectionGroup": "formRequests",
+      "fieldPath": "opens",
+      "indexes": []
+    },
+    {
+      "collectionGroup": "formResults",
+      "fieldPath": "values",
+      "indexes": []
+    },
+    {
+      "collectionGroup": "grants",
+      "fieldPath": "webhooks",
       "indexes": []
     }
   ]

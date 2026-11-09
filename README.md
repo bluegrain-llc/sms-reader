@@ -1,6 +1,9 @@
-# Android SMS Code Relay
+# Android Request Relay
 
-An Android 8+ app and Firebase-backed Cloud Run service for owner-approved, upcoming SMS codes. One app opens SMS requests in a focused screen and keeps access, devices and history in its Admin area. Apps and bots pair directly through a link approved in Admin; each user/app connection gets its own credential for REST or MCP. The relay never triggers an SMS and never reads the inbox.
+An Android 8+ request inbox and Firebase-backed Cloud Run service for owner-approved, upcoming SMS codes. One app opens SMS requests in a focused screen and keeps access, devices and history in its Admin area. Apps and bots pair directly through a link approved in Admin; each user/app connection gets its own credential for REST or MCP. The relay never triggers an SMS and never reads the inbox.
+
+
+Apps and agents can also ask for information and decisions through native forms: Markdown messages, text, numbers, checkboxes, choices and dates, with explicit Submit/Approve/Decline/Acknowledge actions. Pending forms remain available in any order while SMS capture stays serialized. Each existing connection starts with SMS-only permission; enable interactive requests explicitly in **Admin → Access**. The additive `/v2` API and MCP tools provide request/result operations, durable event polling, SSE and signed webhooks. Answers are retrieved separately and expire after 24 hours. See the [request inbox API, delivery contract and rollout](docs/REQUEST_INBOX.md).
 
 The owner opens a notification, Android starts SMS User Consent, and the service reports `ready`. Only then should a separate workflow trigger the SMS. The request shows “Bot name — short title”, the bot’s Markdown explanation, an SMS code input and Send. Approve Android’s SMS prompt to send a single extracted code automatically. If there are multiple candidates, choose the code to send. Manual entry remains available with Send. The app closes after the server confirms that submission.
 

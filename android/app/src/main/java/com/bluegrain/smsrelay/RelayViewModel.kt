@@ -29,13 +29,13 @@ import org.json.JSONObject
 import java.io.IOException
 
 // Sensitive values live only in this ViewModel. No saved state, disk, analytics, or crash logger.
-data class GrantRow(val id: String, val name: String, val revoked: Boolean, val expiresAt: Long)
+data class GrantRow(val id: String, val name: String, val revoked: Boolean, val expiresAt: Long, val formsApproved: Boolean = false)
 data class DeviceRow(val id: String, val name: String, val paused: Boolean, val current: Boolean)
 data class HistoryRow(val caller: String, val status: String, val reason: String?)
 data class RelayUiState(
     val configured: Boolean = false, val signedIn: Boolean = false, val email: String = "",
     val registered: Boolean = false, val paused: Boolean = false, val busy: Boolean = false, val cancelling: Boolean = false,
-    val request: PhoneRequest? = null, val grants: List<GrantRow> = emptyList(), val history: List<HistoryRow> = emptyList(),
+    val showSmsRequest: Boolean = true, val request: PhoneRequest? = null, val grants: List<GrantRow> = emptyList(), val history: List<HistoryRow> = emptyList(),
     val candidates: List<String> = emptyList(), val codeDraft: String = "", val autofillDeclined: Boolean = false, val error: String? = null,
     val devices: List<DeviceRow> = emptyList(), val connection: ConnectionReview? = null, val connectionCode: String? = null,
     val autoConnect: Boolean = true,
@@ -65,7 +65,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
     }
     fun error(message: String) { mutable.update { it.copy(error = message) } }
     fun dismissRequest() {
-        if (state.value.request?.active == true) return
+        if (state.value.request?.active == true) { mutable.update { it.copy(showSmsRequest = false) }; return }
         clearLocal()
     }
     fun changeCode(id: String, value: String) {
@@ -113,7 +113,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         val grants = repo.grants()
         val history = repo.history()
         mutable.update { s -> s.copy(grants = (0 until grants.length()).map { grants.getJSONObject(it).let { g ->
-            GrantRow(g.getString("grantId"), g.getString("callerName"), g.getBoolean("revoked"), g.getLong("expiresAt")) } },
+            GrantRow(g.getString("grantId"), g.getString("callerName"), g.getBoolean("revoked"), g.getLong("expiresAt"), g.optBoolean("formsApproved")) } },
             history = (0 until history.length()).map { history.getJSONObject(it).let { h -> HistoryRow(h.optString("callerName"), h.getString("status"), h.nullString("reason")) } }) }
         // Recover missed/offline notification by fetching the device's current request securely.
         d?.nullString("activeRequestId")?.let { if (state.value.foreground && state.value.request?.active != true) open(it) }
@@ -133,6 +133,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         }
         recovered = true
     }
+    fun approveForms(id: String, approved: Boolean) = action { repo.approveForms(id, approved); refreshData() }
     fun revoke(id: String) = action { repo.revoke(id); refreshData() }
     fun reviewConnection(code: String) = viewModelScope.launch {
         mutable.update { it.copy(connection = null, connectionCode = code) }
@@ -186,7 +187,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
                 recover()
                 val r = repo.request(id)
                 if (boundId != id) clearSensitive()
-                mutable.update { it.copy(request = r, error = null) }
+                mutable.update { it.copy(request = r, showSmsRequest = true, error = null) }
                 RelayNotifications.dismiss(app, id)
                 if (!r.active) return@launch
                 if (boundId == id) { startPoll(id); return@launch }

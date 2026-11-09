@@ -1,5 +1,12 @@
 # Security and reliability boundaries
 
+## Interactive request boundaries
+
+V2 requires a separate owner-approved form permission per connection; existing grants remain SMS-only. Request definitions stay immutable and submissions are validated against them. First-valid-submission transactions prevent competing phones from replacing answers. General form answers live separately for 24 hours; events and definitions expire seven days after termination. Metadata-only taps and foreground openings dedupe per device and do not imply agreement.
+
+Polling, SSE and signed webhooks share one durable Firestore event log. Callback jobs and notifications are written with request mutations in transactions, leased by delivery workers and recovered by scheduled maintenance. Webhook delivery rejects non-public addresses on registration and each attempt, pins DNS to validated addresses, checks TLS certificates and never follows redirects. Only HTTPS port 443 is allowed. Webhook signing secrets are retained in server-only grants until removed or the account is deleted. Callback payloads contain events without answers. The [v2 contract](REQUEST_INBOX.md) defines signature verification, retention, permissions, and replay.
+
+
 ## Identity and authorization
 
 The owner's Google identity is verified through Firebase ID tokens, including revocation checks. Management and phone routes require ownership. An agent grant is a random 256-bit bearer secret; only its SHA-256 digest is stored, as the grant ID. Grant metadata binds owner and stable caller identity permanently. A bot first receives a random pending credential; only its SHA-256 digest is stored, and no grant exists until an authenticated owner explicitly approves the paired connection. The credential stays only with that bot and is never in the verification link or phone UI. Approval atomically binds one owner and creates one grant; conflicting account claims cannot both win. Caller expiry/revocation and account/device availability are checked inside request transactions. Replacement connections cannot recover old results.

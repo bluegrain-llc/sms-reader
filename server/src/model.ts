@@ -20,14 +20,14 @@ export interface Device {
   id: string; ownerId: string; name: string; fcmToken: string;
   paused: boolean; deleted: boolean; activeRequestId: string | null;
   rate: Rate; updatedAt: number;
-  listenerUntil?: number;
+  listenerUntil?: number; formListenerUntil?: number;
 }
 export interface Grant {
   id: string; ownerId: string; deviceId: string; callerName: string;
   revoked: boolean; expiresAt: number; createdAt: number; rate: Rate;
-  managerId?: string; callerId?: string;
+  managerId?: string; callerId?: string; formRate?: Rate;
 }
-export interface Account { deleting?: boolean; activeRequestId?: string | null; queueIds?: string[]; hasWork?: boolean; rate?: Rate; connectionRate?: Rate }
+export interface Account { formListenerRequestId?: string; formListenerUntil?: number; deleting?: boolean; activeRequestId?: string | null; queueIds?: string[]; hasWork?: boolean; formRate?: Rate; rate?: Rate; connectionRate?: Rate }
 export interface PhoneState {
   status: Status; reason: string | null; listeningDeadline: number | null;
   sent: boolean; lease: number; attempts: number; nextAt: number;

@@ -1,5 +1,13 @@
 # Verification record
 
+## Interactive request inbox (2026-11-09)
+
+Executed locally: server type checking; eight server unit tests; 33 Firestore/Auth/REST/MCP integration tests; Android unit tests, debug lint, APK and instrumentation builds; 15 UI tests on the Android 36 emulator at both 1080×2400 and CI’s 320×640 viewport; production-dependency audit with zero vulnerabilities; Docker build and HTTP startup/authentication smoke; deployment script syntax check.
+
+The new coverage includes form validation and immutable definitions, separate permission approval, concurrent forms and SMS, caller isolation, competing phone submissions and upload deduplication, manual SMS-helper entry and independent timeouts, cancellation/expiry, per-device tap/open deduplication including delayed reports, durable event replay across two server instances, callback failures/duplicates, expired event filtering, dead-worker lease recovery, cancellation recovery and account deletion. Existing SMS integration and UI checks remain included.
+
+Not established by these local checks: live Cloud Tasks/OIDC/IAM delivery, public TLS callback delivery, production Firestore index readiness, or physical-phone notification/SMS acceptance. The deployment script provisions the queue and waits for indexes; the [v2 rollout and phone checklist](REQUEST_INBOX.md) remains the cloud/physical acceptance gate.
+
 Executed on 2026-11-07 America/Santo_Domingo (2026-11-08 UTC) in the initially empty workspace. No production Firebase project or signing configuration was supplied. No physical phone was attached.
 
 | Check | Result |

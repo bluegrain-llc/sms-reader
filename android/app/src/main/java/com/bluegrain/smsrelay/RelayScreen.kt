@@ -58,9 +58,10 @@ fun RelayScreen(
     onSubmitCode: (String) -> Unit = {}, onCodeChange: (String, String) -> Unit = { _, _ -> },
     onSelectCandidate: (String, String) -> Unit = { _, _ -> }, onDismissRequest: () -> Unit = {}, onRequestSent: () -> Unit = {}, onDelete: () -> Unit = {},
     onPauseDevice: (String) -> Unit = {}, onRemoveDevice: (String) -> Unit = {},
+    inbox: List<RequestForm> = emptyList(), onOpenForm: (String) -> Unit = {}, onOpenSms: (String) -> Unit = {}, onApproveForms: (String, Boolean) -> Unit = { _, _ -> },
     onReviewConnection: (String) -> Unit = {}, onConnectionDecision: (String, Boolean) -> Unit = { _, _ -> }, onDismissConnection: () -> Unit = {},
 ) {
-    state.request?.let {
+    state.request?.takeIf { state.showSmsRequest }?.let {
         SmsRequestScreen(it, state, onCodeChange, onSelectCandidate, onSubmitCode, onCancel, onDismissRequest, onRequestSent)
         return
     }
@@ -103,12 +104,26 @@ fun RelayScreen(
             } else {
                 item {
                     PrimaryTabRow(selectedTabIndex = tab, containerColor = MaterialTheme.colorScheme.background) {
-                        listOf("Relay", "Admin").forEachIndexed { i, title ->
+                        listOf("Inbox", "Admin").forEachIndexed { i, title ->
                             Tab(selected = tab == i, onClick = { tab = i }, text = { Text(title) })
                         }
                     }
                 }
                 if (tab == 0) {
+                    state.request?.takeIf { it.active }?.let { request -> item { Panel {
+                        Text("${request.caller} — ${request.title}", style = MaterialTheme.typography.titleMedium)
+                        Text(label(request.status), color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        OutlinedButton(onClick = { onOpenSms(request.id) }) { Text("Return to SMS request") }
+                    } } }
+                    item { Text("Pending requests", style = MaterialTheme.typography.titleLarge) }
+                    if (inbox.isEmpty()) item { Text("No forms waiting for a response.", color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                    inbox.forEach { form -> item(key = form.id) { Panel {
+                        Text(form.caller, style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
+                        Text(form.title, style = MaterialTheme.typography.titleLarge)
+                        Text("Waiting for your response", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Button(onClick = { onOpenForm(form.id) }, enabled = !state.busy) { Text("Open request") }
+                    } } }
+
                     if (state.request?.active != true) item {
                         Panel {
                             Text(if (!state.registered) "Connect this phone" else if (state.paused) "This phone is paused" else "Ready for requests", style = MaterialTheme.typography.titleLarge)
@@ -152,6 +167,12 @@ fun RelayScreen(
                             state.grants.forEach { grant -> item { Panel {
                                 Text(grant.name, style = MaterialTheme.typography.titleMedium)
                                 AccessStatus(grant.revoked, grant.expiresAt, state.now)
+                                if (!grant.revoked && grant.expiresAt > state.now) {
+                                    Text(if (grant.formsApproved) "SMS and interactive requests allowed" else "SMS requests only", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    OutlinedButton(onClick = { onApproveForms(grant.id, !grant.formsApproved) }, enabled = !state.busy) {
+                                        Text(if (grant.formsApproved) "Remove form access" else "Allow interactive requests")
+                                    }
+                                }
                                 if (!grant.revoked && grant.expiresAt > state.now) TextButton(onClick = { onRevoke(grant.id) }, enabled = !state.busy) { Text("Revoke caller") }
                             } } }
                         }

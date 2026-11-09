@@ -1,14 +1,16 @@
 import { randomUUID } from 'node:crypto';
+import { Forms } from './forms.js';
 import { Connections } from './connections.js';
 import { Firestore, Transaction, Query } from 'firebase-admin/firestore';
 import { active, Account, bump, CodeRequest, codeSchema, deadline, Device, ensure, Grant, hash, HISTORY, MINUTE, newSecret, PhoneState, RequestInput, requestSchema, Status, view } from './model.js';
 
-export type Notify = (token: string, requestId: string, ttl: number) => Promise<void>;
+export type Notify = (token: string, requestId: string, ttl: number, kind?: 'form') => Promise<void>;
 type Context = { request: CodeRequest; account: Account; devices: Device[]; device?: Device; grant: Grant; valid: boolean };
 const phonePending = (): PhoneState => ({ status: 'pending_phone', reason: null, listeningDeadline: null, sent: false, lease: 0, attempts: 0, nextAt: 0 });
 export class Relay {
   readonly connections: Connections;
-  constructor(readonly db: Firestore, readonly notify: Notify, readonly now = Date.now) { this.connections = new Connections(this); }
+  readonly forms: Forms;
+  constructor(readonly db: Firestore, readonly notify: Notify, readonly now = Date.now, wake?: () => Promise<void>) { this.connections = new Connections(this); this.forms = new Forms(this, wake); }
   ref(collection: string, id: string) { return this.db.collection(collection).doc(id); }
   async account(tx: Transaction, uid: string): Promise<Account> {
     const a = (await tx.get(this.ref('accounts', uid))).data() as Account | undefined;
@@ -98,7 +100,7 @@ export class Relay {
     const s = await this.db.collection('grants').where('ownerId', '==', uid).get();
     return s.docs.map(s => { const g = s.data() as Grant;
       return { grantId: g.id, callerName: g.callerName, callerId: g.callerId ?? null,
-        revoked: g.revoked || !!g.managerId, expiresAt: g.expiresAt };
+        formsApproved: !!(g as Grant & { formsApproved?: boolean }).formsApproved, revoked: g.revoked || !!g.managerId, expiresAt: g.expiresAt };
     });
   }
 
@@ -108,10 +110,11 @@ export class Relay {
       const g = (await tx.get(this.ref('grants', id))).data() as Grant | undefined;
       ensure(g && g.ownerId === uid, 404, 'grant_not_found');
       const r = a.activeRequestId ? (await tx.get(this.ref('requests', a.activeRequestId))).data() as CodeRequest | undefined : undefined;
-      tx.update(this.ref('grants', id), { revoked: true });
+      tx.update(this.ref('grants', id), { revoked: true, formsCancellationPending: true });
       if (r && r.grantId === id && active(r.status)) this.finish(tx, r, a, 'cancelled', 'token_revoked');
     });
     await this.advance(uid);
+    await this.forms.cancelGrant(id);
   }
   async changeDevice(uid: string, id: string, paused: boolean, deleted = false) {
     await this.db.runTransaction(async tx => {
@@ -136,7 +139,7 @@ export class Relay {
   }
   async deleteAccount(uid: string) {
     await this.ref('accounts', uid).set({ deleting: true });
-    for (const collection of ['devices', 'grants', 'managers', 'managerCallers', 'connections', 'connectionCodes', 'requests', 'results', 'audit']) await this.deleteQuery(this.db.collection(collection).where('ownerId', '==', uid));
+    for (const collection of ['devices', 'grants', 'managers', 'managerCallers', 'connections', 'connectionCodes', 'requests', 'results', 'audit', 'formRequests', 'formResults', 'requestEvents', 'deliveryOutbox']) await this.deleteQuery(this.db.collection(collection).where('ownerId', '==', uid));
   }
   async advance(uid: string) {
     // Each transaction reads before writing; a second iteration can promote after releasing a stale lock.
@@ -160,7 +163,7 @@ export class Relay {
         if (!active(r.status)) { tx.set(this.ref('accounts', uid), { queueIds: rest, hasWork: !!rest.length }, { merge: true }); return true; }
         // Android has no listener cancellation API. Do not activate the next caller
         // while every available phone may still be bound to a previous window.
-        if (!devices.some(d => (d.listenerUntil ?? 0) <= this.now())) return false;
+        if ((a.formListenerUntil ?? 0) > this.now() || !devices.some(d => (d.listenerUntil ?? 0) <= this.now())) return false;
         r.status = 'pending_phone'; r.deviceIds = devices.map(d => d.id); r.phones = Object.fromEntries(devices.map(d => [d.id, phonePending()]));
         r.notificationSent = false; r.nextNotificationAt = this.now();
         tx.set(this.ref('requests', id), r); this.audit(tx, r, r.status);
@@ -181,7 +184,7 @@ export class Relay {
       ensure(devices.length, 409, 'devices_unavailable');
       const queue = a.queueIds ?? []; ensure(queue.length < 20, 429, 'queue_full');
       const ownerRate = bump(a.rate ?? { start: this.now(), count: 0 }, this.now(), 5), grantRate = bump(g.rate, this.now(), 3);
-      const status = a.activeRequestId || queue.length || !devices.some(d => (d.listenerUntil ?? 0) <= this.now()) ? 'queued' : 'pending_phone';
+      const status = a.activeRequestId || queue.length || (a.formListenerUntil ?? 0) > this.now() || !devices.some(d => (d.listenerUntil ?? 0) <= this.now()) ? 'queued' : 'pending_phone';
       const r: CodeRequest = { id, ownerId: g.ownerId, deviceId: devices[0]!.id, deviceIds: devices.map(d => d.id),
         phones: Object.fromEntries(devices.map(d => [d.id, phonePending()])), grantId: g.id, callerName: g.callerName,
         purpose: input.purpose, title: input.title ?? 'Verification code', senderPhone: input.senderPhone ?? null, fingerprint, status, reason: null,
@@ -256,6 +259,7 @@ export class Relay {
       if (!active(p.status)) return this.phoneView(r, d);
       if (target === 'ready') {
         ensure(p.status === 'pending_phone', 409, 'invalid_transition');
+        ensure((d.formListenerUntil ?? 0) <= this.now(), 409, 'sms_listener_busy');
         const start = listenerStartedAt ?? this.now(); ensure(start <= this.now() + 5_000 && start > this.now() - MINUTE, 409, 'listener_start_stale');
         p.listeningDeadline = Math.min(r.expiresAt, start + 5 * MINUTE, this.now() + 5 * MINUTE);
         tx.update(this.ref('devices', d.id), { listenerUntil: p.listeningDeadline });
@@ -327,5 +331,6 @@ export class Relay {
       const expired = await this.db.collection(collection).where('purgeAt', '<=', new Date(this.now())).limit(400).get();
       const batch = this.db.batch(); expired.docs.forEach(d => batch.delete(d.ref)); await batch.commit();
     }
+    await this.forms.maintenance();
   }
 }

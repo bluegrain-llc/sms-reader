@@ -16,3 +16,5 @@ google-services.json
 *.keystore
 artifacts/
 .idea/
+
+.kotlin/

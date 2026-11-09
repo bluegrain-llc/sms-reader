@@ -4,14 +4,15 @@ import { getFirestore } from 'firebase-admin/firestore';
 import { getMessaging } from 'firebase-admin/messaging';
 import { OAuth2Client } from 'google-auth-library';
 import { app } from './http.js';
+import { taskWakeup } from './tasks.js';
 import { Relay } from './relay.js';
 import { ensure } from './model.js';
 
 initializeApp({ credential: applicationDefault(), projectId: process.env.GOOGLE_CLOUD_PROJECT });
 const auth = getAuth(), oauth = new OAuth2Client();
-const relay = new Relay(getFirestore(), async (token, requestId, ttl) => {
-  await getMessaging().send({ token, data: { requestId }, android: { priority: 'high', ttl, collapseKey: requestId } });
-});
+const relay = new Relay(getFirestore(), async (token, requestId, ttl, kind) => {
+  await getMessaging().send({ token, data: { requestId, ...(kind ? { kind } : {}) }, android: { priority: 'high', ttl, collapseKey: requestId } });
+}, Date.now, taskWakeup());
 const server = app(relay, {
   verifyOwner: async token => {
     const identity = await auth.verifyIdToken(token, true);

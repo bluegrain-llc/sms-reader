@@ -2,6 +2,8 @@ import express, { Request, Response, NextFunction } from 'express';
 import { z, ZodError } from 'zod';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { mountForms } from './forms-http.js';
+import { formSchema } from './forms-model.js';
 import { Relay } from './relay.js';
 import { connectionSchema, userCodeSchema } from './connections.js';
 import { codeSchema, ensure, idSchema, RelayError, requestSchema } from './model.js';
@@ -15,6 +17,7 @@ export interface HttpOptions {
   publicUrl?: string;
   androidCertSha256?: string;
   trustProxyHops?: number;
+  sseDurationMs?: number;
 }
 function bearer(req: Request) {
   const m = /^Bearer ([^\s]+)$/.exec(req.get('authorization') ?? '');
@@ -29,7 +32,7 @@ export function app(relay: Relay, options: HttpOptions) {
     const origin = req.get('origin');
     ensure(!origin || (options.origins ?? []).includes(origin), 403, 'origin_not_allowed'); next();
   });
-  app.use(express.json({ limit: '32kb', strict: true }));
+  app.use(express.json({ limit: '256kb', strict: true }));
   app.get(['/health', '/healthz'], (_req, res) => { res.json({ ok: true }); });
   const owner = async (req: Request) => {
     try { return await options.verifyOwner(bearer(req)); } catch { throw new RelayError(401, 'invalid_owner_session'); }
@@ -37,6 +40,7 @@ export function app(relay: Relay, options: HttpOptions) {
   const device = (req: Request) => idSchema.parse(req.params.deviceId);
   const request = (req: Request) => idSchema.parse(req.params.requestId);
   const body = <T extends z.ZodTypeAny>(req: Request, schema: T): z.infer<T> => schema.parse(req.body);
+  mountForms(app, relay.forms, owner, bearer, options.sseDurationMs);
   app.get('/v1/devices', async (req, res) => { res.json(await relay.listDevices((await owner(req)).uid)); });
   app.put('/v1/devices/:deviceId', async (req, res) => {
     const { uid } = await owner(req);
@@ -124,6 +128,10 @@ export function app(relay: Relay, options: HttpOptions) {
   app.post('/v1/requests/:requestId/cancel', async (req, res) => {
     res.json(await relay.transition({ secret: bearer(req) }, request(req), 'cancelled'));
   });
+  app.post('/internal/delivery', async (req, res) => {
+    try { await options.verifyScheduler(bearer(req)); } catch { throw new RelayError(401, 'invalid_worker_identity'); }
+    await relay.forms.dispatch(); res.json({ ok: true });
+  });
   app.post('/internal/maintenance', async (req, res) => {
     try { await options.verifyScheduler(bearer(req)); } catch { throw new RelayError(401, 'invalid_scheduler_identity'); }
     await relay.maintenance(); res.json({ ok: true });
@@ -131,7 +139,7 @@ export function app(relay: Relay, options: HttpOptions) {
   app.post('/mcp', async (req, res) => {
     const secret = bearer(req); await relay.checkAgent(secret);
     // New stateless server per HTTP request; identity is never shared between clients.
-    const server = new McpServer({ name: 'sms-code-relay', version: '0.4.0' });
+    const server = new McpServer({ name: 'sms-code-relay', version: '0.5.0' });
     const tool = (fn: () => Promise<unknown>) => fn().then(result => ({
       content: [{ type: 'text' as const, text: JSON.stringify(result) }], structuredContent: result as Record<string, unknown>,
     })).catch(error => ({ isError: true, content: [{ type: 'text' as const, text: JSON.stringify({ error: error instanceof RelayError ? error.reason : 'internal_error' }) }] }));
@@ -145,6 +153,11 @@ export function app(relay: Relay, options: HttpOptions) {
     server.registerTool('cancel_sms_code_request', {
       description: 'Cancel this token’s request.', inputSchema: { requestId: idSchema },
     }, input => tool(() => relay.transition({ secret }, input.requestId, 'cancelled')));
+    server.registerTool('create_request', { description: 'Create an interactive request. Requires owner approval for forms in Admin.', inputSchema: formSchema.shape }, input => tool(() => relay.forms.create(secret, input)));
+    server.registerTool('inspect_request', { description: 'Inspect your request without marking it opened.', inputSchema: { requestId: idSchema } }, input => tool(() => relay.forms.get({ secret }, input.requestId)));
+    server.registerTool('cancel_request', { description: 'Cancel your pending request.', inputSchema: { requestId: idSchema } }, input => tool(() => relay.forms.cancel(secret, input.requestId)));
+    server.registerTool('get_request_result', { description: 'Retrieve accepted answers, retained for 24 hours.', inputSchema: { requestId: idSchema } }, input => tool(() => relay.forms.result(secret, input.requestId)));
+    server.registerTool('poll_request_events', { description: 'Poll durable events for your connection. Answers are retrieved separately.', inputSchema: { cursor: z.string().max(128).optional() } }, input => tool(() => relay.forms.events(secret, input.cursor)));
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
     res.on('close', () => { void transport.close(); void server.close(); });
     await server.connect(transport); await transport.handleRequest(req, res, req.body);

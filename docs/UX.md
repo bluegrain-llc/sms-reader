@@ -1,5 +1,12 @@
 # Phone approval interface
 
+## General request inbox
+
+Inbox is the home area for pending general requests. Caller identity and title lead each item. The dedicated request view renders the full Markdown body, native controls, expiry, and declared action buttons. Back leaves a form pending; an explicit Decline ends it. Opening does not submit or imply agreement. SMS fields offer a separate consent helper and manual entry. Autofill and candidate selection fill the draft; an explicit form action submits it. Helper timeout leaves the form available. Legacy SMS screens also offer Back to inbox while listening continues. Admin → Access separately grants or removes form access on each connection.
+
+The domain is a private handoff: requester, explanation, decision, response, pending item, and receipt. Existing paper, graphite, muted slate, teal and error red anchor the new views. The signature is the requester-bound form with its independent SMS helper. The existing Material theme, native controls, tonal surfaces, typography and 20dp section spacing carry through. Each screen emphasizes the message and deliberate action; inbox rows emphasize requester identity and pending work.
+
+
 The owner opens a code request while using their phone. They need a focused screen containing “Bot name — short title”, the requesting bot's Markdown explanation, a code input, Send and Cancel. This screen has no Admin navigation or device controls. Admin remains in the app's separate home area.
 
 Focused-screen checkpoint: intent is to read the bot's explanation and deliberately send one code. Hierarchy puts the caller/title first, then the Markdown message, then a large monospace input and manual Send action. The existing paper, graphite, muted slate, teal and red palette is retained. Tonal surfaces separate the message from the inset input without shadows. Android sans uses 24sp semibold for the header and 16sp for the message; the code field uses 24sp monospace. Spacing follows the existing 4dp grid with 20dp outer padding and 12dp control gaps. The request-bound code field and request-bound code handoff are the signature. Dashboard tabs, auto-submit after reading, and a row of candidate Share buttons are replaced by focused reading, editable input and candidate selection that only fills the input.
