@@ -182,3 +182,23 @@ The configured signed APK/AAB, release lint and eight unit tests passed, along w
 v0.4.2 APK SHA-256: `ab4526b29552a723252d81d2e35b8dd9e1cefbeacc6d64be5a25f74408d41dfc`.
 
 v0.4.2 AAB SHA-256: `fd48d23921de4843819c21c3012e209df12bc2c55d73b7a2f6e3d460b70f5377`.
+
+
+## Separate Inbox, Settings and request responses — 2026-11-09
+
+Implemented explicit destinations and request origins in the existing single activity/session. Inbox shows full-width pending rows; Settings holds Access, Devices and History. Notification targets survive authentication/registration and busy operations, show only response loading/retry states, and retain their origin across recreation. Refresh discovers SMS requests without opening a listener or redirecting Settings. Back/Close preserves pending requests, drafts and active listening; successful SMS submission returns according to entry origin. Form outcomes remain visible until closed.
+
+Executed on an isolated API 36 Google APIs emulator using an unconfigured debug build and synthetic data:
+
+| Check | Result |
+| --- | --- |
+| Android JVM unit suite | **18 passed**, including destination restoration, return policy, waiting through authentication/registration and both busy sessions, and abandoning a queued target |
+| Compose/activity suite | **28 passed**, zero skipped, at normal 411×914dp and compact 360×640dp with 1.3 font scaling |
+| Entry/lifecycle coverage | Cold notification, entry from Inbox/Settings, repeated taps, rotation, connection-link routing, retained wizard answers/step, and Close backgrounding without finishing the activity |
+| Response coverage | System Back/Close during SMS upload, explicit Cancel, manual code validation/Send, candidate selection, server-confirmed success, form actions/confirmation, wizard validation/review, expiry and competing-phone outcomes |
+| Layout coverage | Inbox rows match safe list width and keep SMS/forms ordering; completed/expired entries are absent; arriving SMS does not interrupt Settings |
+| Visual checks | Inbox, Settings and SMS response exercised and captured at normal size, compact with large text, 640×360dp landscape and dark theme; **12 additional layout/screenshot cases passed** |
+| Debug build and instrumentation APK | Passed `assembleDebug assembleDebugAndroidTest` |
+| Lint | Passed `lintDebug`: zero errors and 15 dependency-version warnings |
+
+[UX documentation and checked-in screenshots](UX.md) describe the updated behavior. Manual-entry instrumentation exercises keyboard/focus and scrolling. State-driven response tests verify submission callbacks and acknowledged outcomes; they do not establish authenticated backend upload, real FCM delivery, real SMS consent or carrier/two-phone races for this change. Those remain physical acceptance cases in [PILOT.md](PILOT.md). No production service, signed release or physical-phone installation was changed.

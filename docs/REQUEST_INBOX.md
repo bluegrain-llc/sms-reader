@@ -1,6 +1,6 @@
 # Interactive request inbox (v2)
 
-Apps and agents can request information or a decision from their paired owner. Pairing, caller bearer credentials, Google sign-in, and SMS-only permissions remain compatible with v1. In **Admin → Access**, the owner must explicitly choose **Allow interactive requests** for each connection before it can use v2. Revoking form access cancels its pending forms while preserving SMS access. Revoking the connection blocks both.
+Apps and agents can request information or a decision from their paired owner. Pairing, caller bearer credentials, Google sign-in, and SMS-only permissions remain compatible with v1. In **Settings → Access**, the owner must explicitly choose **Allow interactive requests** for each connection before it can use v2. Revoking form access cancels its pending forms while preserving SMS access. Revoking the connection blocks both.
 
 General forms are independent pending items; they do not occupy the serialized SMS queue. The owner can answer in any order, leave a form pending with Back, or end it using a declared Decline action. Every form uses an immutable definition, an explicit action, and values keyed by field ID. The first valid phone submission wins. Another phone sees the accepted outcome without receiving the answers. Identical retries from the winning phone use the same submission ID; reusing that ID with changed contents returns a conflict.
 
@@ -50,13 +50,13 @@ Creation keys are connection-scoped. Replaying a key with a changed definition r
 
 Owner routes require a Firebase Google ID token and an owned registered device:
 
-- `PUT /v2/grants/:grantId/forms` with `{"approved":true}` grants form access in Admin.
+- `PUT /v2/grants/:grantId/forms` with `{"approved":true}` grants form access in Settings.
 - `GET /v2/devices/:deviceId/inbox` lists pending request summaries, newest first; open a request to fetch its body and controls.
 - `GET /v2/devices/:deviceId/requests/:requestId` fetches a definition without emitting an opening event.
 - `POST …/events` reports a notification tap, foreground rendering, or SMS helper readiness.
 - `POST …/submissions` sends `{"submissionId":"uuid", "action":"approve", "values":{"category":"meals"}}`.
 
-Markdown uses the existing native CommonMark renderer; HTML stays inert and external images/links do not fetch resources. Controls are native Material components. Back leaves a general request pending. A separate **Back to inbox** control also lets an ongoing legacy SMS listener continue while unrelated forms remain available.
+Markdown uses the existing native CommonMark renderer; HTML stays inert and external images/links do not fetch resources. Controls are native Material components. Back and **Close** preserve pending requests, drafts and active SMS reception. An Inbox entry returns to Inbox; a notification entry returns to the previous app.
 
 A text field with `"input":"sms_code"` offers manual entry and SMS User Consent autofill. There is at most one helper per request. The user explicitly starts listening; readiness is reported only after Play services starts the listener. Its five-minute deadline and timeout do not end the form. An owner-level helper lease serializes SMS capture across phones and the v1 SMS queue. Multiple phones may listen for the same form; another SMS request waits until those listeners end, even if the form is submitted first. Per-device leases also preserve Android cooldowns. After consent, the app extracts code candidates in memory; selecting or filling a candidate does not submit a v2 form. Legacy SMS automatic submission after Android consent is preserved. Process death loses drafts and consent state; the pending form remains available, and manual entry works during the prior listener's cooldown.
 
@@ -89,7 +89,7 @@ A request can include `steps` to group its existing `fields` into a wizard. Andr
 
 Definitions allow 2–12 steps. Each step has a unique ID, a title (120 characters), optional Markdown body (4,000 characters), and `fieldIds`. Every field must belong to exactly one step; an empty step can present instructions. Conditions reference a compatible field from an earlier step: `when: {fieldId, equals: string|number|boolean}`, or `when: {fieldId, contains: optionId}` for multiple choices. There are no executable expressions or loops. Missing values do not match, except an untouched checkbox has the value false. A field in a hidden step cannot activate a later step. The server validates the entire selected path and rejects answers for hidden fields. Changing an earlier answer discards answers from branches that become hidden.
 
-Draft values and the current step stay in the Android ViewModel across rotation, Previous/Next, and Back to inbox, isolated by request and signed-in owner. They are not uploaded, written to disk, saved state, or background jobs. Expiry, termination, or a change of owner clears drafts. Process death starts the wizard again. The review screen shows the selected path's answers before the explicit final action. Opening events still observe foreground message rendering; they do not prove that every wizard step was viewed. Step progress is local and emits no sender events.
+Draft values and the current step stay in the Android ViewModel across rotation, Previous/Next, and Close, isolated by request and signed-in owner. They are not uploaded, written to disk, saved state, or background jobs. Expiry, termination, or a change of owner clears drafts. Process death starts the wizard again. The review screen shows the selected path's answers before the explicit final action. Opening events still observe foreground message rendering; they do not prove that every wizard step was viewed. Step progress is local and emits no sender events.
 
 Wizard-capable phones advertise `wizardVersion: 1` during authenticated `PUT /v1/devices/:deviceId` registration. Android 0.6.0 advertises this automatically for an existing registration. Only capable phones receive wizard pushes or see them in the inbox; direct access from an old client returns `409 wizard_app_update_required`. Creation without an available capable phone returns `409 wizard_devices_unavailable`. Single-page forms and SMS continue to work on earlier clients. Deploy the compatible backend before updating Android. REST and the existing `create_request` MCP tool accept the same definition.
 

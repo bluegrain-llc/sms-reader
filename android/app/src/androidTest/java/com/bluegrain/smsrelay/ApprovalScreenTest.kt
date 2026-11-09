@@ -37,7 +37,7 @@ class ApprovalScreenTest {
             request = PhoneRequest("request", "awaiting_consent", "My assistant", "## Bizee verification\n\nEnter the **verification code** to finish signing in.", null, 600_000, 300_000, null, "Sign in"),
             candidates = listOf("123456", "654321"), now = 0))
         compose.setContent {
-            RelayTheme { RelayScreen(ui,
+            RelayTheme { SmsScreen(ui,
                 onSelectCandidate = { id, code -> assertEquals("request", id); ui = ui.copy(codeDraft = code); selected = code },
                 onSubmitCode = { id -> assertEquals("request", id); selected = ui.codeDraft }) }
         }
@@ -49,6 +49,8 @@ class ApprovalScreenTest {
         compose.onNodeWithText("Send").performScrollTo().assertIsNotEnabled()
         compose.onNodeWithText("Send 654321").performScrollTo().performClick()
         assertEquals("654321", selected)
+        compose.onNodeWithText("Close").performScrollTo()
+        compose.mainClock.advanceTimeBy(500)
         val preview = compose.onRoot().captureToImage().asAndroidBitmap()
         File(InstrumentationRegistry.getInstrumentation().targetContext.cacheDir, "sms-request-preview.png")
             .outputStream().use { preview.compress(Bitmap.CompressFormat.PNG, 100, it) }
@@ -57,7 +59,7 @@ class ApprovalScreenTest {
         var cancelled = false
         compose.setContent {
             RelayTheme {
-                RelayScreen(RelayUiState(configured = true, signedIn = true, registered = true, busy = true,
+                SmsScreen(RelayUiState(configured = true, signedIn = true, registered = true, busy = true,
                     request = PhoneRequest("request", "awaiting_consent", "My assistant", "Test", null, 600_000, 300_000, null),
                     codeDraft = "123456", now = 0), onCancel = { cancelled = true })
             }
@@ -71,7 +73,7 @@ class ApprovalScreenTest {
         var ui by androidx.compose.runtime.mutableStateOf(RelayUiState(configured = true, signedIn = true, registered = true,
             request = PhoneRequest("manual-request", "ready", "Invoice bot", "- Enter your code\n- Tap **Send**", null, 600_000, 300_000, null, "Verify login"), now = 0,
             autofillDeclined = true))
-        compose.setContent { RelayTheme { RelayScreen(ui,
+        compose.setContent { RelayTheme { SmsScreen(ui,
             onCodeChange = { id, value -> assertEquals("manual-request", id); ui = ui.copy(codeDraft = value) },
             onSubmitCode = { id -> assertEquals("manual-request", id); sent = true }) } }
         compose.onNodeWithText("SMS code").performScrollTo().performTextInput("ABC")
@@ -86,7 +88,7 @@ class ApprovalScreenTest {
         var ui by androidx.compose.runtime.mutableStateOf(RelayUiState(configured = true, signedIn = true, registered = true,
             request = PhoneRequest("request", "awaiting_consent", "Invoice bot", "Enter your verification code.", null, 600_000, 300_000, null),
             codeDraft = "123456", now = 0))
-        compose.setContent { RelayTheme { RelayScreen(ui, onSubmitCode = { sent = true }) } }
+        compose.setContent { RelayTheme { SmsScreen(ui, onSubmitCode = { sent = true }) } }
         compose.onNodeWithText("Send").performScrollTo().assertIsEnabled()
         assertEquals(false, sent)
         compose.runOnIdle { ui = ui.copy(now = 300_001) }
@@ -99,7 +101,7 @@ class ApprovalScreenTest {
         val request = PhoneRequest("request", "awaiting_consent", "Invoice bot", "Enter your code", null, 600_000, 300_000, null)
         var ui by androidx.compose.runtime.mutableStateOf(RelayUiState(configured = true, signedIn = true, registered = true,
             request = request, codeDraft = "123456", now = 0))
-        compose.setContent { RelayTheme { RelayScreen(ui, onRequestSent = { closed++ }) } }
+        compose.setContent { RelayTheme { SmsScreen(ui, onRequestSent = { closed++ }) } }
         compose.runOnIdle { assertEquals(0, closed); ui = ui.copy(request = request.copy(status = "failed")) }
         compose.runOnIdle { assertEquals(0, closed); ui = ui.copy(request = request.copy(status = "completed", reason = "handled_on_another_device")) }
         compose.runOnIdle { assertEquals(0, closed); ui = ui.copy(request = request.copy(status = "completed")) }
@@ -112,22 +114,23 @@ class ApprovalScreenTest {
     @Test fun relayHidesCredentialSetupAndAdminListsAllPhones() {
         compose.setContent {
             RelayTheme {
-                RelayScreen(RelayUiState(configured = true, signedIn = true, registered = true,
+                HomeScreen(RelayUiState(configured = true, signedIn = true, registered = true,
                     email = "owner@example.test", devices = listOf(
                         DeviceRow("first", "Samsung phone", false, true),
                         DeviceRow("second", "Pixel phone", true, false))),
                     )
             }
         }
-        compose.onNodeWithText("Ready for requests").assertIsDisplayed()
+        compose.onNodeWithText("No pending requests.").assertIsDisplayed()
         compose.onNodeWithText("Connect an app or bot").assertDoesNotExist()
-        compose.onNodeWithText("Admin").performClick()
+        compose.onNodeWithText("Settings").performClick()
         compose.onNodeWithText("Connect an app or bot").performScrollTo().assertIsDisplayed()
         compose.onNodeWithText("Copy connection").assertDoesNotExist()
+        compose.mainClock.advanceTimeBy(500)
         val preview = compose.onRoot().captureToImage().asAndroidBitmap()
         File(InstrumentationRegistry.getInstrumentation().targetContext.cacheDir, "admin-preview.png")
             .outputStream().use { preview.compress(Bitmap.CompressFormat.PNG, 100, it) }
-        compose.onNodeWithText("Devices").performScrollTo().performClick()
+        compose.onNodeWithText("Devices").performClick()
         compose.onNodeWithText("Samsung phone").performScrollTo().assertIsDisplayed()
         compose.onNodeWithText("This phone · Receives requests").assertIsDisplayed()
         compose.onNode(hasScrollAction()).performScrollToNode(hasText("Pixel phone"))
@@ -136,7 +139,7 @@ class ApprovalScreenTest {
     @Test fun anotherPhonesApprovalIsClearlyReportedWithoutTheCode() {
         compose.setContent {
             RelayTheme {
-                RelayScreen(RelayUiState(configured = true, signedIn = true, registered = true,
+                SmsScreen(RelayUiState(configured = true, signedIn = true, registered = true,
                     request = PhoneRequest("request", "completed", "My assistant", "Sign in", null,
                         600_000, 300_000, "handled_on_another_device")),
                     )
@@ -145,13 +148,13 @@ class ApprovalScreenTest {
         compose.onNodeWithText("Handled on another phone").performScrollTo().assertIsDisplayed()
         compose.onNodeWithText("SMS code").assertDoesNotExist()
         compose.onNodeWithText("Admin").assertDoesNotExist()
-        compose.onNodeWithText("Close").assertIsDisplayed()
+        compose.onNodeWithText("Close").performScrollTo().assertIsDisplayed()
     }
     @Test fun openingConnectionRequiresAnExplicitOwnerDecision() {
         var decision: Boolean? = null
         compose.setContent {
             RelayTheme {
-                RelayScreen(RelayUiState(configured = true, signedIn = true, registered = true,
+                SettingsTestScreen(RelayUiState(configured = true, signedIn = true, registered = true,
                     email = "owner@example.test", now = 0,
                     connection = ConnectionReview("ABCDE-FG234", "Invoice bot", "Receive sign-in codes", "pending", 600_000, 30)),
                     onConnectionDecision = { code, approved -> assertEquals("ABCDE-FG234", code); decision = approved })
@@ -160,6 +163,7 @@ class ApprovalScreenTest {
         compose.onNodeWithText("Invoice bot").performScrollTo().assertIsDisplayed()
         compose.onNodeWithText("ABCDE-FG234").assertIsDisplayed()
         assertEquals(null, decision)
+        compose.mainClock.advanceTimeBy(500)
         val preview = compose.onRoot().captureToImage().asAndroidBitmap()
         File(InstrumentationRegistry.getInstrumentation().targetContext.cacheDir, "connection-preview.png")
             .outputStream().use { preview.compress(Bitmap.CompressFormat.PNG, 100, it) }
@@ -169,7 +173,7 @@ class ApprovalScreenTest {
     @Test fun expiredConnectionCannotBeApproved() {
         compose.setContent {
             RelayTheme {
-                RelayScreen(RelayUiState(configured = true, signedIn = true, registered = true, now = 600_000,
+                SettingsTestScreen(RelayUiState(configured = true, signedIn = true, registered = true, now = 600_000,
                     connection = ConnectionReview("ABCDE-FG234", "Expired bot", "Sign in", "pending", 600_000, 30)))
             }
         }
@@ -180,7 +184,7 @@ class ApprovalScreenTest {
         var retried: String? = null
         compose.setContent {
             RelayTheme {
-                RelayScreen(RelayUiState(configured = true, signedIn = true, registered = true,
+                SettingsTestScreen(RelayUiState(configured = true, signedIn = true, registered = true,
                     connectionCode = "ABCDE-FG234", error = "Check your network and retry."),
                     onReviewConnection = { retried = it })
             }
@@ -189,6 +193,26 @@ class ApprovalScreenTest {
         compose.onNodeWithText("Approve connection").assertDoesNotExist()
         compose.onNodeWithText("Review connection").performScrollTo().performClick()
         assertEquals("ABCDE-FG234", retried)
+    }
+    @androidx.compose.runtime.Composable
+    private fun SmsScreen(state: RelayUiState,
+        onSelectCandidate: (String, String) -> Unit = { _, _ -> }, onSubmitCode: (String) -> Unit = {},
+        onCodeChange: (String, String) -> Unit = { _, _ -> }, onCancel: () -> Unit = {}, onRequestSent: () -> Unit = {}) {
+        RelayScreen(state, RelayDestination.Response(RequestTarget(state.request!!.id, RequestKind.Sms), RequestOrigin.Inbox),
+            responseReady = true, onSelectCandidate = onSelectCandidate, onSubmitCode = onSubmitCode,
+            onCodeChange = onCodeChange, onCancel = onCancel, onRequestSent = onRequestSent)
+    }
+    @androidx.compose.runtime.Composable
+    private fun SettingsTestScreen(state: RelayUiState, onConnectionDecision: (String, Boolean) -> Unit = { _, _ -> }, onReviewConnection: (String) -> Unit = {}) {
+        SettingsScreen(state, SettingsSection.Access, onConnectionDecision = onConnectionDecision, onReviewConnection = onReviewConnection)
+    }
+    @androidx.compose.runtime.Composable
+    private fun HomeScreen(state: RelayUiState, formState: InboxState = InboxState(),
+        onOpenForm: (String) -> Unit = {}, onApproveForms: (String, Boolean) -> Unit = { _, _ -> }) {
+        var destination by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf<RelayDestination>(RelayDestination.Inbox) }
+        RelayScreen(state, destination, formState, onSettings = { destination = RelayDestination.Settings() },
+            onSection = { destination = RelayDestination.Settings(it) }, onBack = { destination = RelayDestination.Inbox },
+            onOpenForm = onOpenForm, onApproveForms = onApproveForms)
     }
     private fun form() = RequestForm("form-1", "Expense assistant", "Review invoice", "## Invoice details\n\nChoose a category and approve.",
         "pending", 600_000, listOf(
@@ -221,7 +245,7 @@ class ApprovalScreenTest {
         compose.setContent { RelayTheme { RequestFormScreen(ui, "phone", { backs++ }, { _, _ -> }, { submissions++ }, { opens++ }, {}, {}) } }
         compose.runOnIdle { assertEquals(0, opens); ui = ui.copy(foreground = true) }
         compose.waitUntil { opens == 1 }
-        compose.onNodeWithText("Back to inbox").performScrollTo().performClick()
+        compose.onNodeWithText("Close").performScrollTo().performClick()
         assertEquals(1, backs); assertEquals(0, submissions); assertEquals("pending", ui.form?.status)
     }
     @Test fun generalFormExpiryDisablesActionsAndReportsCompetingPhone() {
@@ -235,14 +259,14 @@ class ApprovalScreenTest {
     @Test fun inboxRemainsAvailableWhileSmsIsListeningAndFormPermissionIsExplicit() {
         var opened: String? = null
         var approved = false
-        compose.setContent { RelayTheme { RelayScreen(RelayUiState(configured = true, signedIn = true, registered = true,
-            showSmsRequest = false, request = PhoneRequest("sms", "ready", "SMS bot", "SMS", null, 600_000, 300_000, null), now = 0,
+        compose.setContent { RelayTheme { HomeScreen(RelayUiState(configured = true, signedIn = true, registered = true,
+            request = PhoneRequest("sms", "ready", "SMS bot", "SMS", null, 600_000, 300_000, null), now = 0,
             grants = listOf(GrantRow("grant", "Expense assistant", false, 600_000))),
-            inbox = listOf(form()), onOpenForm = { opened = it }, onApproveForms = { _, value -> approved = value }) } }
-        compose.onNodeWithText("Return to SMS request").performScrollTo().assertIsDisplayed()
-        compose.onNodeWithText("Open request").performScrollTo().performClick()
+            formState = InboxState(requests = listOf(form())), onOpenForm = { opened = it }, onApproveForms = { _, value -> approved = value }) } }
+        compose.onNodeWithText("SMS bot").assertIsDisplayed()
+        compose.onNodeWithText("Review invoice").performScrollTo().performClick()
         assertEquals("form-1", opened)
-        compose.onNodeWithText("Admin").performScrollTo().performClick()
+        compose.onNodeWithText("Settings").performClick()
         compose.onNode(hasScrollAction()).performScrollToNode(hasText("SMS requests only"))
         compose.onNodeWithText("SMS requests only").assertIsDisplayed()
         compose.onNodeWithText("Allow interactive requests").performScrollTo().performClick()
@@ -316,7 +340,7 @@ class ApprovalScreenTest {
         val vm = wizardVm(); val first = wizardForm(); val second = first.copy(id = "wizard-2")
         compose.runOnIdle {
             vm.showLoaded(first); vm.change("category", "travel"); vm.next(); vm.change("note", "First trip")
-            vm.close(); assertEquals(null, vm.state.value.form)
+            vm.close(); assertEquals(first.id, vm.state.value.form?.id); assertEquals("First trip", vm.state.value.values["note"])
             vm.showLoaded(second); assertTrue(vm.state.value.values.isEmpty())
             vm.change("category", "food"); vm.next(); vm.change("confirmed", true); vm.next()
             assertTrue(vm.state.value.reviewing)
@@ -341,6 +365,7 @@ class ApprovalScreenTest {
             RequestFormScreen(s, "phone", vm::close, vm::change, {}, {}, {}, {}, vm::next, vm::previous)
         } }
         compose.onNodeWithText("Review your response").performScrollTo().assertIsDisplayed()
+        compose.mainClock.advanceTimeBy(500)
         val preview = compose.onRoot().captureToImage().asAndroidBitmap()
         File(InstrumentationRegistry.getInstrumentation().targetContext.getExternalFilesDir(null), "wizard-review.png")
             .outputStream().use { preview.compress(Bitmap.CompressFormat.PNG, 100, it) }
