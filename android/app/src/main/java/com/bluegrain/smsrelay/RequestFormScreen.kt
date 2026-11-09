@@ -11,6 +11,8 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import java.text.DateFormat
@@ -21,15 +23,24 @@ import java.util.Locale
 @Composable
 fun RequestFormScreen(state: InboxState, deviceId: String, onBack: () -> Unit,
     onChange: (String, Any) -> Unit, onSubmit: (FormAction) -> Unit, onRendered: (String) -> Unit,
-    onListen: (FormField) -> Unit, onCandidate: (String) -> Unit) {
+    onListen: (FormField) -> Unit, onCandidate: (String) -> Unit,
+    onNext: () -> Unit = {}, onPrevious: () -> Unit = {}) {
     val form = state.form ?: return
-    BackHandler { if (!state.busy) onBack() }
+    val wizard = form.steps.isNotEmpty()
+    val steps = FormWizard.visibleSteps(form, state.values)
+    val current = FormWizard.current(form, state.values, state.stepId)
+    val scroll = rememberScrollState()
+    val focus = LocalFocusManager.current
+    val keyboard = LocalSoftwareKeyboardController.current
+    LaunchedEffect(form.id, state.stepId, state.reviewing) { focus.clearFocus(); keyboard?.hide(); scroll.scrollTo(0) }
+    LaunchedEffect(state.fieldErrors) { if (state.fieldErrors.isNotEmpty()) scroll.animateScrollTo(0) }
+    BackHandler { if (!state.busy) { if (wizard) onPrevious() else onBack() } }
     LaunchedEffect(form.id, state.foreground) {
         if (state.foreground) { withFrameNanos { }; onRendered(form.id) }
     }
     val active = form.status == "pending" && state.now < form.expiresAt
     Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-        Column(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing).imePadding().verticalScroll(rememberScrollState()).padding(20.dp),
+        Column(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing).imePadding().verticalScroll(scroll).padding(20.dp),
             verticalArrangement = Arrangement.spacedBy(20.dp)) {
             TextButton(onClick = onBack, enabled = !state.busy) { Text("Back to inbox") }
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -42,13 +53,46 @@ fun RequestFormScreen(state: InboxState, deviceId: String, onBack: () -> Unit,
             if (state.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
             state.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
             if (active) {
-                form.fields.forEach { field -> FormFieldControl(field, state.values[field.id], !state.busy, { onChange(field.id, it) }) {
-                    onListen(field)
-                } }
+                if (wizard) {
+                    val index = if (state.reviewing) steps.size else steps.indexOf(current).coerceAtLeast(0)
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text(if (state.reviewing) "Review your response" else "Step ${index + 1} of ${steps.size}",
+                            style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
+                        LinearProgressIndicator(progress = { (index + 1f) / (steps.size + 1f) }, modifier = Modifier.fillMaxWidth())
+                        if (!state.reviewing) {
+                            Text(current?.title.orEmpty(), style = MaterialTheme.typography.titleLarge)
+                            current?.body?.takeIf { it.isNotBlank() }?.let { MarkdownMessage(it) }
+                        }
+                    }
+                }
+                if (wizard && state.reviewing) {
+                    steps.forEach { step ->
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text(step.title, style = MaterialTheme.typography.titleLarge)
+                            FormWizard.stepFields(form, step).forEach { field ->
+                                Text(field.label, style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                Text(FormWizard.display(field, state.values[field.id]), style = MaterialTheme.typography.bodyLarge)
+                            }
+                        }
+                    }
+                } else {
+                    val fields = if (wizard) current?.let { FormWizard.stepFields(form, it) }.orEmpty() else form.fields
+                    fields.forEach { field ->
+                        FormFieldControl(field, state.values[field.id], !state.busy, { onChange(field.id, it) }, { onListen(field) })
+                        state.fieldErrors[field.id]?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+                    }
+                }
                 state.helper?.let { Text(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) }
                 state.candidates.forEach { code -> OutlinedButton(onClick = { onCandidate(code) }, enabled = !state.busy) { Text("Use $code") } }
-                Text("Opening this request does not send a response. Choose an action below when you are ready.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                form.actions.forEach { action ->
+                if (wizard) {
+                    Text(if (state.reviewing) "Review your answers, then choose an action to send one response."
+                        else "Your answers stay on this phone until you submit. Back to inbox keeps your draft while the app is running.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    if (state.reviewing || steps.indexOf(current) > 0) OutlinedButton(onClick = onPrevious, enabled = !state.busy, modifier = Modifier.fillMaxWidth()) { Text("Previous step") }
+                    if (!state.reviewing) Button(onClick = onNext, enabled = !state.busy, modifier = Modifier.fillMaxWidth()) {
+                        Text(if (current == steps.lastOrNull()) "Review response" else "Next")
+                    }
+                } else Text("Opening this request does not send a response. Choose an action below when you are ready.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                form.actions.filter { !wizard || state.reviewing || it.type == "decline" }.forEach { action ->
                     if (action.type == "decline") OutlinedButton(onClick = { onSubmit(action) }, enabled = !state.busy, modifier = Modifier.fillMaxWidth()) { Text(action.label) }
                     else Button(onClick = { onSubmit(action) }, enabled = !state.busy, modifier = Modifier.fillMaxWidth()) { Text(action.label) }
                 }

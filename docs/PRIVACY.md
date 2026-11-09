@@ -24,3 +24,5 @@ Before Play submission, the operator must finalize public privacy/deletion URLs,
 App/bot connections require separate approval in Admin before they can request SMS codes. The bot gets a private pending credential and a short-lived public connection link/code; its credential becomes usable only after approval. The phone never displays or copies this credential. Connection metadata retains seven days, while comparison-code/rate records expire after their short windows. Android-assisted filling still needs a separate Android consent decision for each message. Manual entry does not read the message; Android approval can send automatically, while manual entry requires Send.
 
 Connection URLs may appear in ordinary infrastructure route logs. They contain only the short-lived comparison code, not the private caller credential or an SMS message/code.
+
+Wizard step progress and response drafts remain only in app memory, isolated by request and signed-in owner. Previous/Next and Back to inbox retain them while the process lives; process death loses them. Only a final submission uploads answers. Hidden-branch answers are discarded when the selected path changes.

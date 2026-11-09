@@ -45,3 +45,53 @@ test('signatures bind the exact payload and timestamp', () => {
   assert.equal(signature('secret', '123', '{"id":"e"}'), '856bedd896a4356b4737e395fcdeb19de5fca7c3ef02a02a2c55efc28fd547bc');
   assert.notEqual(signature('secret', '124', '{"id":"e"}'), signature('secret', '123', '{"id":"e"}'));
 });
+
+const wizard = () => formSchema.parse({ title: 'Travel approval', body: 'Complete the steps', idempotencyKey: 'wizard-001',
+  fields: [{ id: 'travel', type: 'checkbox', label: 'Travel expense' },
+    { id: 'city', type: 'text', label: 'Destination', required: true },
+    { id: 'receipt', type: 'checkbox', label: 'Receipt available' },
+    { id: 'reference', type: 'text', label: 'Receipt reference', required: true }],
+  steps: [{ id: 'kind', title: 'Expense type', fieldIds: ['travel'] },
+    { id: 'trip', title: 'Trip', fieldIds: ['city', 'receipt'], when: { fieldId: 'travel', equals: true } },
+    { id: 'evidence', title: 'Receipt', fieldIds: ['reference'], when: { fieldId: 'receipt', equals: true } }],
+  actions: [{ id: 'submit', type: 'submit', label: 'Submit' }, { id: 'decline', type: 'decline', label: 'Decline' }] });
+test('wizard definitions reject ambiguous ownership, duplicate steps, forward references and incompatible predicates', () => {
+  const d = wizard();
+  for (const steps of [[d.steps![0]], [d.steps![0], d.steps![0]],
+    [d.steps![0], { ...d.steps![1], fieldIds: ['city'] }],
+    [{ ...d.steps![0], fieldIds: ['travel', 'missing'] }, ...d.steps!.slice(1)],
+    [{ ...d.steps![0], when: { fieldId: 'travel', equals: true } }, ...d.steps!.slice(1)],
+    [d.steps![0], { ...d.steps![1], when: { fieldId: 'reference', equals: 'x' } }, d.steps![2]],
+    [d.steps![0], { ...d.steps![1], when: { fieldId: 'travel', equals: 'true' } }, d.steps![2]],
+    [d.steps![0], { ...d.steps![1], when: { fieldId: 'travel', contains: 'x' } }, d.steps![2]]]) {
+    assert.equal(formSchema.safeParse({ ...d, steps }).success, false);
+  }
+});
+test('wizard submission validates only its reachable path and rejects stale answers in hidden branches', () => {
+  const def = wizard(); const upload = (values: Record<string, string | boolean>) => ({ submissionId: 'wizard-upload', action: 'submit', values });
+  assert.equal(validateSubmission(def, upload({})), 'submitted'); // An untouched optional checkbox is false.
+  assert.equal(validateSubmission(def, upload({ travel: false })), 'submitted');
+  assert.throws(() => validateSubmission(def, upload({ travel: true })), /required_field/);
+  assert.equal(validateSubmission(def, upload({ travel: true, city: 'Santo Domingo', receipt: false })), 'submitted');
+  assert.throws(() => validateSubmission(def, upload({ travel: true, city: 'Santo Domingo', receipt: true })), /required_field/);
+  assert.equal(validateSubmission(def, upload({ travel: true, city: 'Santo Domingo', receipt: true, reference: 'DEMO' })), 'submitted');
+  assert.throws(() => validateSubmission(def, upload({ travel: false, city: 'Stale', receipt: true, reference: 'Stale' })), /hidden_field/);
+  assert.throws(() => validateSubmission(def, upload({ travel: false, reference: 'Stale' })), /hidden_field/);
+  assert.equal(validateSubmission(def, { ...upload({}), action: 'decline' }), 'declined');
+});
+test('wizard conditions compare choice membership and numbers without coercing strings', () => {
+  const d = formSchema.parse({ ...wizard(), fields: [
+    { id: 'tags', type: 'multiple_choice', label: 'Tags', options: [{ id: 'tax', label: 'Tax' }] },
+    { id: 'amount', type: 'number', label: 'Amount', required: true },
+    { id: 'note', type: 'text', label: 'Note', required: true }],
+    steps: [{ id: 'tags', title: 'Tags', fieldIds: ['tags'] },
+      { id: 'tax', title: 'Tax', fieldIds: ['amount'], when: { fieldId: 'tags', contains: 'tax' } },
+      { id: 'note', title: 'Note', fieldIds: ['note'], when: { fieldId: 'amount', equals: 10 } }] });
+  const upload = (values: Record<string, string | number | string[]>) => ({ submissionId: 'choice-wizard', action: 'submit', values });
+  assert.equal(validateSubmission(d, upload({ tags: [] })), 'submitted');
+  assert.throws(() => validateSubmission(d, upload({ tags: ['tax'] })), /required_field/);
+  assert.throws(() => validateSubmission(d, upload({ tags: ['tax'], amount: 10 })), /required_field/);
+  assert.equal(validateSubmission(d, upload({ tags: ['tax'], amount: 11 })), 'submitted');
+  assert.equal(validateSubmission(d, upload({ tags: ['tax'], amount: 10, note: 'Test' })), 'submitted');
+  assert.throws(() => validateSubmission(d, upload({ tags: ['tax'], amount: '10', note: 'Test' })));
+});

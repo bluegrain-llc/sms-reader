@@ -523,6 +523,19 @@ integration('v2 REST, MCP, and SSE authenticate, replay from durable storage and
     await client.connect(new StreamableHTTPClientTransport(new URL(base + '/mcp'), { requestInit: { headers } }));
     const result = await client.callTool({ name: 'get_request_result', arguments: { requestId: r.requestId } });
     assert.equal(JSON.parse((result.content as { text: string }[])[0]!.text).result.values.note, 'Approved');
+    const ownerHeaders = { ...headers, authorization: 'Bearer owner-session' };
+    assert.equal((await fetch(base + `/v1/devices/${did}`, { method: 'PUT', headers: ownerHeaders,
+      body: JSON.stringify({ name: 'Wizard phone', fcmToken: 'first-fcm', wizardVersion: 1 }) })).status, 200);
+    const wizard = await client.callTool({ name: 'create_request', arguments: wizardInput('mcp-wizard') });
+    assert.equal(wizard.isError, undefined);
+    const w = JSON.parse((wizard.content as { text: string }[])[0]!.text);
+    assert.equal(w.steps[1].when.equals, true);
+    const inspected = await fetch(base + `/v2/devices/${did}/requests/${w.requestId}`, { headers: ownerHeaders });
+    assert.equal((await inspected.json() as { steps: unknown[] }).steps.length, 2);
+    assert.equal((await fetch(base + `/v2/devices/${did}/requests/${w.requestId}/submissions`, { method: 'POST', headers: ownerHeaders,
+      body: JSON.stringify({ submissionId: 'wizard-via-rest', action: 'approve', values: { travel: false } }) })).status, 200);
+    const wizardResult = await client.callTool({ name: 'get_request_result', arguments: { requestId: w.requestId } });
+    assert.deepEqual(JSON.parse((wizardResult.content as { text: string }[])[0]!.text).result.values, { travel: false });
     assert.equal((await fetch(base + '/internal/delivery', { method: 'POST', headers })).status, 401);
   } finally { await client.close(); await Promise.all([server, secondServer].map(s => new Promise<void>(resolve => s ? s.close(() => resolve()) : resolve()))); }
 });
@@ -593,4 +606,64 @@ integration('competing forms on different phones cannot both become SMS-ready', 
   await assert.rejects(relay.forms.observe(uid, second, next.requestId, { type: 'input.ready', fieldId: 'code', listenerStartedAt: time }), reason('sms_listener_busy'));
   time += 4 * MINUTE;
   await relay.forms.observe(uid, second, next.requestId, { type: 'input.ready', fieldId: 'code', listenerStartedAt: time });
+});
+
+const wizardInput = (key: string) => ({ ...formInput(key), fields: [
+  { id: 'travel', type: 'checkbox' as const, label: 'Travel' }, { id: 'city', type: 'text' as const, label: 'Destination', required: true }],
+  steps: [{ id: 'kind', title: 'Expense type', fieldIds: ['travel'] }, { id: 'trip', title: 'Trip', body: '**Where?**', fieldIds: ['city'], when: { fieldId: 'travel', equals: true } }] });
+integration('wizards advertise capabilities, isolate old clients and keep their definitions immutable', async () => {
+  await allowForms();
+  await assert.rejects(relay.forms.create(token, wizardInput('wizard-capabilities')), reason('wizard_devices_unavailable'));
+  await relay.register(uid, did, 'First phone', 'first-fcm', 1);
+  const r = await relay.forms.create(token, wizardInput('wizard-capabilities'));
+  assert.equal(r.steps?.[1]?.body, '**Where?**');
+  assert.equal((await relay.forms.inbox(uid, did)).length, 1); assert.equal((await relay.forms.inbox(uid, second)).length, 0);
+  await assert.rejects(relay.forms.get(otherPhone, r.requestId), reason('wizard_app_update_required'));
+  await assert.rejects(relay.forms.submit(uid, second, r.requestId, { submissionId: 'old-client', action: 'approve', values: {} }), reason('wizard_app_update_required'));
+  await relay.forms.dispatch(); assert.deepEqual(sends, ['first-fcm']);
+  await assert.rejects(relay.forms.create(token, { ...wizardInput('wizard-capabilities'), steps: [...wizardInput('wizard-capabilities').steps].reverse() }));
+  await assert.rejects(relay.forms.create(token, { ...wizardInput('wizard-capabilities'), steps: wizardInput('wizard-capabilities').steps.map(s => ({ ...s, title: 'Changed' })) }), reason('idempotency_conflict'));
+  await relay.register(uid, did, 'First phone', 'first-fcm'); // Downgrading withdraws capability.
+  assert.equal((await relay.forms.inbox(uid, did)).length, 0);
+  const flat = await relay.forms.create(token, formInput('flat-still-supported'));
+  assert.equal((await relay.forms.get(phone, flat.requestId)).status, 'pending');
+});
+integration('wizard submissions validate their selected branch and remain atomic and idempotent across phones', async () => {
+  await allowForms(); await relay.register(uid, did, 'First', 'first-fcm', 1); await relay.register(uid, second, 'Second', 'second-fcm', 1);
+  const r = await relay.forms.create(token, wizardInput('wizard-final-response'));
+  const upload = { submissionId: 'wizard-final', action: 'approve', values: { travel: true, city: 'Santo Domingo' } };
+  await assert.rejects(relay.forms.submit(uid, did, r.requestId, { ...upload, values: { travel: true } }), reason('required_field'));
+  await assert.rejects(relay.forms.submit(uid, did, r.requestId, { ...upload, values: { travel: false, city: 'Stale' } }), reason('hidden_field'));
+  assert.equal((await relay.forms.get(phone, r.requestId)).status, 'pending');
+  assert.equal((await relay.forms.result(token, r.requestId)).result, null);
+  await Promise.all([relay.forms.submit(uid, did, r.requestId, upload), relay.forms.submit(uid, second, r.requestId, { ...upload, submissionId: 'second-wizard-final' })]);
+  await relay.forms.submit(uid, did, r.requestId, upload);
+  const result = await relay.forms.result(token, r.requestId); assert.deepEqual(result.result?.values, upload.values);
+  assert.equal((await relay.forms.events(token)).events.filter(e => e.type === 'request.submitted').length, 1);
+  assert.equal((await db.collection('formResults').get()).size, 1);
+  const skipped = await relay.forms.create(token, wizardInput('wizard-skipped-branch'));
+  await relay.forms.submit(uid, did, skipped.requestId, { submissionId: 'skip-trip', action: 'approve', values: { travel: false } });
+  assert.deepEqual((await relay.forms.result(token, skipped.requestId)).result?.values, { travel: false });
+  const declined = await relay.forms.create(token, wizardInput('wizard-early-decline'));
+  assert.equal((await relay.forms.submit(uid, second, declined.requestId, { submissionId: 'decline-early', action: 'decline', values: {} })).status, 'declined');
+});
+integration('wizard cancellation, expiry and connection isolation preserve one terminal outcome without answers', async () => {
+  await allowForms(); await relay.register(uid, did, 'Wizard phone', 'first-fcm', 1);
+  const other = await relay.createGrant(uid, '', 'Other connection', 30); await relay.forms.approve(uid, other.grantId, true);
+  const r = await relay.forms.create(token, { ...wizardInput('wizard-expiry'), expiresInSeconds: 60 });
+  await assert.rejects(relay.forms.get({ secret: other.token }, r.requestId), reason('request_not_found'));
+  await assert.rejects(relay.forms.get({ uid: 'unrelated', deviceId: did }, r.requestId), reason('device_not_found'));
+  time += MINUTE;
+  const upload = { submissionId: 'too-late-wizard', action: 'approve', values: { travel: false } };
+  assert.equal((await relay.forms.submit(uid, did, r.requestId, upload)).status, 'expired');
+  assert.equal((await relay.forms.result(token, r.requestId)).result, null);
+  const cancelled = await relay.forms.create(token, wizardInput('wizard-cancelled'));
+  await relay.forms.observe(uid, did, cancelled.requestId, { type: 'request.opened' });
+  await relay.forms.cancel(token, cancelled.requestId);
+  assert.equal((await relay.forms.submit(uid, did, cancelled.requestId, upload)).status, 'cancelled');
+  assert.equal((await relay.forms.result(token, cancelled.requestId)).result, null);
+  const revoked = await relay.forms.create(token, wizardInput('wizard-permission-revoked'));
+  await relay.forms.approve(uid, grantId, false);
+  assert.equal((await relay.forms.get(phone, revoked.requestId)).status, 'cancelled');
+  assert.equal((await db.collection('formResults').get()).size, 0);
 });

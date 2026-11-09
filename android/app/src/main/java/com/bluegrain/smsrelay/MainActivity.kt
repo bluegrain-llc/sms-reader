@@ -89,7 +89,7 @@ class MainActivity : ComponentActivity() {
             }
             RelayTheme {
                 if (inboxState.form != null) RequestFormScreen(inboxState, (application as RelayApplication).repository.deviceId,
-                    inbox::close, inbox::change, inbox::submit, inbox::rendered, inbox::listen, inbox::candidate)
+                    inbox::close, inbox::change, inbox::submit, inbox::rendered, inbox::listen, inbox::candidate, inbox::next, inbox::previous)
                 else RelayScreen(state.copy(error = inboxState.error ?: state.error, busy = state.busy || inboxState.busy), onSignIn = ::signIn, onRegister = ::register,
                     onRefresh = { vm.refresh(); inbox.refresh() }, onPause = { vm.pause() }, onCancel = { vm.cancel() },
                     onRevoke = { vm.revoke(it) }, onSubmitCode = { vm.upload(it) }, onCodeChange = { id, value -> vm.changeCode(id, value) },

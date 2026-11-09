@@ -20,7 +20,7 @@ export interface Device {
   id: string; ownerId: string; name: string; fcmToken: string;
   paused: boolean; deleted: boolean; activeRequestId: string | null;
   rate: Rate; updatedAt: number;
-  listenerUntil?: number; formListenerUntil?: number;
+  listenerUntil?: number; formListenerUntil?: number; wizardVersion?: 1 | null;
 }
 export interface Grant {
   id: string; ownerId: string; deviceId: string; callerName: string;

@@ -23,6 +23,11 @@ import androidx.compose.ui.test.hasText
 import org.junit.Assert.assertEquals
 import org.junit.Rule
 import org.junit.Test
+import org.junit.After
+import androidx.compose.runtime.collectAsState
+import androidx.lifecycle.ViewModelStore
+import org.junit.Assert.assertTrue
+import org.junit.Assert.assertFalse
 
 class ApprovalScreenTest {
     @get:Rule val compose = createComposeRule()
@@ -260,6 +265,88 @@ class ApprovalScreenTest {
         assertEquals("42.50", ui.values["amount"])
         assertEquals(true, ui.values["confirmed"])
         assertEquals(setOf("tax", "work"), ui.values["tags"])
+    }
+
+    private val wizardStores = mutableListOf<ViewModelStore>()
+    @After fun clearWizardViewModels() { wizardStores.forEach { it.clear() } }
+    private fun wizardVm(): InboxViewModel {
+        val vm = InboxViewModel(InstrumentationRegistry.getInstrumentation().targetContext.applicationContext as RelayApplication)
+        ViewModelStore().also { it.put("wizard", vm); wizardStores.add(it) }
+        return vm
+    }
+    private fun wizardForm() = form().copy(id = "wizard-1", expiresAt = System.currentTimeMillis() + 600_000,
+        fields = listOf(form().fields[1], form().fields[0], FormField("confirmed", "Confirmed", "checkbox", true, 1000, null, null, emptyList(), false)),
+        steps = listOf(FormStep("kind", "Expense type", "Choose the expense type.", listOf("category")),
+            FormStep("trip", "Travel details", "Describe the trip.", listOf("note"), FormCondition("category", "travel")),
+            FormStep("finish", "Confirmation", "", listOf("confirmed"))))
+
+    @Test fun wizardValidatesStepsReviewsOnceAndPrunesChangedBranches() {
+        val vm = wizardVm()
+        var submissions = 0
+        compose.runOnIdle { vm.showLoaded(wizardForm()) }
+        compose.setContent { val s by vm.state.collectAsState(); RelayTheme {
+            RequestFormScreen(s, "phone", vm::close, vm::change, { submissions++ }, {}, {}, {}, vm::next, vm::previous)
+        } }
+        compose.onNodeWithText("Step 1 of 2").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("Approve invoice").assertDoesNotExist()
+        compose.onNodeWithText("Decline invoice").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("Next").performScrollTo().performClick()
+        compose.onNodeWithText("Required").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("Travel").performScrollTo().performClick()
+        compose.onNodeWithText("Next").performScrollTo().performClick()
+        compose.onNodeWithText("Step 2 of 3").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("Comment *").performScrollTo().performTextInput("Flight to Santo Domingo")
+        compose.onNodeWithText("Next").performScrollTo().performClick()
+        compose.onNodeWithText("Confirmed *").performScrollTo().performClick()
+        compose.onNodeWithText("Review response").performScrollTo().performClick()
+        compose.onNodeWithText("Review your response").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("Flight to Santo Domingo").performScrollTo().assertIsDisplayed()
+        assertEquals(0, submissions)
+        repeat(3) { compose.onNodeWithText("Previous step").performScrollTo().performClick() }
+        compose.onNodeWithText("Meals").performScrollTo().performClick()
+        compose.onNodeWithText("Next").performScrollTo().performClick()
+        compose.onNodeWithText("Step 2 of 2").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("Review response").performScrollTo().performClick()
+        compose.onNodeWithText("Flight to Santo Domingo").assertDoesNotExist()
+        compose.runOnIdle { assertFalse(vm.state.value.values.containsKey("note")) }
+        compose.onNodeWithText("Approve invoice").performScrollTo().performClick()
+        assertEquals(1, submissions)
+    }
+    @Test fun wizardDraftsResumeFromInboxAndStayIsolatedBetweenRequests() {
+        val vm = wizardVm(); val first = wizardForm(); val second = first.copy(id = "wizard-2")
+        compose.runOnIdle {
+            vm.showLoaded(first); vm.change("category", "travel"); vm.next(); vm.change("note", "First trip")
+            vm.close(); assertEquals(null, vm.state.value.form)
+            vm.showLoaded(second); assertTrue(vm.state.value.values.isEmpty())
+            vm.change("category", "food"); vm.next(); vm.change("confirmed", true); vm.next()
+            assertTrue(vm.state.value.reviewing)
+            vm.close(); vm.showLoaded(first)
+            assertEquals("trip", vm.state.value.stepId); assertEquals("First trip", vm.state.value.values["note"])
+            assertFalse(vm.state.value.reviewing)
+            vm.close(); vm.showLoaded(second)
+            assertTrue(vm.state.value.reviewing); assertEquals("food", vm.state.value.values["category"])
+            vm.showLoaded(second.copy(status = "cancelled"))
+            assertTrue(vm.state.value.values.isEmpty())
+            vm.showLoaded(first.copy(expiresAt = 0))
+            assertTrue(vm.state.value.values.isEmpty())
+        }
+    }
+    @Test fun wizardReviewScreenshotAndPreviousStepRetainAnswers() {
+        val vm = wizardVm()
+        compose.runOnIdle {
+            vm.showLoaded(wizardForm()); vm.change("category", "travel"); vm.next(); vm.change("note", "Demo business trip")
+            vm.next(); vm.change("confirmed", true); vm.next()
+        }
+        compose.setContent { val s by vm.state.collectAsState(); RelayTheme {
+            RequestFormScreen(s, "phone", vm::close, vm::change, {}, {}, {}, {}, vm::next, vm::previous)
+        } }
+        compose.onNodeWithText("Review your response").performScrollTo().assertIsDisplayed()
+        val preview = compose.onRoot().captureToImage().asAndroidBitmap()
+        File(InstrumentationRegistry.getInstrumentation().targetContext.getExternalFilesDir(null), "wizard-review.png")
+            .outputStream().use { preview.compress(Bitmap.CompressFormat.PNG, 100, it) }
+        compose.onNodeWithText("Previous step").performScrollTo().performClick()
+        compose.onNodeWithText("Confirmation").performScrollTo().assertIsDisplayed()
+        compose.runOnIdle { assertEquals(true, vm.state.value.values["confirmed"]) }
     }
 
 }

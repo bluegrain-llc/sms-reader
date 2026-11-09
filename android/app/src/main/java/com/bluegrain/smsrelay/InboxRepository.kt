@@ -7,11 +7,18 @@ import org.json.JSONObject
 
 // Definitions and response drafts stay in memory; only observation metadata enters WorkManager.
 data class RequestForm(val id: String, val caller: String, val title: String, val body: String,
-    val status: String, val expiresAt: Long, val fields: List<FormField>, val actions: List<FormAction>, val completedBy: String?, val helperDevices: Set<String> = emptySet()) {
+    val status: String, val expiresAt: Long, val fields: List<FormField>, val actions: List<FormAction>, val completedBy: String?, val helperDevices: Set<String> = emptySet(),
+    val steps: List<FormStep> = emptyList()) {
     companion object {
         fun from(j: JSONObject) = RequestForm(j.getString("requestId"), j.getString("callerName"), j.getString("title"),
             j.optString("body"), j.getString("status"), j.getLong("expiresAt"),
-            j.optJSONArray("fields")?.objects()?.map(FormField::from).orEmpty(), j.optJSONArray("actions")?.objects()?.map { FormAction(it.getString("id"), it.getString("label"), it.getString("type")) }.orEmpty(), j.nullString("completedByDeviceId"), j.optJSONObject("helpers")?.keys()?.asSequence()?.toSet().orEmpty())
+            j.optJSONArray("fields")?.objects()?.map(FormField::from).orEmpty(), j.optJSONArray("actions")?.objects()?.map { FormAction(it.getString("id"), it.getString("label"), it.getString("type")) }.orEmpty(), j.nullString("completedByDeviceId"), j.optJSONObject("helpers")?.keys()?.asSequence()?.toSet().orEmpty(),
+            j.optJSONArray("steps")?.objects()?.map { step ->
+                val condition = step.optJSONObject("when")
+                FormStep(step.getString("id"), step.getString("title"), step.optString("body"),
+                    step.getJSONArray("fieldIds").let { ids -> (0 until ids.length()).map { ids.getString(it) } },
+                    condition?.let { FormCondition(it.getString("fieldId"), if (it.has("equals")) it.get("equals") else null, it.nullString("contains")) })
+            }.orEmpty())
     }
 }
 data class FormField(val id: String, val label: String, val type: String, val required: Boolean, val maxLength: Int,
