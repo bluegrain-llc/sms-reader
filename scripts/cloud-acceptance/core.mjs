@@ -15,6 +15,7 @@ export function config(raw) {
   requireThat(raw && typeof raw.projectId === 'string' && /^[a-z][a-z0-9-]{4,28}[a-z0-9]$/.test(raw.projectId), 'invalid_project');
   requireThat(typeof raw.productionProjectId === 'string' && raw.projectId !== raw.productionProjectId && /^[a-z][a-z0-9-]+$/.test(raw.productionProjectId), 'production_project_required');
   requireThat(raw.projectId.includes('staging') || raw.projectId.includes('-stg'), 'staging_project_name_required');
+  requireThat(typeof raw.securityLedgerBucket === 'string' && /^[a-z0-9][a-z0-9._-]{1,220}[a-z0-9]$/.test(raw.securityLedgerBucket) && /staging|-stg/.test(raw.securityLedgerBucket), 'explicit_staging_ledger_required');
   requireThat(typeof raw.region === 'string' && typeof raw.service === 'string' && /^[a-z][a-z0-9-]+$/.test(raw.region) && /^[a-z][a-z0-9-]+$/.test(raw.service), 'invalid_resource_name');
   requireThat(typeof raw.account === 'string' && /^[^\s@]+@[^\s@]+$/.test(raw.account), 'explicit_cloud_account_required');
   requireThat(raw.disposableOwnerUid && raw.ownerTokenFile && Array.isArray(raw.fcmTokenFiles) && raw.fcmTokenFiles.length === 2, 'disposable_owner_and_two_phones_required');
@@ -148,6 +149,7 @@ export async function preflight(cfg, inspect = cloud) {
   requireThat(service.status?.url === cfg.serviceUrl, 'service_origin_mismatch');
   const env = service.spec?.template?.spec?.containers?.[0]?.env ?? [];
   requireThat(env.find(v => v.name === 'GOOGLE_CLOUD_PROJECT')?.value === cfg.projectId, 'runtime_project_mismatch');
+  requireThat(env.find(v => v.name === 'SECURITY_LEDGER_BUCKET')?.value === cfg.securityLedgerBucket, 'staging_ledger_mismatch');
   requireThat(!env.some(v => /EMULATOR_HOST/.test(v.name)), 'deployed_emulators_forbidden');
   const active = service.status.traffic?.find(t => t.percent === 100);
   requireThat(active?.revisionName, 'single_active_revision_required');

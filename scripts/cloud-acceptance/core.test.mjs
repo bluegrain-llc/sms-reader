@@ -7,10 +7,10 @@ import { join } from 'node:path';
 import { EventEmitter } from 'node:events';
 import { activeTtl, callbackOutcome, callbackReceipts, checkedScenario, clientDisconnectedBeforeResponse, config, eventMetadata, expiryFixtureState, fixtureCredentials, httpsOrigin, ownerClaims, preflight, privateValue, replayProgress, report, scenarios, settlePairings, verifySignature, winnerAgreement, writeReport } from './core.mjs';
 
-const base = { projectId: 'relay-staging-123', productionProjectId: 'relay-production-123', account: 'operator@example.com', region: 'us-central1', service: 'relay-service', serviceUrl: 'https://relay.run.app', ownerTokenFile: '/private/owner', disposableOwnerUid: 'disposable', fcmTokenFiles: ['/private/one', '/private/two'], budgetUsd: 10 };
+const base = { projectId: 'relay-staging-123', productionProjectId: 'relay-production-123', securityLedgerBucket: 'relay-staging-ledger', account: 'operator@example.com', region: 'us-central1', service: 'relay-service', serviceUrl: 'https://relay.run.app', ownerTokenFile: '/private/owner', disposableOwnerUid: 'disposable', fcmTokenFiles: ['/private/one', '/private/two'], budgetUsd: 10 };
 test('destructive staging guard rejects production, implicit account, unsafe URLs and missing budget', () => {
   assert.equal(config(base).projectId, base.projectId);
-  for (const patch of [{ projectId: base.productionProjectId }, { productionProjectId: undefined }, { projectId: 'live-relay-project' }, { account: '' }, { budgetUsd: 0 }, { budgetUsd: 101 }, { serviceUrl: 'http://relay.run.app' }, { serviceUrl: 'https://private@relay.run.app' }, { serviceUrl: 'https://relay.run.app/?credential=secret' }, { fcmTokenFiles: [] }, { callbackUrl: 'https://receiver.run.app' }]) assert.throws(() => config({ ...base, ...patch }));
+  for (const patch of [{ projectId: base.productionProjectId }, { productionProjectId: undefined }, { projectId: 'live-relay-project' }, { securityLedgerBucket: undefined }, { securityLedgerBucket: 'prod-ledger' }, { account: '' }, { budgetUsd: 0 }, { budgetUsd: 101 }, { serviceUrl: 'http://relay.run.app' }, { serviceUrl: 'https://private@relay.run.app' }, { serviceUrl: 'https://relay.run.app/?credential=secret' }, { fcmTokenFiles: [] }, { callbackUrl: 'https://receiver.run.app' }]) assert.throws(() => config({ ...base, ...patch }));
   assert.throws(() => httpsOrigin('https://relay.run.app/path'));
 });
 test('owner guard rejects another identity/project/provider and expiring tokens before mutation', () => {
@@ -24,7 +24,7 @@ test('owner guard rejects another identity/project/provider and expiring tokens 
 test('cloud preflight verifies project labels, runtime project, billing and tagged replay origin', async () => {
   const cfg = config({ ...base, replayUrl: 'https://previous---relay.run.app' });
   const project = { projectId: cfg.projectId, lifecycleState: 'ACTIVE', labels: { environment: 'staging' } };
-  const service = { metadata: { labels: { environment: 'staging' } }, status: { url: cfg.serviceUrl, traffic: [{ revisionName: 'current', percent: 100 }, { revisionName: 'previous', url: cfg.replayUrl }] }, spec: { template: { spec: { containers: [{ env: [{ name: 'GOOGLE_CLOUD_PROJECT', value: cfg.projectId }] }] } } } };
+  const service = { metadata: { labels: { environment: 'staging' } }, status: { url: cfg.serviceUrl, traffic: [{ revisionName: 'current', percent: 100 }, { revisionName: 'previous', url: cfg.replayUrl }] }, spec: { template: { spec: { containers: [{ env: [{ name: 'GOOGLE_CLOUD_PROJECT', value: cfg.projectId }, { name: 'SECURITY_LEDGER_BUCKET', value: cfg.securityLedgerBucket }] }] } } } };
   const inspect = (p = project, s = service, b = { billingEnabled: true }) => async (_cfg, args) => structuredClone(args[0] === 'projects' ? p : args[0] === 'run' ? s : b);
   assert.deepEqual(await preflight(cfg, inspect()), { revision: 'current', projectId: cfg.projectId });
   await assert.rejects(preflight(cfg, inspect({ ...project, labels: {} })));
@@ -34,6 +34,8 @@ test('cloud preflight verifies project labels, runtime project, billing and tagg
   await assert.rejects(preflight(cfg, inspect(project, service, { billingEnabled: false })));
   const wrongRuntime = structuredClone(service); wrongRuntime.spec.template.spec.containers[0].env[0].value = 'production-project';
   await assert.rejects(preflight(cfg, inspect(project, wrongRuntime)));
+  const wrongLedger = structuredClone(service); wrongLedger.spec.template.spec.containers[0].env[1].value = 'prod-ledger';
+  await assert.rejects(preflight(cfg, inspect(project, wrongLedger)), /staging_ledger_mismatch/);
   const emulatorRuntime = structuredClone(service); emulatorRuntime.spec.template.spec.containers[0].env.push({ name: 'FIRESTORE_EMULATOR_HOST', value: 'localhost:8080' });
   await assert.rejects(preflight(cfg, inspect(project, emulatorRuntime)));
 });

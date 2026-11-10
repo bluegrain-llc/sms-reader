@@ -28,6 +28,12 @@ identity with no personal records. No production project is accepted.
    100%-traffic revision and a zero-traffic tag targeting another compatible
    revision for replay. Set `replayUrl` to that tag's URL. The runner checks this
    association before forwarding caller credentials.
+   Provision a separate staging security ledger using [the recovery runbook](recovery/README.md)
+   and configure its bucket as `securityLedgerBucket`. The runtime's
+   `SECURITY_LEDGER_BUCKET` must match it; the bucket name must contain `staging`
+   or `-stg`. Its source manifest must name the staging relay project, with locked
+   retention and runtime IAM as required by the runbook. Deletion and callback
+   removal fail closed without this ledger. Never reuse a production ledger.
 4. Sign the disposable owner into this staging Firebase project's Google provider.
    Save its Firebase ID token in a mode-0600 file. Configure that exact Firebase
    UID as `disposableOwnerUid`. There must be no devices or grants on the account

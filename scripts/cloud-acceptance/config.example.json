@@ -1,6 +1,7 @@
 {
   "projectId": "your-relay-staging",
   "productionProjectId": "your-production-project",
+  "securityLedgerBucket": "your-staging-security-ledger",
   "account": "operator@example.com",
   "region": "us-central1",
   "service": "sms-code-relay",

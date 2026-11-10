@@ -77,7 +77,10 @@ try {
     const indexes = await cloud(cfg, ['firestore', 'indexes', 'composite', 'list']);
     requireThat(indexes.length > 0 && indexes.every(i => i.state === 'READY'), 'indexes_not_ready');
     const fields = await cloud(cfg, ['firestore', 'fields', 'ttls', 'list']);
-    for (const collection of ['results', 'requests', 'audit', 'connections', 'connectionCodes', 'connectionRates', 'formResults', 'formRequests', 'requestEvents', 'deliveryOutbox']) {
+    const ttlSpec = JSON.parse(await readFile(new URL('../../firestore.indexes.json', import.meta.url), 'utf8'));
+    const collections = ttlSpec.fieldOverrides.filter(field => field.ttl).map(field => field.collectionGroup);
+    if (cfg.callbackUrl) collections.push('acceptanceCallbacks');
+    for (const collection of collections) {
       requireThat(activeTtl(fields, collection), 'ttl_not_active');
     }
     const queue = await cloud(cfg, ['tasks', 'queues', 'describe', 'relay-delivery', `--location=${cfg.region}`]);
