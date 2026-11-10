@@ -73,8 +73,8 @@ class RelayNavigationTest {
         assertEquals(1, entries)
         session.value = session.value.copy(busy = false)
         inbox.value = inbox.value.copy(busy = false)
-        assertFalse(loadResponseWhenReady(RequestTarget("different", RequestKind.Form),
-            session, inbox, ::unavailable, ::unavailable))
+        assertFalse(withTimeout(1000) { loadResponseWhenReady(RequestTarget("different", RequestKind.Form),
+            session, inbox, ::unavailable, ::unavailable) })
         assertEquals(listOf("different"), opened)
     }
     @Test fun retainedTerminalSmsNeedsNoFetchButActiveAndDifferentTargetsStillOpen() = runBlocking {
