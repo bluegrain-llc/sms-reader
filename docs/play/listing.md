@@ -6,6 +6,8 @@ Copy below describes the intended production behavior. Do not submit until polic
 
 App name: **SMS Code Relay**
 
+Legal operator: **Dmitry Kropachev**. Public privacy and support email: **bluegrain.llc@gmail.com**. The developer account is personal. These public contact details do not determine a marketing developer display name, physical address, countries, audience, public policy/deletion URLs or Console access; verify those separately before submission.
+
 Short description: **Review app requests, approve decisions, and share upcoming SMS codes.**
 
 Full description:

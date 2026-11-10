@@ -29,8 +29,8 @@ class GateTest(unittest.TestCase):
         self.record["operator"] = {"legalName": "Synthetic Test Operator", "privacyEmail": "privacy@fixture.test", "supportEmail": "support@fixture.test"}
         self.record["urls"] = {"privacy": "https://fixture.test/privacy", "deletion": "https://fixture.test/account/delete", "support": "https://fixture.test/support"}
         self.record["signing"] = {"pilotSha256": PILOT, "uploadSha256": UPLOAD, "playSha256": [PILOT]}
-        self.record["play"] = {"accountType": "organization", "newPersonalAccount": False, "developerAccountVerified": True, "productionAccessGranted": True, "noConsoleBlockers": True}
-        self.record["cohort"] = {"startedAt": (NOW - timedelta(days=7)).isoformat(), "endedAt": NOW.isoformat(), "noReleaseBlockers": True}
+        self.record["play"] = {"accountType": "personal", "newPersonalAccount": True, "developerAccountVerified": True, "productionAccessGranted": True, "noConsoleBlockers": True}
+        self.record["cohort"] = {"startedAt": (NOW - timedelta(days=14)).isoformat(), "endedAt": NOW.isoformat(), "continuousTesters": 12, "noReleaseBlockers": True}
         for kind in ("aab", "playApk"):
             path = self.base / kind
             with zipfile.ZipFile(path, "w") as archive:
@@ -87,6 +87,14 @@ class GateTest(unittest.TestCase):
         self.record = json.loads((Path(__file__).parents[1] / "docs/play/candidate.example.json").read_text())
         self.assertFalse(self.check()["ready"])
 
+    def test_template_uses_exact_confirmed_public_identity_and_account(self):
+        record = json.loads((Path(__file__).parents[1] / "docs/play/candidate.example.json").read_text())
+        self.assertEqual(record["operator"], {"legalName": "Dmitry Kropachev", "privacyEmail": "bluegrain.llc@gmail.com", "supportEmail": "bluegrain.llc@gmail.com"})
+        self.assertEqual(record["play"]["accountType"], "personal")
+        self.assertIs(record["play"]["newPersonalAccount"], True)
+        self.assertIs(record["play"]["productionAccessGranted"], False)
+        self.assertTrue(all(value is None for value in record["urls"].values()))
+
     def test_artifact_change_invalidates_hash(self):
         (self.base / "aab").write_bytes(b"replacement")
         self.assertIn("aab: missing file or hash mismatch", self.check()["blockers"])
@@ -108,12 +116,20 @@ class GateTest(unittest.TestCase):
         self.assertIn("five completed review/fix cycles missing", self.check()["blockers"])
 
     def test_new_personal_account_requires_fourteen_days_and_twelve_testers(self):
-        self.record["play"].update(accountType="personal", newPersonalAccount=True)
+        self.record["cohort"].update(startedAt=(NOW - timedelta(days=7)).isoformat(), continuousTesters=11)
         blockers = self.check()["blockers"]
         self.assertIn("closed cohort has not completed its required duration", blockers)
         self.assertIn("new personal account needs at least 12 continuous testers", blockers)
         self.record["cohort"].update(startedAt=(NOW - timedelta(days=14)).isoformat(), continuousTesters=12)
         self.assertTrue(self.check()["ready"])
+
+    def test_account_reclassification_cannot_bypass_mandatory_cohort(self):
+        self.record["play"].update(accountType="organization", newPersonalAccount=False)
+        self.record["cohort"].update(startedAt=(NOW - timedelta(days=7)).isoformat(), continuousTesters=11)
+        blockers = self.check()["blockers"]
+        self.assertIn("confirmed Play account is personal and created after 2023-11-13", blockers)
+        self.assertIn("closed cohort has not completed its required duration", blockers)
+        self.assertIn("new personal account needs at least 12 continuous testers", blockers)
 
     def test_future_cohort_and_old_policy_rejected(self):
         self.record["cohort"]["endedAt"] = (NOW + timedelta(days=1)).isoformat()

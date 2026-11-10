@@ -165,17 +165,14 @@ def check_record(record, base, offline=False, run=command, now=None):
     policy = timestamp(record.get("policyCheckedAt"))
     require(policy is not None and timedelta(0) <= now - policy <= timedelta(days=7), "policy check must be within the last seven days")
     play = record.get("play", {})
-    require(play.get("accountType") in ("personal", "organization"), "Play developer account type unknown")
+    require(play.get("accountType") == "personal" and play.get("newPersonalAccount") is True,
+            "confirmed Play account is personal and created after 2023-11-13")
     for field in ("developerAccountVerified", "productionAccessGranted", "noConsoleBlockers"):
         require(play.get(field) is True, "Play " + field + " not verified")
-    if play.get("accountType") == "personal":
-        require(type(play.get("newPersonalAccount")) is bool, "personal-account testing eligibility unknown")
     cohort = record.get("cohort", {})
     start, end = timestamp(cohort.get("startedAt")), timestamp(cohort.get("endedAt"))
-    days = 14 if play.get("accountType") == "personal" and play.get("newPersonalAccount") is True else 7
-    require(start is not None and end is not None and start <= end <= now and end - start >= timedelta(days=days), "closed cohort has not completed its required duration")
-    if days == 14:
-        require(type(cohort.get("continuousTesters")) is int and cohort["continuousTesters"] >= 12, "new personal account needs at least 12 continuous testers")
+    require(start is not None and end is not None and start <= end <= now and end - start >= timedelta(days=14), "closed cohort has not completed its required duration")
+    require(type(cohort.get("continuousTesters")) is int and cohort["continuousTesters"] >= 12, "new personal account needs at least 12 continuous testers")
     require(cohort.get("noReleaseBlockers") is True, "closed cohort release blockers not cleared")
 
     signing = record.get("signing", {})

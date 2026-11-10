@@ -4,9 +4,9 @@
   "minimumTargetApi": 36,
   "policyCheckedAt": null,
   "operator": {
-    "legalName": null,
-    "privacyEmail": null,
-    "supportEmail": null
+    "legalName": "Dmitry Kropachev",
+    "privacyEmail": "bluegrain.llc@gmail.com",
+    "supportEmail": "bluegrain.llc@gmail.com"
   },
   "urls": {
     "privacy": null,
@@ -30,8 +30,8 @@
     "playSplits": []
   },
   "play": {
-    "accountType": null,
-    "newPersonalAccount": null,
+    "accountType": "personal",
+    "newPersonalAccount": true,
     "developerAccountVerified": false,
     "productionAccessGranted": false,
     "noConsoleBlockers": false

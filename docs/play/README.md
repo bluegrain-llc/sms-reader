@@ -5,7 +5,7 @@ This package prepares a release; it does not publish one. Issue [#11](https://gi
 ## Release order
 
 1. Complete issues #5–#10, including physical phones, real cloud failure recovery, safe deployment, monitoring, deletion and disaster recovery.
-2. Fill the private candidate record from `candidate.example.json`. Keep it in ignored `artifacts/play/`, never commit contacts, tester identities, credentials, signing keys or private evidence.
+2. Fill the private candidate record from `candidate.example.json`. Keep it in ignored `artifacts/play/`; never commit unpublished contacts, tester identities, credentials, signing keys or private evidence. The template includes only operator/contact details explicitly approved for public use.
 3. Follow [signing and testing](release-checklist.md), review the [disclosure inventory](data-safety.md), and finish the [listing and reviewer package](listing.md).
 4. Run `python3 scripts/check-play-release.py --record artifacts/play/candidate.json --output artifacts/play/readiness.json`. Supply `apksigner`, `aapt`, `jarsigner`, `keytool`, `java` and a read-only authenticated `gh` on PATH, plus a pinned `BUNDLETOOL_JAR`. Obtain bundletool from its [official releases](https://github.com/google/bundletool/releases) and verify the selected release's provenance. A successful report verifies local evidence integrity and gates; it is not proof that operator attestations are true. Review every referenced report separately.
 5. Publish only after all blockers are cleared and the exact candidate has final green CI and five completed review/fix cycles. The tool has no upload, enrollment or publication operation.
@@ -16,7 +16,9 @@ Privacy and deletion URLs must use the canonical same-origin `/privacy` and `/ac
 
 ## Current external gates
 
-Verified legal/operator contacts, Play Console account ownership/verification, signing enrollment, public privacy/deletion endpoints, reviewer access, Play-installed physical acceptance and the closed cohort are not established by this package. The example record deliberately contains nulls and empty evidence references so it cannot pass.
+The confirmed legal operator is **Dmitry Kropachev**. Public privacy and support contact: **bluegrain.llc@gmail.com**. The Play developer account is **personal**, created after **2023-11-13**. These confirmed public values are prefilled in the candidate template. They do not establish Console ownership/verification, signing enrollment, policy/deletion URLs, reviewer access, a Play-installed physical result or an elapsed cohort. Other candidate fields deliberately remain empty so the template cannot pass.
+
+This account must complete a closed test with **at least 12 continuously opted-in testers for at least 14 days**, then apply for and obtain production access. A seven-day cohort does not satisfy this release gate. The readiness validator requires the confirmed account classification and this minimum; it cannot be bypassed by changing the record to an organization account. Actual participation and Console approval still need evidence.
 
 Keep the canonical HTTPS service origin for policy and deletion links; a custom domain is optional. Recheck policy requirements within seven days of submission. Resolve legal/Data safety classifications with the operator before submitting; repository notes are not legal approval.
 
