@@ -9,7 +9,7 @@ type Event =
   | { event: 'delivery_attempt'; kind: Kind; outcome: 'accepted' | 'failed'; category?: Category; age_ms: number }
   | { event: 'wakeup_failed'; category: Category }
   | { event: 'maintenance_completed'; duration_ms: number }
-  | { event: 'maintenance_failed' | 'backlog_sampling_failed' | 'request_failed' | 'mcp_tool_failed'; category: Category }
+  | { event: 'deletion_failed' | 'maintenance_failed' | 'backlog_sampling_failed' | 'request_failed' | 'mcp_tool_failed'; category: Category }
   | { event: 'backlog_snapshot'; kind: Kind | 'results' | 'form_results' | 'deletion' | 'legacy_deletion'; count: number; oldest_due_age_s: number };
 export type Sink = (entry: Readonly<Event & { severity: 'INFO' | 'WARNING' | 'ERROR'; component: 'relay' }>) => void;
 const defaultSink: Sink = entry => console.info(JSON.stringify(entry));
@@ -57,7 +57,7 @@ export class Telemetry {
       sample('results', db.collection('results').where('purgeAt', '<=', new Date(now)), 'purgeAt'),
       sample('form_results', db.collection('formResults').where('purgeAt', '<=', new Date(now)), 'purgeAt'),
       sample('legacy_deletion', db.collection('deletionAttempts').where('nextAt', '<=', now), 'nextAt'),
-      sample('deletion', db.collection('deletionJobs').where('nextAt', '<=', now), 'nextAt'),
+      sample('deletion', db.collection('deletionJobs').where('backlogAt', '<=', now), 'backlogAt'),
       ...dueSmsQueries(db, now).map(query => sample('sms', query, 'nextNotificationAt')),
     ]);
     const combined = new Map<string, typeof samples[number]>();

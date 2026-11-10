@@ -3,12 +3,13 @@ import express, { Request, Response, NextFunction } from 'express';
 import { z, ZodError } from 'zod';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { mountAccountPages, WebConfig } from './account-pages.js';
 import { mountForms } from './forms-http.js';
 import { signingFingerprints } from './signing.js';
 import { formSchema } from './forms-model.js';
 import { Relay } from './relay.js';
 import { connectionSchema, userCodeSchema } from './connections.js';
-import { codeSchema, ensure, idSchema, RelayError, requestSchema, hash } from './model.js';
+import { codeSchema, ensure, idSchema, RelayError, requestSchema } from './model.js';
 
 export interface Identity { uid: string; authTime: number }
 export interface HttpOptions {
@@ -21,6 +22,8 @@ export interface HttpOptions {
   androidCertSha256s?: string[];
   trustProxyHops?: number;
   sseDurationMs?: number;
+  firebaseWebConfig?: WebConfig;
+  privacyContact?: string;
 }
 function bearer(req: Request) {
   const m = /^Bearer ([^\s]+)$/.exec(req.get('authorization') ?? '');
@@ -34,17 +37,29 @@ export function app(relay: Relay, options: HttpOptions) {
   app.use((_req, res, next) => { res.set('Cache-Control', 'no-store'); res.set('X-Content-Type-Options', 'nosniff'); next(); });
   app.use((req, _res, next) => {
     const origin = req.get('origin');
-    ensure(!origin || (options.origins ?? []).includes(origin), 403, 'origin_not_allowed'); next();
+    const accountOrigin = options.publicUrl ? new URL(options.publicUrl).origin : undefined;
+    const accountRoute = /^\/v1\/account(?:-deletion)?\/?$/i.test(req.path);
+    ensure(!origin || (accountRoute && origin === accountOrigin) || (options.origins ?? []).includes(origin), 403, 'origin_not_allowed'); next();
   });
   app.use(express.json({ limit: '256kb', strict: true }));
   app.get(['/health', '/healthz'], (_req, res) => { res.json({ ok: true }); });
-  const owner = async (req: Request) => {
-    try { return await options.verifyOwner(bearer(req)); } catch { throw new RelayError(401, 'invalid_owner_session'); }
+  const owner = async (req: Request, allowDeleted = false) => {
+    let identity: Identity;
+    try { identity = await options.verifyOwner(bearer(req)); } catch { throw new RelayError(401, 'invalid_owner_session'); }
+    if (!allowDeleted) await relay.db.runTransaction(tx => relay.account(tx, identity.uid));
+    if (req.method === 'GET' || req.method === 'HEAD') await relay.access.read(identity.uid);
+    return identity;
   };
+  const agentRead = async (req: Request) => {
+    const secret = bearer(req), { grant } = await relay.db.runTransaction(tx => relay.agent(tx, secret));
+    await relay.access.read(grant.ownerId, grant.id); return secret;
+  };
+  mountAccountPages(app, options.firebaseWebConfig, options.privacyContact);
+  app.get('/v1/account-deletion', async (req, res) => { res.json(await relay.deletions.status(bearer(req))); });
   const device = (req: Request) => idSchema.parse(req.params.deviceId);
   const request = (req: Request) => idSchema.parse(req.params.requestId);
   const body = <T extends z.ZodTypeAny>(req: Request, schema: T): z.infer<T> => schema.parse(req.body);
-  mountForms(app, relay.forms, owner, bearer, options.sseDurationMs);
+  mountForms(app, relay.forms, owner, bearer, agentRead, options.sseDurationMs);
   app.get('/v1/devices', async (req, res) => { res.json(await relay.listDevices((await owner(req)).uid)); });
   app.put('/v1/devices/:deviceId', async (req, res) => {
     const { uid } = await owner(req);
@@ -103,24 +118,10 @@ export function app(relay: Relay, options: HttpOptions) {
     await relay.revoke((await owner(req)).uid, idSchema.parse(req.params.grantId)); res.json({ ok: true });
   });
   app.delete('/v1/account', async (req, res) => {
-    const identity = await owner(req);
-    ensure(Date.now() / 1000 - identity.authTime < 300, 401, 'recent_sign_in_required');
-    const attempt = relay.ref('deletionAttempts', hash(identity.uid));
-    // A failed synchronous deletion remains observable until its identity cleanup succeeds.
-    const account = relay.ref('accounts', identity.uid);
-    const started = await relay.db.runTransaction(async tx => {
-      const [owner, existing] = await Promise.all([tx.get(account), tx.get(attempt)]);
-      if (owner.data()?.deletionTelemetryComplete) return false;
-      if (!existing.exists) tx.set(attempt, { ownerId: identity.uid, nextAt: Date.now() });
-      return true;
-    });
-    if (!started) { res.json({ ok: true }); return; }
-    await relay.deleteAccount(identity.uid); await options.deleteIdentity(identity.uid);
-    await relay.db.runTransaction(async tx => {
-      tx.set(account, { deleting: true, deletionTelemetryComplete: true }, { merge: true });
-      tx.delete(attempt);
-    });
-    res.json({ ok: true });
+    const identity = await owner(req, true);
+    ensure(relay.now() / 1000 - identity.authTime < 300 && identity.authTime <= relay.now() / 1000 + 30, 401, 'recent_sign_in_required');
+    await relay.access.read(identity.uid);
+    res.status(202).json(await relay.deletions.request(identity.uid));
   });
   app.get('/v1/devices/:deviceId/history', async (req, res) => {
     res.json(await relay.history((await owner(req)).uid, device(req)));
@@ -142,22 +143,28 @@ export function app(relay: Relay, options: HttpOptions) {
       'reason' in b ? b.reason : null, 'code' in b ? b.code : undefined, 'listenerStartedAt' in b ? b.listenerStartedAt : undefined, 'source' in b ? b.source : undefined));
   });
   app.post('/v1/requests', async (req, res) => { res.status(201).json(await relay.create(bearer(req), requestSchema.parse(req.body))); });
-  app.get('/v1/requests/:requestId', async (req, res) => { res.json(await relay.get(bearer(req), request(req))); });
+  app.get('/v1/requests/:requestId', async (req, res) => { res.json(await relay.get(await agentRead(req), request(req))); });
   app.post('/v1/requests/:requestId/cancel', async (req, res) => {
     res.json(await relay.transition({ secret: bearer(req) }, request(req), 'cancelled'));
   });
   app.post('/internal/delivery', async (req, res) => {
     try { await options.verifyScheduler(bearer(req)); } catch { throw new RelayError(401, 'invalid_worker_identity'); }
+    await relay.deletions.dispatch(options.deleteIdentity);
     await relay.forms.dispatch(); res.json({ ok: true });
   });
   app.post('/internal/maintenance', async (req, res) => {
     try { await options.verifyScheduler(bearer(req)); } catch { throw new RelayError(401, 'invalid_scheduler_identity'); }
-    await telemetry.maintenance(() => relay.maintenance(), relay.db); res.json({ ok: true });
+    await telemetry.maintenance(async () => {
+      await relay.deletions.dispatch(options.deleteIdentity);
+      await relay.maintenance();
+    }, relay.db); res.json({ ok: true });
   });
   app.post('/mcp', async (req, res) => {
     const secret = bearer(req); await relay.checkAgent(secret);
     // New stateless server per HTTP request; identity is never shared between clients.
     const server = new McpServer({ name: 'sms-code-relay', version: '0.6.0' });
+    const readTools = new Set<string>();
+    const readToolName = (name: string) => { readTools.add(name); return name; };
     const tool = (fn: () => Promise<unknown>) => fn().then(result => ({
       content: [{ type: 'text' as const, text: JSON.stringify(result) }], structuredContent: result as Record<string, unknown>,
     })).catch(error => {
@@ -168,17 +175,20 @@ export function app(relay: Relay, options: HttpOptions) {
       description: 'Notify the owner’s registered phones about an upcoming SMS, queuing behind another caller if needed. Wait for ready before triggering SMS in a separate system. First approved response wins. Never triggers SMS.',
       inputSchema: requestSchema.shape,
     }, input => tool(() => relay.create(secret, input)));
-    server.registerTool('get_sms_code_request', {
+    server.registerTool(readToolName('get_sms_code_request'), {
       description: 'Poll status. Code is available only after owner approval, for two minutes.', inputSchema: { requestId: idSchema },
     }, input => tool(() => relay.get(secret, input.requestId)));
     server.registerTool('cancel_sms_code_request', {
       description: 'Cancel this token’s request.', inputSchema: { requestId: idSchema },
     }, input => tool(() => relay.transition({ secret }, input.requestId, 'cancelled')));
     server.registerTool('create_request', { description: 'Create a form or multi-step wizard with optional conditional steps and one final submission. Requires owner approval for forms in Admin.', inputSchema: formSchema.shape }, input => tool(() => relay.forms.create(secret, input)));
-    server.registerTool('inspect_request', { description: 'Inspect your request without marking it opened.', inputSchema: { requestId: idSchema } }, input => tool(() => relay.forms.get({ secret }, input.requestId)));
+    server.registerTool(readToolName('inspect_request'), { description: 'Inspect your request without marking it opened.', inputSchema: { requestId: idSchema } }, input => tool(() => relay.forms.get({ secret }, input.requestId)));
     server.registerTool('cancel_request', { description: 'Cancel your pending request.', inputSchema: { requestId: idSchema } }, input => tool(() => relay.forms.cancel(secret, input.requestId)));
-    server.registerTool('get_request_result', { description: 'Retrieve accepted answers, retained for 24 hours.', inputSchema: { requestId: idSchema } }, input => tool(() => relay.forms.result(secret, input.requestId)));
-    server.registerTool('poll_request_events', { description: 'Poll durable events for your connection. Answers are retrieved separately.', inputSchema: { cursor: z.string().max(128).optional() } }, input => tool(() => relay.forms.events(secret, input.cursor)));
+    server.registerTool(readToolName('get_request_result'), { description: 'Retrieve accepted answers, retained for 24 hours.', inputSchema: { requestId: idSchema } }, input => tool(() => relay.forms.result(secret, input.requestId)));
+    server.registerTool(readToolName('poll_request_events'), { description: 'Poll durable events for your connection. Answers are retrieved separately.', inputSchema: { cursor: z.string().max(128).optional() } }, input => tool(() => relay.forms.events(secret, input.cursor)));
+    for (const message of Array.isArray(req.body) ? req.body : [req.body]) {
+      if (message?.method === 'tools/call' && readTools.has(message?.params?.name)) await agentRead(req);
+    }
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
     res.on('close', () => { void transport.close(); void server.close(); });
     await server.connect(transport); await transport.handleRequest(req, res, req.body);
@@ -187,7 +197,7 @@ export function app(relay: Relay, options: HttpOptions) {
   app.use((_req, res) => { res.status(404).json({ error: 'not_found' }); });
   app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
     if (res.headersSent) return;
-    if (err instanceof RelayError) res.status(err.status).json({ error: err.reason });
+    if (err instanceof RelayError) { if (err.status === 429) res.set('Retry-After', '60'); res.status(err.status).json({ error: err.reason }); }
     else if (err instanceof ZodError || err instanceof SyntaxError) res.status(400).json({ error: 'invalid_input' });
     else if ((err as { type?: string })?.type === 'entity.too.large') res.status(413).json({ error: 'payload_too_large' });
     else { telemetry.emit({ event: 'request_failed', category: category(err) }); res.status(500).json({ error: 'internal_error' }); }

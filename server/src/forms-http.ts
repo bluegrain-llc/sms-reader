@@ -4,12 +4,12 @@ import { Forms } from './forms.js';
 import { formSchema, observationSchema, submissionSchema, webhookSchema } from './forms-model.js';
 import { idSchema } from './model.js';
 
-export function mountForms(app: Express, forms: Forms, owner: (req: Request) => Promise<{ uid: string }>, bearer: (req: Request) => string, sseDurationMs = 100_000) {
+export function mountForms(app: Express, forms: Forms, owner: (req: Request) => Promise<{ uid: string }>, bearer: (req: Request) => string, agentRead: (req: Request) => Promise<string>, sseDurationMs = 100_000) {
   const id = (req: Request) => idSchema.parse(req.params.requestId);
   const phone = async (req: Request) => ({ uid: (await owner(req)).uid, deviceId: idSchema.parse(req.params.deviceId) });
   app.post('/v2/requests', async (req, res) => { res.status(201).json(await forms.create(bearer(req), formSchema.parse(req.body))); });
-  app.get('/v2/requests/:requestId', async (req, res) => { res.json(await forms.get({ secret: bearer(req) }, id(req))); });
-  app.get('/v2/requests/:requestId/result', async (req, res) => { res.json(await forms.result(bearer(req), id(req))); });
+  app.get('/v2/requests/:requestId', async (req, res) => { res.json(await forms.get({ secret: await agentRead(req) }, id(req))); });
+  app.get('/v2/requests/:requestId/result', async (req, res) => { res.json(await forms.result(await agentRead(req), id(req))); });
   app.post('/v2/requests/:requestId/cancel', async (req, res) => { res.json(await forms.cancel(bearer(req), id(req))); });
   app.get('/v2/devices/:deviceId/inbox', async (req, res) => { const p = await phone(req); res.json(await forms.inbox(p.uid, p.deviceId)); });
   app.get('/v2/devices/:deviceId/requests/:requestId', async (req, res) => { res.json(await forms.get(await phone(req), id(req))); });
@@ -20,34 +20,52 @@ export function mountForms(app: Express, forms: Forms, owner: (req: Request) => 
     await forms.approve((await owner(req)).uid, idSchema.parse(req.params.grantId), approved); res.json({ ok: true });
   });
   app.post('/v2/webhooks', async (req, res) => { res.status(201).json(await forms.registerWebhook(bearer(req), webhookSchema.parse(req.body))); });
-  app.get('/v2/webhooks', async (req, res) => { res.json(await forms.webhooks(bearer(req))); });
+  app.get('/v2/webhooks', async (req, res) => { res.json(await forms.webhooks(await agentRead(req))); });
   app.delete('/v2/webhooks/:hookId', async (req, res) => { res.json(await forms.webhooks(bearer(req), idSchema.parse(req.params.hookId))); });
   const cursor = (req: Request) => z.string().max(128).optional().parse(req.query.cursor ?? req.get('Last-Event-ID'));
-  app.get('/v2/events', async (req, res) => { res.json(await forms.events(bearer(req), cursor(req))); });
+  app.get('/v2/events', async (req, res) => { res.json(await forms.events(await agentRead(req), cursor(req))); });
   app.get('/v2/events/stream', async (req, res) => {
-    const secret = bearer(req); let next = cursor(req);
+    let closed = res.destroyed, timer: ReturnType<typeof setTimeout> | undefined, resume: (() => void) | undefined;
+    let deadlineTimer: ReturnType<typeof setTimeout> | undefined, destroyTimer: ReturnType<typeof setTimeout> | undefined;
+    let release: Awaited<ReturnType<typeof forms.relay.access.stream>> | undefined;
+    res.once('close', () => {
+      closed = true; clearTimeout(timer); clearTimeout(deadlineTimer); clearTimeout(destroyTimer); resume?.();
+      if (release) void release().catch(() => {}); // Lease expiry recovers unavailable storage.
+    });
+    const secret = await agentRead(req); let next = cursor(req);
     let page = await forms.events(secret, next);
-    res.set({ 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache, no-store', 'X-Accel-Buffering': 'no' }); res.flushHeaders();
-    res.write('retry: 1000\n\n');
-    const end = Date.now() + sseDurationMs;
-    let closed = false, timer: ReturnType<typeof setTimeout> | undefined, resume: (() => void) | undefined;
-    res.on('close', () => { closed = true; clearTimeout(timer); resume?.(); });
+    const { grant } = await forms.db.runTransaction(tx => forms.relay.agent(tx, secret));
+    release = await forms.relay.access.stream(grant.ownerId, grant.id, sseDurationMs);
+    const remaining = Math.max(0, release.deadline - forms.relay.now());
+    if (closed || !remaining) { await release(); if (!closed) res.end(); return; }
+    const stop = () => {
+      closed = true; clearTimeout(timer); clearTimeout(deadlineTimer); resume?.();
+      if (!res.destroyed) {
+        res.end();
+        // Bound a backpressured response independently of any pending database read.
+        destroyTimer ??= setTimeout(() => res.destroy(), 1000);
+      }
+    };
+    deadlineTimer = setTimeout(stop, remaining);
     try {
-      while (!closed && Date.now() < end) {
+      res.set({ 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache, no-store', 'X-Accel-Buffering': 'no' }); res.flushHeaders();
+      res.write('retry: 1000\n\n');
+      while (!closed) {
         for (const e of page.events) {
           if (closed) break;
           if (!res.write(`id: ${e.id}\nevent: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`)) {
             // A slow consumer reconnects using its last received event ID.
-            res.end(); closed = true; break;
+            stop(); break;
           }
           next = e.id;
         }
         if (closed) break;
         res.write(': heartbeat\n\n');
-        await new Promise<void>(resolve => { resume = resolve; timer = setTimeout(resolve, Math.min(1000, Math.max(1, end - Date.now()))); });
+        await new Promise<void>(resolve => { resume = resolve; timer = setTimeout(resolve, 1000); });
         if (!closed) page = await forms.events(secret, next);
       }
     } catch { /* revoked credentials or unavailable storage: reconnect and authenticate again */ }
-    finally { clearTimeout(timer); res.end(); }
+    finally { stop(); }
+
   });
 }

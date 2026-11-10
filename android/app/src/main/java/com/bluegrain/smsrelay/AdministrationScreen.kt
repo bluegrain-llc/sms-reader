@@ -7,6 +7,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -30,6 +31,7 @@ fun AdministrationScreen(
     onApproveForms: (String, Boolean) -> Unit = { _, _ -> },
     onReviewConnection: (String) -> Unit = {}, onConnectionDecision: (String, Boolean) -> Unit = { _, _ -> }, onDismissConnection: () -> Unit = {},
 ) {
+    val uriHandler = LocalUriHandler.current
     var connectionCode by remember(state.connectionCode) { mutableStateOf(state.connectionCode.orEmpty()) }
     var deletion by remember { mutableStateOf<String?>(null) }
     BackHandler(onBack = onClose)
@@ -103,9 +105,11 @@ fun AdministrationScreen(
                             item { AdministrationGroup {
                                 Text("Account", style = MaterialTheme.typography.titleMedium)
                                 Text(state.email, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                Text("Sign in again before deleting your account.", style = MaterialTheme.typography.bodySmall)
+                                Text("Deletion asks you to verify the same Google account first.", style = MaterialTheme.typography.bodySmall)
                                 TextButton(onClick = onSignIn, enabled = !state.busy, modifier = Modifier.fillMaxWidth()) { Text("Sign in again") }
                                 TextButton(onClick = { deletion = "account" }, enabled = !state.busy, modifier = Modifier.fillMaxWidth()) { Text("Delete account", color = MaterialTheme.colorScheme.error) }
+                                TextButton(onClick = { uriHandler.openUri(BuildConfig.RELAY_URL.trimEnd('/') + "/privacy") }, enabled = state.configured, modifier = Modifier.fillMaxWidth()) { Text("Privacy policy") }
+                                TextButton(onClick = { uriHandler.openUri(BuildConfig.RELAY_URL.trimEnd('/') + "/account/delete") }, enabled = state.configured, modifier = Modifier.fillMaxWidth()) { Text("Delete account on the web") }
                             } }
                         }
                         AdministrationSection.History -> {
@@ -128,7 +132,7 @@ fun AdministrationScreen(
         val device = kind.startsWith("device:")
         AlertDialog(onDismissRequest = { deletion = null }, title = { Text(if (device) "Remove this phone?" else "Delete your account?") },
             text = { Text(if (device) "This phone stops receiving requests. Your other phones and caller credentials remain available."
-                else "This permanently removes all phones, app connections, callers, requests, and stored results.") },
+                else "Verify your Google account, then permanently remove all phones, app connections, callers, requests, and stored results. Access stops immediately when accepted; cleanup continues in the background.") },
             confirmButton = { TextButton(onClick = {
                 deletion = null
                 when { device -> onRemoveDevice(kind.substringAfter(':')); else -> onDelete() }

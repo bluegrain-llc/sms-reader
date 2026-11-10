@@ -17,6 +17,7 @@ class ProvisionTest(unittest.TestCase):
     def test_retention_and_backlog_alerts_use_fixed_payload_fields(self):
         config = self.config()
         filters = {m['name']: m['filter'] for m in config['metrics']}
+        self.assertIn('jsonPayload.event="deletion_failed"', filters['sms_relay/sms-code-relay/worker_failures'])
         self.assertIn('oldest_due_age_s>180', filters['sms_relay/sms-code-relay/delivery_overdue'])
         self.assertIn('oldest_due_age_s>300', filters['sms_relay/sms-code-relay/results_overdue'])
         self.assertTrue(all('resource.labels.project_id="demo-sms-relay"' in f for f in filters.values()))
