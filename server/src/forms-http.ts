@@ -10,8 +10,8 @@ export function mountForms(app: Express, forms: Forms, owner: (req: Request) => 
   const id = (req: Request) => idSchema.parse(req.params.requestId);
   const phone = async (req: Request) => ({ uid: (await owner(req)).uid, deviceId: idSchema.parse(req.params.deviceId) });
   app.post('/v2/requests', async (req, res) => { res.status(201).json(await forms.create(bearer(req), formSchema.parse(req.body))); });
-  app.get('/v2/requests/:requestId', async (req, res) => { res.json(await forms.get({ secret: bearer(req) }, id(req))); });
-  app.get('/v2/requests/:requestId/result', async (req, res) => { res.json(await forms.result(bearer(req), id(req))); });
+  app.get('/v2/requests/:requestId', async (req, res) => { res.json(await forms.get({ secret: await agentRead(req) }, id(req))); });
+  app.get('/v2/requests/:requestId/result', async (req, res) => { res.json(await forms.result(await agentRead(req), id(req))); });
   app.post('/v2/requests/:requestId/cancel', async (req, res) => { res.json(await forms.cancel(bearer(req), id(req))); });
   app.get('/v2/devices/:deviceId/inbox', async (req, res) => { const p = await phone(req); res.json(await forms.inbox(p.uid, p.deviceId)); });
   app.get('/v2/devices/:deviceId/requests/:requestId', async (req, res) => { res.json(await forms.get(await phone(req), id(req))); });
@@ -22,17 +22,25 @@ export function mountForms(app: Express, forms: Forms, owner: (req: Request) => 
     await forms.approve((await owner(req)).uid, idSchema.parse(req.params.grantId), approved); res.json({ ok: true });
   });
   app.post('/v2/webhooks', async (req, res) => { res.status(201).json(await forms.registerWebhook(bearer(req), webhookSchema.parse(req.body))); });
-  app.get('/v2/webhooks', async (req, res) => { res.json(await forms.webhooks(bearer(req))); });
+  app.get('/v2/webhooks', async (req, res) => { res.json(await forms.webhooks(await agentRead(req))); });
   app.delete('/v2/webhooks/:hookId', async (req, res) => { res.json(await forms.webhooks(bearer(req), idSchema.parse(req.params.hookId))); });
+  const agentRead = async (req: Request) => {
+    const secret = bearer(req), { grant } = await forms.db.runTransaction(tx => forms.relay.agent(tx, secret));
+    await forms.relay.access.read(grant.ownerId, grant.id); return secret;
+  };
   const cursor = (req: Request) => z.string().max(128).optional().parse(req.query.cursor ?? req.get('Last-Event-ID'));
-  app.get('/v2/events', async (req, res) => { res.json(await forms.events(bearer(req), cursor(req))); });
+  app.get('/v2/events', async (req, res) => { res.json(await forms.events(await agentRead(req), cursor(req))); });
   app.get('/v2/events/stream', async (req, res) => {
     let closed = res.destroyed, resume: (() => void) | undefined, timer: ReturnType<typeof setTimeout> | undefined;
     const close = () => { closed = true; clearTimeout(timer); resume?.(); };
     res.on('close', close);
-    const secret = bearer(req); let next = cursor(req);
+    const secret = await agentRead(req); let next = cursor(req);
     let page = await forms.events(secret, next);
-    const feed = await streams.subscribe(secret, { changed: () => resume?.(), closed: close });
+    const { grant } = await forms.db.runTransaction(tx => forms.relay.agent(tx, secret));
+    const release = await forms.relay.access.stream(grant.ownerId, grant.id, sseDurationMs);
+    let feed: Awaited<ReturnType<EventStreams['subscribe']>>;
+    try { feed = await streams.subscribe(secret, { changed: () => resume?.(), closed: close }); }
+    catch (error) { try { await release(); } catch {} throw error; }
     const tail = async () => {
       const sequence = next ? Number(next.slice(-16)) : 0;
       const events = feed.tail(sequence), oldest = feed.oldest();
@@ -65,6 +73,6 @@ export function mountForms(app: Express, forms: Forms, owner: (req: Request) => 
         });
         page = await tail();
       }
-    } finally { clearTimeout(timer); feed.stop(); res.end(); }
+    } finally { clearTimeout(timer); feed.stop(); res.end(); try { await release(); } catch { /* expiring lease recovers release */ } }
   });
 }

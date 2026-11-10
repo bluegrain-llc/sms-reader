@@ -26,3 +26,6 @@ App/bot connections require separate approval in Settings → Access before they
 Connection URLs may appear in ordinary infrastructure route logs. They contain only the short-lived comparison code, not the private caller credential or an SMS message/code.
 
 Wizard step progress and response drafts remain only in app memory, isolated by request and signed-in owner. Previous/Next and Back to inbox retain them while the process lives; process death loses them. Only a final submission uploads answers. Hidden-branch answers are discarded when the selected path changes.
+
+
+Account deletion now blocks account access when accepted and continues as a resumable background job. Android asks for the same Google account again before acceptance. The public `/account/delete` page provides Google-authenticated self-service deletion when Firebase web configuration is supplied; `/privacy` explains live handling. A read-only status receipt expires after 24 hours. Completed cleanup-job metadata expires after seven days; minimal account tombstones prevent stale access. See [deletion API, configuration and remaining acceptance](ACCOUNT_DELETION.md). These routes do not establish finalized public operator/contact or backup disclosures by themselves.

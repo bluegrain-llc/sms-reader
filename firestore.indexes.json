@@ -342,6 +342,60 @@
       "collectionGroup": "grants",
       "fieldPath": "webhooks",
       "indexes": []
+    },
+    {
+      "collectionGroup": "deletionJobs",
+      "fieldPath": "purgeAt",
+      "ttl": true,
+      "indexes": [
+        {
+          "order": "ASCENDING",
+          "queryScope": "COLLECTION"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "deletionReceipts",
+      "fieldPath": "purgeAt",
+      "ttl": true,
+      "indexes": [
+        {
+          "order": "ASCENDING",
+          "queryScope": "COLLECTION"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "accessRates",
+      "fieldPath": "purgeAt",
+      "ttl": true,
+      "indexes": [
+        {
+          "order": "ASCENDING",
+          "queryScope": "COLLECTION"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "streamLimits",
+      "fieldPath": "purgeAt",
+      "ttl": true,
+      "indexes": [
+        {
+          "order": "ASCENDING",
+          "queryScope": "COLLECTION"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "deletionJobs",
+      "fieldPath": "ownerId",
+      "indexes": []
+    },
+    {
+      "collectionGroup": "streamLimits",
+      "fieldPath": "leases",
+      "indexes": []
     }
   ]
 }

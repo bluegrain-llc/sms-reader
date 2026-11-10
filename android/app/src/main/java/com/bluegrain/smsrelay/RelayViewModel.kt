@@ -95,8 +95,14 @@ class RelayViewModel @JvmOverloads constructor(application: Application, private
         catch (_: Exception) { if (!silent) error("Could not connect. Check your network and try again.") }
         finally { mutable.update { it.copy(busy = false) } }
     }
-    fun signedIn(token: String) = action {
+    fun signedIn(token: String, deleteAfter: Boolean = false, expectedOwner: String = "") = action {
+        check(!deleteAfter || (expectedOwner.isNotBlank() && repo.signedIn && repo.ownerId == expectedOwner)) { "Sign in to the account again before deleting." }
         repo.signIn(token)
+        if (deleteAfter) {
+            repo.deleteAccount(); clearLocal()
+            mutable.update { RelayUiState(configured = app.configured, foreground = it.foreground, error = "Deletion accepted. Account access is blocked while cleanup continues.") }
+            return@action
+        }
         mutable.update { it.copy(signedIn = true, email = repo.email) }
         refreshData()
     }

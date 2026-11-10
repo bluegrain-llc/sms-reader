@@ -1,9 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import { MaintenancePages } from './maintenance-pages.js';
 import type { RecordSecurity } from './security-ledger.js';
+import { Deletions } from './deletions.js';
+import { Access } from './access.js';
 import { Forms } from './forms.js';
 import { Connections } from './connections.js';
-import { Firestore, Transaction, Query } from 'firebase-admin/firestore';
+import { Firestore, Transaction } from 'firebase-admin/firestore';
 import { active, Account, bump, CodeRequest, codeSchema, deadline, Device, ensure, Grant, hash, HISTORY, MINUTE, newSecret, PhoneState, RequestInput, requestSchema, Status, view } from './model.js';
 
 export type Notify = (token: string, requestId: string, ttl: number, kind?: 'form') => Promise<void>;
@@ -13,7 +15,12 @@ export class Relay {
   readonly connections: Connections;
   readonly forms: Forms;
   readonly pages: MaintenancePages;
-  constructor(readonly db: Firestore, readonly notify: Notify, readonly now = Date.now, wake?: () => Promise<void>, readonly recordSecurity: RecordSecurity = async () => {}) { this.pages = new MaintenancePages(db); this.connections = new Connections(this); this.forms = new Forms(this, wake); }
+  readonly deletions: Deletions;
+  readonly access: Access;
+  constructor(readonly db: Firestore, readonly notify: Notify, readonly now = Date.now, wake?: () => Promise<void>, readonly recordSecurity: RecordSecurity = async () => {}) {
+    this.pages = new MaintenancePages(db); this.connections = new Connections(this); this.forms = new Forms(this, wake);
+    this.deletions = new Deletions(db, now, wake ?? (async () => {}), recordSecurity); this.access = new Access(db, now);
+  }
   ref(collection: string, id: string) { return this.db.collection(collection).doc(id); }
   async account(tx: Transaction, uid: string): Promise<Account> {
     const a = (await tx.get(this.ref('accounts', uid))).data() as Account | undefined;
@@ -91,6 +98,7 @@ export class Relay {
     return { grantId: id, token };
   }
   async listDevices(uid: string) {
+    await this.db.runTransaction(tx => this.account(tx, uid));
     const [snap, account] = await Promise.all([this.db.collection('devices').where('ownerId', '==', uid).get(), this.ref('accounts', uid).get()]);
     const id = account.data()?.activeRequestId as string | undefined;
     const r = id ? (await this.ref('requests', id).get()).data() as CodeRequest | undefined : undefined;
@@ -100,6 +108,7 @@ export class Relay {
     }));
   }
   async listGrants(uid: string, deviceId?: string) {
+    await this.db.runTransaction(tx => this.account(tx, uid));
     if (deviceId) await this.db.runTransaction(tx => this.device(tx, uid, deviceId));
     const s = await this.db.collection('grants').where('ownerId', '==', uid).get();
     return s.docs.map(s => { const g = s.data() as Grant;
@@ -144,17 +153,6 @@ export class Relay {
       }
     });
     await this.advance(uid);
-  }
-  async deleteQuery(query: Query) {
-    for (;;) {
-      const page = await query.limit(400).get(); if (page.empty) return;
-      const batch = this.db.batch(); page.docs.forEach(doc => batch.delete(doc.ref)); await batch.commit();
-    }
-  }
-  async deleteAccount(uid: string) {
-    await this.recordSecurity({ ownerId: uid, kind: 'account.delete', target: uid });
-    await this.ref('accounts', uid).set({ deleting: true });
-    for (const collection of ['devices', 'grants', 'managers', 'managerCallers', 'connections', 'connectionCodes', 'requests', 'results', 'audit', 'formRequests', 'formResults', 'requestEvents', 'deliveryOutbox']) await this.deleteQuery(this.db.collection(collection).where('ownerId', '==', uid));
   }
   async advance(uid: string) {
     // Each transaction reads before writing; a second iteration can promote after releasing a stale lock.
@@ -345,5 +343,6 @@ export class Relay {
     }
     for (const collection of ['results', 'requests', 'audit', 'connections', 'connectionCodes', 'connectionRates']) await this.pages.purge(collection, this.now());
     await this.forms.maintenance();
+    await this.access.cleanup();
   }
 }
