@@ -1,5 +1,7 @@
 # Android Request Relay
 
+Production publication follows the [Google Play release gates and preparation package](docs/play/README.md). The package does not claim that Console, closed testing, or physical acceptance is complete.
+
 An Android 8+ request inbox and Firebase-backed Cloud Run service for owner-approved, upcoming SMS codes. One installation provides two independent launcher entries: **Inbox** for requests and **Administration** for access, devices and history. Each has its own Android task and navigation. Lists update automatically; pull down from the top to refresh immediately. Apps and bots pair directly through a link approved in Administration; each user/app connection gets its own credential for REST or MCP. The relay never triggers an SMS and never reads the inbox.
 
 
