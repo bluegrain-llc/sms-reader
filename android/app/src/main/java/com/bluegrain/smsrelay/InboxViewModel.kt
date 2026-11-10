@@ -2,6 +2,7 @@ package com.bluegrain.smsrelay
 
 import android.app.Application
 import android.content.*
+import android.os.SystemClock
 import androidx.core.content.ContextCompat
 import androidx.core.content.IntentCompat
 import androidx.lifecycle.AndroidViewModel
@@ -32,7 +33,7 @@ class InboxViewModel(application: Application) : AndroidViewModel(application) {
     private var helperRequest: String? = null
     private var helperField: String? = null
     private var submitBody: JSONObject? = null
-    private var ready = CompletableDeferred<Boolean>()
+    private var listenerWindow: SmsListenerWindow? = null
     private data class Draft(val values: Map<String, Any>, val stepId: String?, val reviewing: Boolean, val submission: JSONObject?, val expiresAt: Long)
     private val drafts = mutableMapOf<String, Draft>()
     private fun saveDraft() {
@@ -50,7 +51,7 @@ class InboxViewModel(application: Application) : AndroidViewModel(application) {
                     s.form?.takeIf { s.now >= it.expiresAt && (s.values.isNotEmpty() || s.stepId != null || s.reviewing ||
                         s.fieldErrors.isNotEmpty() || submitBody != null || helperRequest == it.id) }?.let(::showLoaded)
                 }
-                if (state.value.helperUntil in 1..System.currentTimeMillis()) stopHelper("SMS listening ended. You can still enter the code manually.")
+                if (listenerWindow?.expired() == true) stopHelper("SMS listening ended. You can still enter the code manually.")
                 if (++tick % 5 == 0 && state.value.foreground && app.configured && repo.signedIn && repo.registered && !state.value.busy) refresh()
             }
         }
@@ -188,32 +189,39 @@ class InboxViewModel(application: Application) : AndroidViewModel(application) {
         if (repo.deviceId in form.helperDevices) throw ApiFailure("input_already_started_use_manual_entry", 409)
         if (repo.listenerUntil > System.currentTimeMillis()) throw ApiFailure("sms_listener_busy", 409)
         stopHelper(null)
-        helperRequest = form.id; helperField = field.id; ready = CompletableDeferred()
-        val barrier = ready
+        helperRequest = form.id; helperField = field.id
+        val window = SmsListenerWindow(SystemClock.elapsedRealtime(), SystemClock::elapsedRealtime)
+        listenerWindow = window
         val started = System.currentTimeMillis()
         receiver = object : BroadcastReceiver() {
             override fun onReceive(context: Context, intent: Intent) {
                 if (intent.action != SmsRetriever.SMS_RETRIEVED_ACTION || helperRequest != form.id) return
                 val status = IntentCompat.getParcelableExtra(intent, SmsRetriever.EXTRA_STATUS, Status::class.java) ?: return
-                viewModelScope.launch {
-                    if (!barrier.await() || helperRequest != form.id) return@launch
-                    if (status.statusCode == CommonStatusCodes.SUCCESS) {
-                        val consent = IntentCompat.getParcelableExtra(intent, SmsRetriever.EXTRA_CONSENT_INTENT, Intent::class.java)
-                        if (consent == null) stopHelper("SMS approval unavailable. Enter the code manually.")
-                        else mutable.update { it.copy(consent = consent) }
-                    } else if (status.statusCode == CommonStatusCodes.TIMEOUT) stopHelper("SMS listening ended. Enter the code manually.")
-                }
+                onListenerStatus(form.id, window, status.statusCode,
+                    IntentCompat.getParcelableExtra(intent, SmsRetriever.EXTRA_CONSENT_INTENT, Intent::class.java))
             }
         }
         ContextCompat.registerReceiver(app, receiver, IntentFilter(SmsRetriever.SMS_RETRIEVED_ACTION), SmsRetriever.SEND_PERMISSION, null, ContextCompat.RECEIVER_EXPORTED)
         try {
             repo.listenerUntil = started + 5 * 60_000
             SmsRetriever.getClient(app).startSmsUserConsent(null).await()
+            if (listenerWindow !== window || helperRequest != form.id) return@action
             val report = repo.formObservation(form.id, JSONObject().put("type", "input.ready").put("fieldId", field.id).put("listenerStartedAt", started))
+            if (listenerWindow !== window || helperRequest != form.id) return@action
             if (report.getString("status") != "pending") { stopHelper(null); refresh(); return@action }
-            ready.complete(true)
+            window.ready.complete(true)
             mutable.update { it.copy(form = it.form?.copy(helperDevices = form.helperDevices + repo.deviceId), helper = "Listening for an upcoming SMS. Android will ask before sharing it.", helperUntil = started + 5 * 60_000) }
-        } catch (e: Exception) { stopHelper("SMS listening could not start. Enter the code manually."); throw e }
+        } catch (e: Exception) { if (listenerWindow === window) stopHelper("SMS listening could not start. Enter the code manually."); throw e }
+    }
+    private fun onListenerStatus(id: String, window: SmsListenerWindow, status: Int, consent: Intent?) = viewModelScope.launch {
+        if (!window.accepts(status == CommonStatusCodes.TIMEOUT) {
+                listenerWindow === window && helperRequest == id && state.value.form?.let { it.id == id && it.status == "pending" } == true
+            }) return@launch
+        when (status) {
+            CommonStatusCodes.SUCCESS -> if (consent == null) stopHelper("SMS approval unavailable. Enter the code manually.")
+                else mutable.update { it.copy(consent = consent) }
+            CommonStatusCodes.TIMEOUT -> stopHelper("SMS listening ended. Enter the code manually.")
+        }
     }
     fun takeConsent(): Pair<String, Intent>? {
         if (!state.value.foreground) return null
@@ -232,7 +240,7 @@ class InboxViewModel(application: Application) : AndroidViewModel(application) {
     }
     fun candidate(code: String) { helperField?.let { change(it, code) }; mutable.update { it.copy(candidates = emptyList()) } }
     private fun stopHelper(message: String?) {
-        if (!ready.isCompleted) ready.complete(false)
+        listenerWindow?.close(); listenerWindow = null
         receiver?.let { app.unregisterReceiver(it) }; receiver = null; helperRequest = null
         mutable.update { it.copy(helper = message, helperUntil = 0, consent = null) }
     }

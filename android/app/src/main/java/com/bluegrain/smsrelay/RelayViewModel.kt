@@ -5,6 +5,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.os.SystemClock
 import androidx.core.content.ContextCompat
 import androidx.core.content.IntentCompat
 import androidx.lifecycle.AndroidViewModel
@@ -15,7 +16,6 @@ import com.google.android.gms.common.GoogleApiAvailability
 import com.google.android.gms.common.api.CommonStatusCodes
 import com.google.android.gms.common.api.Status
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -51,7 +51,7 @@ class RelayViewModel @JvmOverloads constructor(application: Application, private
     private val actions = UiActions(mutable, ::error)
     private val gate = ConsentGate()
     private var receiver: BroadcastReceiver? = null
-    private var barrier = CompletableDeferred<Boolean>()
+    private var listenerWindow: SmsListenerWindow? = null
     private var consent: Intent? = null
     private var consentRequestId: String? = null
     private var consentLaunched = false
@@ -236,42 +236,50 @@ class RelayViewModel @JvmOverloads constructor(application: Application, private
         val reason = if (!available) "play_services_unavailable" else if (!RelayNotifications.enabled(app)) "notifications_disabled" else null
         if (reason != null) { repo.event(r.id, "failed", reason); sync(r.id); return }
         boundId = r.id; blocked = false; repo.inFlight = r.id; gate.bind(r.id)
-        barrier = CompletableDeferred()
         val started = System.currentTimeMillis()
-        val readyBarrier = barrier
+        val window = SmsListenerWindow(SystemClock.elapsedRealtime(), SystemClock::elapsedRealtime)
+        listenerWindow = window
         receiver = object : BroadcastReceiver() {
             override fun onReceive(context: Context, intent: Intent) {
                 if (intent.action != SmsRetriever.SMS_RETRIEVED_ACTION || boundId != r.id || blocked) return
                 val status = IntentCompat.getParcelableExtra(intent, SmsRetriever.EXTRA_STATUS, Status::class.java) ?: return
-                when (status.statusCode) {
-                    CommonStatusCodes.SUCCESS -> {
-                        val next = IntentCompat.getParcelableExtra(intent, SmsRetriever.EXTRA_CONSENT_INTENT, Intent::class.java)
-                        viewModelScope.launch {
-                            if (!readyBarrier.await() || blocked || boundId != r.id) return@launch
-                            if (next == null) { fail(r.id, "consent_unavailable"); return@launch }
-                            try {
-                                val outcome = retry(r.id) { repo.event(r.id, "awaiting_consent") }
-                                if (outcome.getString("status") != "awaiting_consent") { sync(r.id); return@launch }
-                                consent = next; consentRequestId = r.id
-                                mutable.update { it.copy(consentAvailable = true) }
-                                if (!state.value.foreground) RelayNotifications.show(app, r.id, true)
-                            } catch (_: IOException) { error("Connection lost before consent. Reopen this request to retry."); fail(r.id, "consent_unavailable") }
-                        }
-                    }
-                    CommonStatusCodes.TIMEOUT -> viewModelScope.launch { if (readyBarrier.await()) fail(r.id, "listener_timeout") }
-                }
+                onListenerStatus(r.id, window, status.statusCode,
+                    IntentCompat.getParcelableExtra(intent, SmsRetriever.EXTRA_CONSENT_INTENT, Intent::class.java))
             }
         }
         ContextCompat.registerReceiver(app, receiver, IntentFilter(SmsRetriever.SMS_RETRIEVED_ACTION), SmsRetriever.SEND_PERMISSION, null, ContextCompat.RECEIVER_EXPORTED)
         try {
             repo.listenerUntil = started + 5 * 60_000
             SmsRetriever.getClient(app).startSmsUserConsent(r.sender).await()
+            if (listenerWindow !== window || blocked || boundId != r.id) return
             val ready = retry(r.id) { repo.event(r.id, "ready", startedAt = started) }
-            if (ready.getString("status") != "ready") { readyBarrier.complete(false); sync(r.id); return }
-            readyBarrier.complete(true)
+            if (listenerWindow !== window || blocked || boundId != r.id) return
+            if (ready.getString("status") != "ready") { window.close(); sync(r.id); return }
+            window.ready.complete(true)
             sync(r.id); startPoll(r.id)
-        } catch (e: CancellationException) { readyBarrier.complete(false); throw e }
-        catch (_: Exception) { readyBarrier.complete(false); fail(r.id, "listener_failed") }
+        } catch (e: CancellationException) { window.close(); throw e }
+        catch (_: Exception) { window.close(); if (listenerWindow === window) fail(r.id, "listener_failed") }
+    }
+    private fun onListenerStatus(id: String, window: SmsListenerWindow, status: Int, next: Intent?) = viewModelScope.launch {
+        if (!window.accepts(status == CommonStatusCodes.TIMEOUT) {
+                listenerWindow === window && boundId == id && !blocked && state.value.request?.let { it.id == id && it.active } == true
+            }) return@launch
+        when (status) {
+            CommonStatusCodes.SUCCESS -> {
+                if (next == null) { fail(id, "consent_unavailable"); return@launch }
+                try {
+                    val outcome = retry(id) { repo.event(id, "awaiting_consent") }
+                    if (listenerWindow !== window || blocked || boundId != id || window.expired()) return@launch
+                    if (outcome.getString("status") != "awaiting_consent") { sync(id); return@launch }
+                    consent = next; consentRequestId = id
+                    mutable.update { it.copy(consentAvailable = true) }
+                    if (!state.value.foreground) RelayNotifications.show(app, id, true)
+                } catch (_: IOException) {
+                    if (listenerWindow === window) { error("Connection lost before consent. Reopen this request to retry."); fail(id, "consent_unavailable") }
+                }
+            }
+            CommonStatusCodes.TIMEOUT -> fail(id, "listener_timeout")
+        }
     }
     private suspend fun <T> retry(id: String, block: suspend () -> T): T {
         var wait = 1_000L
@@ -292,6 +300,10 @@ class RelayViewModel @JvmOverloads constructor(application: Application, private
                     if (e.status in setOf(401, 403, 404, 409)) { clearLocal(); error("This request is no longer available."); return@launch }
                 } catch (_: IOException) { error("Offline. Approval will stop when the listening window ends.") }
                 val r = state.value.request
+                if (listenerWindow?.expired() == true && !blocked && boundId == id && r?.id == id && r.active) {
+                    fail(id, "listener_timeout")
+                    return@launch
+                }
                 if (r != null && System.currentTimeMillis() >= (r.listeningDeadline ?: r.expiresAt)) {
                     clearSensitive(); error("Listening window ended. Ask the caller to start a new request.")
                 }
@@ -359,7 +371,7 @@ class RelayViewModel @JvmOverloads constructor(application: Application, private
         catch (_: IOException) { error("Could not report failure. The request will expire; reopen to retry.") }
     }
     private fun clearSensitive() {
-        if (!barrier.isCompleted) barrier.complete(false)
+        listenerWindow?.close(); listenerWindow = null
         gate.clear(); consent = null; consentRequestId = null; consentLaunched = false
         mutable.update { it.copy(candidates = emptyList(), codeDraft = "", autofillDeclined = false, consentAvailable = false) }
     }
