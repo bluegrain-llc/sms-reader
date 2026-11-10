@@ -29,3 +29,7 @@ Wizard step progress and response drafts remain only in app memory, isolated by 
 
 
 Account deletion now blocks account access when accepted and continues as a resumable background job. Android asks for the same Google account again before acceptance. The public `/account/delete` page provides Google-authenticated self-service deletion when Firebase web configuration is supplied; `/privacy` explains live handling. A read-only status receipt expires after 24 hours. Completed cleanup-job metadata expires after seven days; minimal account tombstones prevent stale access. See [deletion API, configuration and remaining acceptance](ACCOUNT_DELETION.md). These routes do not establish finalized public operator/contact or backup disclosures by themselves.
+
+## Recovery metadata
+
+The recovery deployment can enable encrypted daily snapshots of account/device/access metadata, including notification routing and webhook configuration, retained for seven days in an isolated project. SMS codes, form answers, request definitions, events and history are excluded. Independent security-denial records are retained for at least seven days and replayed before a restore can serve traffic. Account deletion removes live data immediately through the deletion worker; isolated snapshots age out through asynchronous object lifecycle deletion. Tombstones and denial replay block access resurrection. Operators must verify and publish actual backup enablement and infrastructure log retention before public launch. See [capacity and recovery gate](recovery/README.md).
