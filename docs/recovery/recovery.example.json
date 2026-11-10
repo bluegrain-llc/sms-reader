@@ -1,0 +1,11 @@
+{
+  "project": "replace-source-project",
+  "recovery_project": "replace-recovery-project",
+  "region": "us-central1",
+  "backup_bucket": "replace-backup-bucket",
+  "ledger_bucket": "replace-ledger-bucket",
+  "runtime_account": "sms-relay-server@replace-source-project.iam.gserviceaccount.com",
+  "backup_account": "sms-relay-backup@replace-source-project.iam.gserviceaccount.com",
+  "scheduler_account": "sms-relay-scheduler@replace-source-project.iam.gserviceaccount.com",
+  "image_digest": "replace-tested-image-digest"
+}
