@@ -1,3 +1,4 @@
+import { dueSmsQueries } from './delivery-queries.js';
 import type { Request, Response, NextFunction } from 'express';
 import type { Firestore, Query } from 'firebase-admin/firestore';
 
@@ -45,7 +46,8 @@ export class Telemetry {
   async backlogs(db: Firestore) {
     const now = this.now();
     const sample = async (kind: Extract<Event, { event: 'backlog_snapshot' }>['kind'], query: Query, field: string) => {
-      const [count, first] = await Promise.all([query.count().get(), query.orderBy(field).limit(1).get()]);
+      query = kind === 'sms' ? query : query.orderBy(field);
+      const [count, first] = await Promise.all([query.count().get(), query.limit(1).get()]);
       const value = first.docs[0]?.get(field);
       const time = typeof value === 'number' ? value : value?.toMillis?.();
       return { kind, count: count.data().count, oldest_due_age_s: Number.isFinite(time) ? Math.max(0, Math.floor((now - time) / 1000)) : 0 };
@@ -56,8 +58,7 @@ export class Telemetry {
       sample('form_results', db.collection('formResults').where('purgeAt', '<=', new Date(now)), 'purgeAt'),
       sample('legacy_deletion', db.collection('deletionAttempts').where('nextAt', '<=', now), 'nextAt'),
       sample('deletion', db.collection('deletionJobs').where('nextAt', '<=', now), 'nextAt'),
-      ...['pending_phone', 'ready', 'awaiting_consent'].map(status => sample('sms', db.collection('requests')
-        .where('status', '==', status).where('notificationSent', '==', false).where('nextNotificationAt', '<=', now), 'nextNotificationAt')),
+      ...dueSmsQueries(db, now).map(query => sample('sms', query, 'nextNotificationAt')),
     ]);
     const combined = new Map<string, typeof samples[number]>();
     for (const sample of samples) {

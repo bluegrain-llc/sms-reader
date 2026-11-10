@@ -691,8 +691,9 @@ integration('monitoring samples real due queues and timestamp expiries without e
 });
 
 integration('failed synchronous identity deletion remains visible until successful retry', { timeout: 30_000 }, async () => {
+  let failIdentity = true;
   const server = app(relay, { verifyOwner: async () => ({ uid, authTime: Date.now() / 1000 }),
-    verifyScheduler: async () => {}, deleteIdentity: async () => { throw Error('auth unavailable'); } }).listen(0, '127.0.0.1');
+    verifyScheduler: async () => {}, deleteIdentity: async () => { if (failIdentity) throw Error('auth unavailable'); } }).listen(0, '127.0.0.1');
   try {
     await new Promise<void>(resolve => server.once('listening', resolve));
     const address = server.address(); assert.ok(address && typeof address !== 'string');
@@ -703,6 +704,13 @@ integration('failed synchronous identity deletion remains visible until successf
     const rows: { kind?: string; count?: number }[] = [];
     await new Telemetry(row => rows.push(row), () => Date.now() + 301_000).backlogs(db);
     assert.equal(rows.find(row => row.kind === 'legacy_deletion')?.count, 1);
+    failIdentity = false;
+    const retried = await fetch(`http://127.0.0.1:${address.port}/v1/account`, { method: 'DELETE', headers: { Authorization: 'Bearer owner' }, signal: AbortSignal.timeout(10_000) });
+    assert.equal(retried.status, 200); await retried.text();
+    assert.equal((await attempt.ref.get()).exists, false);
+    rows.length = 0;
+    await new Telemetry(row => rows.push(row)).backlogs(db);
+    assert.equal(rows.find(row => row.kind === 'legacy_deletion')?.count, 0);
   } finally {
     server.closeAllConnections();
     await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));

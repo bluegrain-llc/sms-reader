@@ -1,3 +1,4 @@
+import { dueSmsQueries } from './delivery-queries.js';
 import { telemetry } from './telemetry.js';
 import { randomUUID } from 'node:crypto';
 import { Forms } from './forms.js';
@@ -327,9 +328,8 @@ export class Relay {
   async maintenance() {
     const work = await this.db.collection('accounts').where('hasWork', '==', true).limit(250).get();
     for (const doc of work.docs) { if (!doc.data().deleting) await this.advance(doc.id); }
-    for (const status of ['pending_phone', 'ready', 'awaiting_consent']) {
-      const pending = await this.db.collection('requests').where('status', '==', status).where('notificationSent', '==', false)
-        .where('nextNotificationAt', '<=', this.now()).orderBy('nextNotificationAt').limit(250).get();
+    for (const query of dueSmsQueries(this.db, this.now())) {
+      const pending = await query.limit(250).get();
       for (let i = 0; i < pending.docs.length; i += 10) await Promise.all(pending.docs.slice(i, i + 10).map(doc => this.deliver(doc.id)));
     }
     for (const collection of ['results', 'requests', 'audit', 'connections', 'connectionCodes', 'connectionRates']) {
