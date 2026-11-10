@@ -2,6 +2,7 @@ use sms_code_relay::{
     google::Google,
     http::{Options, app},
     model,
+    newtransport::{Connection, DeadlineListener, connection_info},
     relay::Relay,
     security::RecoveryGate,
     store::Store,
@@ -63,8 +64,10 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", port)).await?;
     println!("sms_relay_listening");
     axum::serve(
-        listener,
-        router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        DeadlineListener(listener),
+        router
+            .layer(axum::middleware::from_fn(connection_info))
+            .into_make_service_with_connect_info::<Connection>(),
     )
     .with_graceful_shutdown(async move {
         shutdown().await;

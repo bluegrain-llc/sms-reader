@@ -74,6 +74,26 @@ test('native grant feed shares watches, bounds its tail, delivers changes and cl
   } finally { for (const id of subscriptions) await bridge.call('streamStop', [id]); }
 });
 
+test('native account deletion closes every subscriber sharing its authorization watches', { timeout: 30_000 }, async t => {
+  const grant = await readyGrant(), subscriptions: string[] = [];
+  try {
+    for (let client = 0; client < 2; client++) {
+      const subscription = await bridge.call('streamSubscribe', [grant.token]) as Subscription;
+      subscriptions.push(subscription.subscriptionId); assert.equal(subscription.activeFeeds, 1);
+    }
+    await relay.deletions.request(uid);
+    for (const id of subscriptions) {
+      await until(() => bridge.call('streamSnapshot', [id]) as Promise<Snapshot>, state => state.failed, t.signal);
+    }
+    assert.equal((await db.collection('accounts').doc(uid).get()).data()?.deleting, true);
+  } finally {
+    for (const [index, id] of subscriptions.entries()) {
+      const state = await bridge.call('streamStop', [id]) as { activeFeeds: number };
+      assert.equal(state.activeFeeds, index === subscriptions.length - 1 ? 0 : 1);
+    }
+  }
+});
+
 test('native SSE replays a durable gap larger than the shared tail without losing its cursor order', { timeout: 30_000 }, async t => {
   const grant = await readyGrant();
   const batch = db.batch();

@@ -287,9 +287,13 @@ async fn json_body(body: Body, headers: &HeaderMap) -> Result<Vec<u8>> {
     };
     let limit = 256 * 1024;
     let mut reader = reader.take(limit + 1);
-    let mut bytes = Vec::with_capacity(limit as usize + 1);
+    let mut bytes = Vec::with_capacity(8192);
     let (mut utf16_sample, mut utf32_sample) = (None, None);
     while bytes.len() <= limit as usize {
+        if bytes.len() == bytes.capacity() {
+            let additional = bytes.capacity().min(limit as usize + 1 - bytes.len());
+            bytes.reserve_exact(additional);
+        }
         if reader
             .read_buf(&mut bytes)
             .await
@@ -954,7 +958,16 @@ async fn route(s: App, request: Request) -> Result<Response> {
         }
         ("GET", ["v2", "events"]) => r.events(s.agent_read(&headers).await?, cursor()?).await?,
         ("GET", ["v2", "events", "stream"]) => {
-            return stream(s.clone(), s.agent_read(&headers).await?, cursor()?).await;
+            return stream(
+                s.clone(),
+                s.agent_read(&headers).await?,
+                cursor()?,
+                parts
+                    .extensions
+                    .get::<axum::extract::ConnectInfo<crate::newtransport::Connection>>()
+                    .map(|connection| connection.0.clone()),
+            )
+            .await;
         }
         ("POST", ["internal", operation @ ("delivery" | "maintenance")]) => {
             let reason = if *operation == "delivery" {
@@ -1074,7 +1087,12 @@ impl Drop for StreamAdmission {
         }
     }
 }
-async fn stream(s: App, secret: String, cursor: Option<String>) -> Result<Response> {
+async fn stream(
+    s: App,
+    secret: String,
+    cursor: Option<String>,
+    connection: Option<crate::newtransport::Connection>,
+) -> Result<Response> {
     let page = s.relay.events(secret.clone(), cursor.clone()).await?;
     let relay = s.relay.clone();
     let key = secret.clone();
@@ -1100,14 +1118,26 @@ async fn stream(s: App, secret: String, cursor: Option<String>) -> Result<Respon
         lease: Some(lease),
     };
     let end = tokio::time::Instant::now() + Duration::from_millis(remaining);
+    let transport = connection.map(|connection| connection.stream_deadline(end));
     let feed = tokio::select! {
         feed = s.streams.subscribe(secret.clone()) => match feed {
             Ok(feed) => feed,
-            Err(_) => { admission.release().await; return Ok(Response::new(Body::empty())); }
+            Err(_) => { admission.release().await; return Ok(Response::new(finish_stream(Body::empty(), transport))); }
         },
-        _ = tokio::time::sleep_until(end) => { admission.release().await; return Ok(Response::new(Body::empty())); },
+        _ = tokio::time::sleep_until(end) => { admission.release().await; return Ok(Response::new(finish_stream(Body::empty(), transport))); },
     };
-    let body = shared_event_body(s.relay, secret, page, cursor, end, feed, admission);
+    let body = event_body(
+        page,
+        cursor,
+        end,
+        SharedFeed {
+            relay: s.relay,
+            secret,
+            feed,
+        },
+        admission.release(),
+        transport,
+    );
     Ok((
         [
             ("Content-Type", "text/event-stream"),
@@ -1136,24 +1166,79 @@ async fn feed_page(
         Ok(json!({"events": events, "cursor": next}))
     }
 }
-fn shared_event_body(
+trait EventFeed: Send + 'static {
+    fn failed(&self) -> bool;
+    fn revision(&self) -> u64;
+    fn closed(&self) -> futures::future::BoxFuture<'static, ()>;
+    fn changed(&mut self) -> futures::future::BoxFuture<'_, Result<()>>;
+    fn page(
+        &self,
+        next: Option<String>,
+        replay: bool,
+    ) -> futures::future::BoxFuture<'_, Result<Value>>;
+}
+struct SharedFeed {
     relay: Relay,
     secret: String,
+    feed: crate::event_streams::FeedSubscription,
+}
+impl EventFeed for SharedFeed {
+    fn failed(&self) -> bool {
+        self.feed.failed()
+    }
+    fn revision(&self) -> u64 {
+        self.feed.revision()
+    }
+    fn closed(&self) -> futures::future::BoxFuture<'static, ()> {
+        Box::pin(self.feed.closed())
+    }
+    fn changed(&mut self) -> futures::future::BoxFuture<'_, Result<()>> {
+        Box::pin(self.feed.changed())
+    }
+    fn page(
+        &self,
+        next: Option<String>,
+        replay: bool,
+    ) -> futures::future::BoxFuture<'_, Result<Value>> {
+        Box::pin(async move {
+            if replay {
+                self.relay.events(self.secret.clone(), next).await
+            } else {
+                feed_page(&self.feed, &self.relay, &self.secret, &next).await
+            }
+        })
+    }
+}
+fn finish_stream(body: Body, transport: Option<crate::newtransport::StreamDeadline>) -> Body {
+    match transport {
+        Some(transport) => {
+            transport.stop();
+            transport.body(body)
+        }
+        None => body,
+    }
+}
+// Real feeds and regression stimuli use the same pump and independent supervisor.
+// A pending database read cannot suppress the deadline or disconnect signal.
+fn event_body<Feed, Release>(
     mut page: Value,
     mut next: Option<String>,
     end: tokio::time::Instant,
-    mut feed: crate::event_streams::FeedSubscription,
-    admission: StreamAdmission,
-) -> Body {
+    mut feed: Feed,
+    release: Release,
+    transport: Option<crate::newtransport::StreamDeadline>,
+) -> Body
+where
+    Feed: EventFeed,
+    Release: std::future::Future<Output = ()> + Send + 'static,
+{
     use futures::StreamExt;
     let (tx, rx) = tokio::sync::mpsc::channel::<std::result::Result<String, Infallible>>(128);
     let failed = feed.closed();
+    let supervisor_transport = transport.clone();
     tokio::spawn(async move {
         let pump = async {
-            if feed.failed() {
-                return;
-            }
-            if tx.try_send(Ok("retry: 1000\n\n".into())).is_err() {
+            if feed.failed() || tx.try_send(Ok("retry: 1000\n\n".into())).is_err() {
                 return;
             }
             loop {
@@ -1177,13 +1262,13 @@ fn shared_event_body(
                     next = Some(text(&event, "id").into());
                 }
                 if arr(&page, "events").len() == 100 {
-                    match relay.events(secret.clone(), next.clone()).await {
+                    match feed.page(next.clone(), true).await {
                         Ok(value) => page = value,
                         Err(_) => return,
                     }
                     continue;
                 }
-                match feed_page(&feed, &relay, &secret, &next).await {
+                match feed.page(next.clone(), false).await {
                     Ok(value) => page = value,
                     Err(_) => return,
                 }
@@ -1194,85 +1279,73 @@ fn shared_event_body(
                     return;
                 }
                 if feed.revision() == revision {
-                    tokio::select! { result=feed.changed()=>{ if result.is_err(){return;} }, _=tokio::time::sleep(Duration::from_secs(1))=>{} }
-                }
-                match feed_page(&feed, &relay, &secret, &next).await {
-                    Ok(value) => page = value,
-                    Err(_) => return,
-                }
-            }
-        };
-        tokio::select! { _=pump=>{}, _=failed=>{}, _=tokio::time::sleep_until(end)=>{}, _=tx.closed()=>{} }
-        drop(tx);
-        drop(feed);
-        admission.release().await;
-    });
-    Body::from_stream(
-        tokio_stream::wrappers::ReceiverStream::new(rx).take_until(tokio::time::sleep_until(end)),
-    )
-}
-// The supervisor owns both admission release and the response channel. A pending
-// database read cannot suppress the independent deadline or disconnect signal.
-#[cfg(test)]
-fn event_body<Read, ReadFuture, Release, ReleaseFuture>(
-    mut page: Value,
-    mut next: Option<String>,
-    end: tokio::time::Instant,
-    interval: Duration,
-    mut read: Read,
-    release: Release,
-) -> Body
-where
-    Read: FnMut(Option<String>) -> ReadFuture + Send + 'static,
-    ReadFuture: std::future::Future<Output = Result<Value>> + Send,
-    Release: FnOnce() -> ReleaseFuture + Send + 'static,
-    ReleaseFuture: std::future::Future<Output = ()> + Send,
-{
-    use futures::StreamExt;
-    let (tx, rx) = tokio::sync::mpsc::channel::<std::result::Result<String, Infallible>>(128);
-    tx.try_send(Ok("retry: 1000\n\n".into())).unwrap();
-    tokio::spawn(async move {
-        let pump = async {
-            loop {
-                for event in arr(&page, "events") {
-                    let frame = format!(
-                        "id: {}\nevent: {}\ndata: {}\n\n",
-                        text(&event, "id"),
-                        text(&event, "type"),
-                        js_json(&event, false)
-                    );
-                    if tx.try_send(Ok(frame)).is_err() {
-                        return;
+                    tokio::select! {
+                        result=feed.changed()=>{ if result.is_err(){return;} },
+                        _=tokio::time::sleep(Duration::from_secs(1))=>{}
                     }
-                    next = Some(text(&event, "id").into());
                 }
-                if tx.try_send(Ok(": heartbeat\n\n".into())).is_err() {
-                    return;
-                }
-                tokio::time::sleep(interval).await;
-                match read(next.clone()).await {
+                match feed.page(next.clone(), false).await {
                     Ok(value) => page = value,
                     Err(_) => return,
                 }
             }
         };
         tokio::select! {
-            _ = pump => {},
-            _ = tokio::time::sleep_until(end) => {},
-            _ = tx.closed() => {},
+            _=pump=>{}, _=failed=>{}, _=tokio::time::sleep_until(end)=>{}, _=tx.closed()=>{}
+        }
+        if let Some(transport) = supervisor_transport {
+            transport.stop();
         }
         drop(tx);
-        release().await;
+        drop(feed);
+        release.await;
     });
-    Body::from_stream(
+    let body = Body::from_stream(
         tokio_stream::wrappers::ReceiverStream::new(rx).take_until(tokio::time::sleep_until(end)),
-    )
+    );
+    match transport {
+        Some(transport) => transport.body(body),
+        None => body,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Default)]
+    struct ScriptedFeed {
+        reads: Arc<AtomicUsize>,
+    }
+    impl EventFeed for ScriptedFeed {
+        fn failed(&self) -> bool {
+            false
+        }
+        fn revision(&self) -> u64 {
+            0
+        }
+        fn closed(&self) -> futures::future::BoxFuture<'static, ()> {
+            Box::pin(std::future::pending())
+        }
+        fn changed(&mut self) -> futures::future::BoxFuture<'_, Result<()>> {
+            Box::pin(async { Ok(()) })
+        }
+        fn page(
+            &self,
+            _: Option<String>,
+            _: bool,
+        ) -> futures::future::BoxFuture<'_, Result<Value>> {
+            let read = self.reads.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move {
+                if read == 0 {
+                    Ok(json!({"events":[]}))
+                } else {
+                    std::future::pending().await
+                }
+            })
+        }
+    }
 
     struct Capture(tokio::sync::mpsc::UnboundedSender<Value>);
     impl Delivery for Capture {
@@ -1341,9 +1414,9 @@ mod tests {
             json!({"events":[]}),
             None,
             tokio::time::Instant::now() + Duration::from_millis(100),
-            Duration::from_millis(10),
-            |_| std::future::pending::<Result<Value>>(),
-            || async {},
+            ScriptedFeed::default(),
+            async {},
+            None,
         );
         let response = measured_response(
             Response::new(body),
@@ -1374,27 +1447,25 @@ mod tests {
     #[tokio::test]
     async fn stream_deadline_releases_admission_while_event_read_remains_pending() {
         let reads = Arc::new(AtomicUsize::new(0));
-        let count = reads.clone();
         let (released, release_seen) = tokio::sync::oneshot::channel();
         let body = event_body(
             json!({"events":[]}),
             None,
             tokio::time::Instant::now() + Duration::from_millis(100),
-            Duration::from_millis(10),
-            move |_| {
-                count.fetch_add(1, Ordering::SeqCst);
-                std::future::pending::<Result<Value>>()
+            ScriptedFeed {
+                reads: reads.clone(),
             },
-            move || async move {
+            async move {
                 let _ = released.send(());
             },
+            None,
         );
         let bytes = tokio::time::timeout(Duration::from_secs(1), axum::body::to_bytes(body, 1024))
             .await
             .unwrap()
             .unwrap();
         assert!(String::from_utf8_lossy(&bytes).contains("heartbeat"));
-        assert_eq!(reads.load(Ordering::SeqCst), 1);
+        assert_eq!(reads.load(Ordering::SeqCst), 2);
         tokio::time::timeout(Duration::from_secs(1), release_seen)
             .await
             .unwrap()
@@ -1408,11 +1479,11 @@ mod tests {
             json!({"events":[]}),
             None,
             tokio::time::Instant::now() + Duration::from_secs(60),
-            Duration::from_secs(1),
-            |_| std::future::pending::<Result<Value>>(),
-            move || async move {
+            ScriptedFeed::default(),
+            async move {
                 let _ = released.send(());
             },
+            None,
         );
         drop(body);
         tokio::time::timeout(Duration::from_secs(1), release_seen)
@@ -1431,11 +1502,11 @@ mod tests {
             json!({"events":events}),
             None,
             tokio::time::Instant::now() + Duration::from_secs(60),
-            Duration::from_secs(1),
-            |_| std::future::pending::<Result<Value>>(),
-            move || async move {
+            ScriptedFeed::default(),
+            async move {
                 let _ = released.send(());
             },
+            None,
         );
         // Keep the receiver open without reading, as a stalled HTTP consumer does.
         tokio::time::timeout(Duration::from_secs(1), release_seen)
@@ -1450,6 +1521,191 @@ mod tests {
         let frames = String::from_utf8_lossy(&bytes);
         assert!(frames.contains("event: request.created"));
         assert!(!frames.contains("id: 199\n"));
+    }
+
+    #[tokio::test]
+    async fn stalled_tcp_writer_is_closed_after_stream_deadline_and_grace() {
+        use crate::newtransport::{Connection, DeadlineListener, connection_info};
+        use axum::{extract::ConnectInfo, routing::get};
+        use tokio::{
+            io::{AsyncReadExt, AsyncWriteExt},
+            net::TcpSocket,
+        };
+        let listener = TcpSocket::new_v4().unwrap();
+        listener.set_send_buffer_size(4096).unwrap();
+        listener.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let listener = listener.listen(16).unwrap();
+        let address = listener.local_addr().unwrap();
+        let (connection_seen, connection_received) = tokio::sync::oneshot::channel();
+        let connection_seen = Arc::new(std::sync::Mutex::new(Some(connection_seen)));
+        let (released, release_seen) = tokio::sync::oneshot::channel();
+        let released = Arc::new(std::sync::Mutex::new(Some(released)));
+        let route = get(move |ConnectInfo(connection): ConnectInfo<Connection>| {
+            let connection_seen = connection_seen.clone();
+            let released = released.clone();
+            async move {
+                let end = tokio::time::Instant::now() + Duration::from_millis(150);
+                connection_seen
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .unwrap()
+                    .send(connection.clone())
+                    .ok();
+                let events = (0..100).map(|id| json!({"id":id.to_string(),"type":"request.created","padding":"x".repeat(64 * 1024)})).collect::<Vec<_>>();
+                let released = released.lock().unwrap().take().unwrap();
+                let body = event_body(
+                    json!({"events":events}),
+                    None,
+                    end,
+                    ScriptedFeed::default(),
+                    async move {
+                        let _ = released.send(());
+                    },
+                    Some(connection.stream_deadline(end)),
+                );
+                (
+                    [
+                        ("Content-Type", "text/event-stream"),
+                        ("Cache-Control", "no-cache, no-store"),
+                    ],
+                    body,
+                )
+                    .into_response()
+            }
+        });
+        let router = Router::new()
+            .route("/stream", route)
+            .layer(middleware::from_fn(connection_info));
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                DeadlineListener(listener),
+                router.into_make_service_with_connect_info::<Connection>(),
+            )
+            .with_graceful_shutdown(async {
+                let _ = stopped.await;
+            })
+            .await
+            .unwrap();
+        });
+        let socket = TcpSocket::new_v4().unwrap();
+        socket.set_recv_buffer_size(4096).unwrap();
+        let mut client = socket.connect(address).await.unwrap();
+        client
+            .write_all(b"GET /stream HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .unwrap();
+        let connection = connection_received.await.unwrap();
+        let mut closed = connection.socket_closed();
+        // No client reads until the actual server-side TCP IO has been dropped.
+        tokio::time::timeout(Duration::from_millis(700), release_seen)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            connection.write_blocked(),
+            "test must reach a real kernel write stall"
+        );
+        tokio::time::timeout(Duration::from_millis(1600), async {
+            while !*closed.borrow_and_update() {
+                closed.changed().await.unwrap();
+            }
+        })
+        .await
+        .expect("stalled TCP connection outlived its deadline plus grace");
+        let mut wire = Vec::new();
+        tokio::time::timeout(Duration::from_secs(1), client.read_to_end(&mut wire))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(wire.starts_with(b"HTTP/1.1 200"));
+        assert!(
+            wire.len() < 6 * 1024 * 1024,
+            "the stream was interrupted before the pending frames drained"
+        );
+        let _ = stop.send(());
+        tokio::time::timeout(Duration::from_secs(1), server)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn flushed_stream_clears_watchdog_for_next_keepalive_request() {
+        use crate::newtransport::{Connection, DeadlineListener, connection_info};
+        use axum::{extract::ConnectInfo, routing::get};
+        let first = get(
+            |ConnectInfo(connection): ConnectInfo<Connection>| async move {
+                let end = tokio::time::Instant::now() + Duration::from_millis(30);
+                let body = event_body(
+                    json!({"events":[]}),
+                    None,
+                    end,
+                    ScriptedFeed::default(),
+                    async {},
+                    Some(connection.stream_deadline(end)),
+                );
+                (
+                    [("peer-port", connection.peer_addr.port().to_string())],
+                    body,
+                )
+                    .into_response()
+            },
+        );
+        let next = get(
+            |ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>| async move {
+                tokio::time::sleep(Duration::from_millis(1200)).await;
+                ([("peer-port", peer.port().to_string())], "reused").into_response()
+            },
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let router = Router::new()
+            .route("/stream", first)
+            .route("/next", next)
+            .layer(middleware::from_fn(connection_info));
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                DeadlineListener(listener),
+                router.into_make_service_with_connect_info::<Connection>(),
+            )
+            .with_graceful_shutdown(async {
+                let _ = stopped.await;
+            })
+            .await
+            .unwrap();
+        });
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(3))
+            .build()
+            .unwrap();
+        let first = client
+            .get(format!("http://{address}/stream"))
+            .send()
+            .await
+            .unwrap();
+        let port = first.headers()["peer-port"].clone();
+        assert!(first.text().await.unwrap().contains("heartbeat"));
+        let next = client
+            .get(format!("http://{address}/next"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            next.headers()["peer-port"],
+            port,
+            "the original TCP connection must be reused"
+        );
+        assert_eq!(next.text().await.unwrap(), "reused");
+        drop(client);
+        let _ = stop.send(());
+        tokio::time::timeout(Duration::from_secs(1), server)
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     #[test]

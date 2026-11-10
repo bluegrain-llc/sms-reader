@@ -235,24 +235,42 @@ impl RecoveryGate {
         gate
     }
     async fn observe_control(gate: Weak<Self>, store: Store, google: Arc<Google>) -> Result<()> {
-        tokio::time::timeout(Duration::from_secs(10), google.access())
+        let mut backoff = Duration::from_millis(100);
+        let watch = loop {
+            if gate
+                .upgrade()
+                .is_none_or(|gate| gate.closed.load(Ordering::SeqCst))
+            {
+                return Ok(());
+            }
+            let setup = tokio::time::timeout(Duration::from_secs(30), async {
+                tokio::time::timeout(Duration::from_secs(10), google.access())
+                    .await
+                    .map_err(|_| Error::Provider("timeout"))??;
+                // Ignore preflight data: only CURRENT from the subsequent watch opens serving.
+                store.get("recoveryControl", "state").await?;
+                store.watch_document("recoveryControl", "state").await
+            })
             .await
-            .map_err(|_| Error::Provider("timeout"))??;
-        if gate
-            .upgrade()
-            .is_none_or(|gate| gate.closed.load(Ordering::SeqCst))
-        {
-            return Ok(());
-        }
-        // Ignore this preflight value: only a current watch snapshot opens serving.
-        store.get("recoveryControl", "state").await?;
-        if gate
-            .upgrade()
-            .is_none_or(|gate| gate.closed.load(Ordering::SeqCst))
-        {
-            return Ok(());
-        }
-        let mut watch = store.watch_document("recoveryControl", "state").await?;
+            .unwrap_or(Err(Error::Provider("timeout")));
+            match setup {
+                Ok(watch) => break watch,
+                Err(_) => {
+                    if let Some(gate) = gate.upgrade() {
+                        gate.blocked.store(true, Ordering::SeqCst);
+                    }
+                    eprintln!("recovery_gate_unavailable retry=true");
+                    tokio::time::sleep(backoff).await;
+                    backoff = backoff.saturating_mul(2).min(Duration::from_secs(30));
+                }
+            }
+        };
+        Self::observe_watch(gate, watch).await
+    }
+    async fn observe_watch(
+        gate: Weak<Self>,
+        mut watch: crate::event_streams::WatchHandle,
+    ) -> Result<()> {
         loop {
             let snapshot = watch.updates.borrow().clone();
             let Some(active_gate) = gate.upgrade() else {
@@ -266,15 +284,18 @@ impl RecoveryGate {
                     .first()
                     .is_some_and(|doc| doc["blocked"] == true),
             );
-            if snapshot.failed || active_gate.closed.load(Ordering::SeqCst) {
+            if active_gate.closed.load(Ordering::SeqCst) {
                 return Ok(());
+            }
+            if snapshot.failed {
+                return Err(Error::Api(503, "recovery_watch_unavailable"));
             }
             drop(active_gate);
             if watch.updates.changed().await.is_err() {
                 if let Some(gate) = gate.upgrade() {
                     gate.blocked.store(true, Ordering::SeqCst);
                 }
-                return Ok(());
+                return Err(Error::Api(503, "recovery_watch_unavailable"));
             }
         }
     }
@@ -318,6 +339,144 @@ impl Drop for RecoveryGate {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn recovery_gate_runs_real_watch_reconnects_and_only_reopens_at_current() {
+        use crate::event_streams::{ListenStream, watch_with_connector};
+        use firestore::gcloud_sdk::{
+            google::firestore::v1::{ListenResponse, TargetChange},
+            tonic::Status,
+        };
+        use firestore::{FirestoreListenEvent, FirestoreListenerTargetChangeType};
+        let (attempts, mut connections) = tokio::sync::mpsc::unbounded_channel();
+        let watch = watch_with_connector(
+            move || {
+                let attempts = attempts.clone();
+                Box::pin(async move {
+                    let (writer, reader) = tokio::sync::mpsc::unbounded_channel();
+                    attempts.send(writer).unwrap();
+                    Ok(
+                        Box::pin(tokio_stream::wrappers::UnboundedReceiverStream::new(reader))
+                            as ListenStream,
+                    )
+                })
+            },
+            1,
+            Duration::from_millis(1),
+        );
+        let gate = Arc::new(RecoveryGate::waiting());
+        let weak = Arc::downgrade(&gate);
+        let observer = tokio::spawn(async move { RecoveryGate::observe_watch(weak, watch).await });
+        let current = || {
+            Ok(ListenResponse {
+                response_type: Some(FirestoreListenEvent::TargetChange(TargetChange {
+                    target_change_type: FirestoreListenerTargetChangeType::Current as i32,
+                    ..Default::default()
+                })),
+            })
+        };
+        let first = tokio::time::timeout(Duration::from_secs(1), connections.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(gate.assert_open().is_err());
+        first.send(current()).unwrap();
+        wait_gate(&gate, true).await;
+        first.send(Err(Status::unavailable("transient"))).unwrap();
+        wait_gate(&gate, false).await;
+        let second = tokio::time::timeout(Duration::from_secs(1), connections.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(gate.assert_open().is_err());
+        // NO_CHANGE without CURRENT cannot reopen a fresh transport.
+        second
+            .send(Ok(ListenResponse {
+                response_type: Some(FirestoreListenEvent::TargetChange(TargetChange {
+                    target_change_type: FirestoreListenerTargetChangeType::NoChange as i32,
+                    ..Default::default()
+                })),
+            }))
+            .unwrap();
+        assert!(gate.assert_open().is_err());
+        second.send(current()).unwrap();
+        wait_gate(&gate, true).await;
+        second
+            .send(Err(Status::permission_denied("permanent")))
+            .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), observer)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_err()
+        );
+        assert!(gate.assert_open().is_err());
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), connections.recv())
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+    #[tokio::test]
+    async fn recovery_gate_close_cancels_transport_and_pending_reconnect() {
+        use crate::event_streams::{ListenStream, watch_with_connector};
+        use firestore::gcloud_sdk::tonic::Status;
+        for during_backoff in [false, true] {
+            let (attempts, mut connections) = tokio::sync::mpsc::unbounded_channel();
+            let watch = watch_with_connector(
+                move || {
+                    let attempts = attempts.clone();
+                    Box::pin(async move {
+                        let (writer, reader) = tokio::sync::mpsc::unbounded_channel();
+                        attempts.send(writer).unwrap();
+                        Ok(
+                            Box::pin(tokio_stream::wrappers::UnboundedReceiverStream::new(reader))
+                                as ListenStream,
+                        )
+                    })
+                },
+                1,
+                Duration::from_secs(30),
+            );
+            let gate = Arc::new(RecoveryGate::waiting());
+            let weak = Arc::downgrade(&gate);
+            let task = tokio::spawn(async move {
+                let _ = RecoveryGate::observe_watch(weak, watch).await;
+            });
+            *gate.task.lock().unwrap() = Some(task);
+            let writer = tokio::time::timeout(Duration::from_secs(1), connections.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            if during_backoff {
+                writer.send(Err(Status::unavailable("transient"))).unwrap();
+                tokio::time::timeout(Duration::from_secs(1), writer.closed())
+                    .await
+                    .unwrap();
+            }
+            gate.close();
+            tokio::time::timeout(Duration::from_secs(1), writer.closed())
+                .await
+                .unwrap();
+            assert!(gate.assert_open().is_err());
+            assert!(
+                tokio::time::timeout(Duration::from_secs(1), connections.recv())
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        }
+    }
+    async fn wait_gate(gate: &RecoveryGate, open: bool) {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while gate.assert_open().is_ok() != open {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+    }
     #[test]
     fn ledger_rejects_cross_project_extra_fields_and_unsafe_bucket_policies() {
         let marker = json!({"version":1,"project":"demo-sms-relay","createdAt":0});

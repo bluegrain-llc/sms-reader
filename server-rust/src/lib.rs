@@ -14,6 +14,7 @@ pub mod maintenance_pages;
 pub mod mcp;
 mod mcp_input;
 pub mod model;
+pub mod newtransport;
 pub mod relay;
 pub mod security;
 pub mod store;
