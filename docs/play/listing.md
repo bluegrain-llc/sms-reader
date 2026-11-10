@@ -16,7 +16,7 @@ Use Inbox to review information requests, make decisions, and complete forms or 
 
 For an upcoming SMS verification code, open the request before the message is sent. Android asks permission to share one eligible new message with the app. After you approve, a single extracted code is sent to the requesting caller. If there are multiple candidates, choose which one to send. You can also type a code and tap Send. The app does not read your SMS inbox or send verification messages.
 
-Pair each caller explicitly. Interactive requests need separate permission. Pause a phone, revoke a caller, or delete your account through Administration. Multiple registered phones can receive a request; only the first valid response completes it.
+Pair each caller explicitly. Interactive requests need separate permission. Pause a phone, revoke a caller, or request permanent account deletion through Administration. Deletion blocks access when accepted and cleanup continues in the background. The public account-deletion page offers the same request flow without the installed app. Multiple registered phones can receive a request; only the first valid response completes it.
 
 Google sign-in, Google Play services and notification permission are required for phone registration. Carrier delivery, sender eligibility and Android's listening window affect SMS reception. Messages arriving before the listener starts cannot be recovered. Form drafts remain in memory and are lost if Android ends the process.
 
@@ -38,7 +38,7 @@ The owner must rehearse an access path that works throughout review and enter it
 2. Provide an on-demand, non-expiring access procedure for pairing a dedicated synthetic caller. Pairing links themselves expire after ten minutes and are unsuitable as fixed review credentials. Explain caller names and optional interactive permission.
 3. Demonstrate harmless form and wizard requests with explicit submit/decline. Opening a notification is not approval. Include cancellation, revocation and deletion paths.
 4. For SMS, use a controlled test sender/number and fresh listening session. Do not ask reviewers to share their personal verification codes or complete a real third-party login. Manual entry can demonstrate upload, but does not prove physical SMS consent acceptance.
-5. Verify that Administration → Devices account deletion and the public web deletion path work without operator intervention. Recent Google reauthentication must return to the pending deletion action.
+5. Verify that Administration → Devices account deletion and the public web deletion path work without operator intervention. Recent Google reauthentication must return to the pending deletion action for the same account. After HTTP 202, verify access is blocked immediately and receipt status eventually becomes completed. Receipts stay in browser memory and authorize status only; closing the page does not cancel cleanup. Check actual record/identity cleanup separately from the accepted-job message.
 
 Record the rehearsal result and privately stored reviewer instructions in the candidate evidence. Missing workable reviewer access blocks submission. A textual instruction list is not evidence that review access was supplied or accepted.
 

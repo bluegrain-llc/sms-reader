@@ -27,7 +27,7 @@ class GateTest(unittest.TestCase):
         self.record = json.loads((Path(__file__).parents[1] / "docs/play/candidate.example.json").read_text())
         self.record.update(commit="c" * 40, versionCode=11, policyCheckedAt=NOW.isoformat())
         self.record["operator"] = {"legalName": "Synthetic Test Operator", "privacyEmail": "privacy@fixture.test", "supportEmail": "support@fixture.test"}
-        self.record["urls"] = {key: "https://fixture.test/" + key for key in ("privacy", "deletion", "support")}
+        self.record["urls"] = {"privacy": "https://fixture.test/privacy", "deletion": "https://fixture.test/account/delete", "support": "https://fixture.test/support"}
         self.record["signing"] = {"pilotSha256": PILOT, "uploadSha256": UPLOAD, "playSha256": [PILOT]}
         self.record["play"] = {"accountType": "organization", "newPersonalAccount": False, "developerAccountVerified": True, "productionAccessGranted": True, "noConsoleBlockers": True}
         self.record["cohort"] = {"startedAt": (NOW - timedelta(days=7)).isoformat(), "endedAt": NOW.isoformat(), "noReleaseBlockers": True}
@@ -64,12 +64,15 @@ class GateTest(unittest.TestCase):
     def check(self, offline=False, run=None):
         class Response:
             status = 200
-            url = "https://fixture.test/policy"
+            def __init__(self, url):
+                self.url = url
+            def read(self, _limit):
+                return b'Synthetic Test Operator privacy@fixture.test <input id="confirm"><button id="remove">delete</button> reauthenticateWithPopup'
             def __enter__(self):
                 return self
             def __exit__(self, *_):
                 pass
-        with patch.dict(os.environ, {"BUNDLETOOL_JAR": "synthetic-bundletool.jar"}), patch.object(gate.urllib.request, "urlopen", return_value=Response()):
+        with patch.dict(os.environ, {"BUNDLETOOL_JAR": "synthetic-bundletool.jar"}), patch.object(gate.urllib.request, "urlopen", side_effect=lambda url, timeout: Response(url)):
             return gate.check_record(self.record, self.base, offline, run or self.tools, NOW)
 
     def test_complete_synthetic_record_passes(self):
@@ -146,6 +149,23 @@ class GateTest(unittest.TestCase):
         self.aab_manifest = self.aab_manifest.replace('versionCode="11"', 'versionCode="12"')
         self.assertIn("AAB versionCode mismatch", self.check()["blockers"])
 
+    def test_config_split_can_omit_sdk_but_must_match_package_version_and_signer(self):
+        path = self.base / "split.apk"
+        with zipfile.ZipFile(path, "w") as archive:
+            archive.writestr("fixture.txt", "synthetic config split")
+        self.record["artifacts"]["playSplits"] = [{"path": path.name, "sha256": gate.sha256(path)}]
+        for label in gate.EVIDENCE:
+            report = self.base / (label + ".json")
+            data = json.loads(report.read_text())
+            data["splitSha256"] = [gate.sha256(path)]
+            report.write_text(json.dumps(data))
+            self.record["evidence"][label]["sha256"] = gate.sha256(report)
+        def run(args):
+            if args[0] == "aapt" and args[-1] == str(path):
+                return "package: name='com.bluegrain.smsrelay' versionCode='11' split='config.en'"
+            return self.tools(args)
+        self.assertTrue(self.check(run=run)["ready"])
+
     def test_open_prerequisite_blocks(self):
         self.open_issue = "9"
         self.assertIn("production prerequisite issue #9 remains open", self.check()["blockers"])
@@ -163,6 +183,31 @@ class GateTest(unittest.TestCase):
                 raise FileNotFoundError()
             return self.tools(args)
         self.assertIn("live GitHub prerequisite/CI verification failed", self.check(run=run)["blockers"])
+
+    def test_url_200_with_pilot_or_unconfigured_page_does_not_pass(self):
+        class Response:
+            status = 200
+            def __init__(self, url):
+                self.url = url
+            def read(self, _limit):
+                return b'Public operator contact and final backup disclosures have not yet been published. Web sign-in is not configured yet.'
+            def __enter__(self):
+                return self
+            def __exit__(self, *_):
+                pass
+        with patch.dict(os.environ, {"BUNDLETOOL_JAR": "synthetic-bundletool.jar"}), patch.object(gate.urllib.request, "urlopen", side_effect=lambda url, timeout: Response(url)):
+            blockers = gate.check_record(self.record, self.base, False, self.tools, NOW)["blockers"]
+        self.assertIn("privacy page lacks verified legal operator/contact disclosures", blockers)
+        self.assertIn("web deletion page is not configured for self-service confirmation", blockers)
+
+    def test_deletion_url_must_use_actual_same_origin_route(self):
+        self.record["urls"]["deletion"] = "https://other.test/account/delete"
+        self.assertIn("privacy/deletion URLs must use canonical same-origin account routes", self.check()["blockers"])
+
+    def test_partially_unsigned_aab_rejected(self):
+        def run(args):
+            return "jar verified. This jar contains unsigned entries" if args[0] == "jarsigner" else self.tools(args)
+        self.assertIn("AAB JAR signature missing or invalid", self.check(run=run)["blockers"])
 
 
 class NativeTest(unittest.TestCase):

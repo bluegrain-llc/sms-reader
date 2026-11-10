@@ -3,6 +3,7 @@
 
 import argparse
 import hashlib
+import html
 import json
 import os
 from pathlib import Path
@@ -26,7 +27,7 @@ EVIDENCE = (
 REQUIRED_CI = {
     "Server unit tests and type check", "Firestore, Auth, REST and MCP integration tests",
     "Container build and HTTP smoke test", "Android unit tests, lint and build",
-    "Android emulator UI integration tests",
+    "Android emulator UI integration tests", "Play release gate unit tests",
 }
 
 
@@ -136,13 +137,28 @@ def check_record(record, base, offline=False, run=command, now=None):
         email = operator.get(field)
         require(isinstance(email, str) and bool(re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email)) and not email.endswith(("@example.com", ".invalid")), "verified " + field + " missing")
     urls = record.get("urls", {})
+    if https_url(urls.get("privacy")) and https_url(urls.get("deletion")):
+        privacy, deletion = (urllib.parse.urlsplit(urls[key]) for key in ("privacy", "deletion"))
+        require(privacy.netloc == deletion.netloc and privacy.path == "/privacy" and deletion.path == "/account/delete",
+                "privacy/deletion URLs must use canonical same-origin account routes")
     for label in ("privacy", "deletion", "support"):
         valid = https_url(urls.get(label))
         require(valid, "public HTTPS " + label + " URL missing")
         if valid and not offline:
             try:
                 with urllib.request.urlopen(urls[label], timeout=10) as response:
-                    require(response.status == 200 and https_url(response.url), label + " URL did not resolve to public HTTPS HTTP 200")
+                    require(response.status == 200 and https_url(response.url) and
+                            (label == "support" or response.url == urls[label]), label + " URL did not resolve to canonical HTTPS HTTP 200")
+                    if label in ("privacy", "deletion"):
+                        content = html.unescape(response.read(256 * 1024).decode("utf-8"))
+                        if label == "privacy":
+                            require(all(isinstance(operator.get(field), str) and operator[field] in content for field in ("legalName", "privacyEmail")) and
+                                    "have not yet been published" not in content,
+                                    "privacy page lacks verified legal operator/contact disclosures")
+                        else:
+                            require('id="remove"' in content and 'id="confirm"' in content and
+                                    "reauthenticateWithPopup" in content and "Web sign-in is not configured yet" not in content,
+                                    "web deletion page is not configured for self-service confirmation")
             except (OSError, ValueError):
                 blockers.append(label + " URL verification failed")
 
@@ -183,7 +199,8 @@ def check_record(record, base, offline=False, run=command, now=None):
             blockers.extend(kind + ": " + error for error in native_alignment(path, kind != "aab"))
             if kind == "aab":
                 verified = run(["jarsigner", "-verify", str(path)])
-                require("jar verified." in verified, "AAB JAR signature missing or invalid")
+                require("jar verified." in verified and "jar is unsigned" not in verified.lower() and
+                        "unsigned entries" not in verified.lower(), "AAB JAR signature missing or invalid")
                 cert = run(["keytool", "-printcert", "-jarfile", str(path)])
                 digests = [fingerprint(value) for value in re.findall(r"SHA256:\s*([A-Fa-f0-9:]+)", cert)]
                 require(upload is not None and upload in digests, "AAB upload signer mismatch")
@@ -205,8 +222,9 @@ def check_record(record, base, offline=False, run=command, now=None):
                 manifest = run(["aapt", "dump", "badging", str(path)])
                 require("package: name='com.bluegrain.smsrelay'" in manifest, "APK package mismatch")
                 require("versionCode='" + str(record.get("versionCode")) + "'" in manifest, "APK versionCode mismatch")
-                target = re.search(r"targetSdkVersion:'(\d+)'", manifest)
-                require(target is not None and type(minimum) is int and int(target[1]) >= minimum, "APK target API below requirement")
+                if kind == "playApk":
+                    target = re.search(r"targetSdkVersion:'(\d+)'", manifest)
+                    require(target is not None and type(minimum) is int and int(target[1]) >= minimum, "APK target API below requirement")
                 require("application-debuggable" not in manifest, "APK is debuggable")
                 require(not re.search(r"android.permission.(READ_SMS|RECEIVE_SMS|READ_CONTACTS|WRITE_CONTACTS|BIND_ACCESSIBILITY_SERVICE|BIND_NOTIFICATION_LISTENER_SERVICE)", manifest), "APK requests forbidden broad permissions")
         except (OSError, subprocess.SubprocessError, ValueError, zipfile.BadZipFile, struct.error, ET.ParseError):
