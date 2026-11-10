@@ -66,7 +66,7 @@ class RelayViewModel @JvmOverloads constructor(application: Application, private
         viewModelScope.launch {
             var ticks = 0
             while (true) {
-                mutable.update { it.copy(now = System.currentTimeMillis()) }
+                mutable.update { it.copy(now = listenerNow(System.currentTimeMillis())) }
                 // A bound SMS has its own poll; list refresh must not disable its code input.
                 if (++ticks % 15 == 0 && state.value.foreground && app.configured && !state.value.busy &&
                     !state.value.opening && boundId == null) refresh(silent = true)
@@ -237,7 +237,7 @@ class RelayViewModel @JvmOverloads constructor(application: Application, private
         if (reason != null) { repo.event(r.id, "failed", reason); sync(r.id); return }
         boundId = r.id; blocked = false; repo.inFlight = r.id; gate.bind(r.id)
         val started = System.currentTimeMillis()
-        val window = SmsListenerWindow(SystemClock.elapsedRealtime(), minOf(r.expiresAt, r.listeningDeadline ?: Long.MAX_VALUE) - started, SystemClock::elapsedRealtime)
+        val window = SmsListenerWindow(SystemClock.elapsedRealtime(), minOf(r.expiresAt, r.listeningDeadline ?: Long.MAX_VALUE) - started, started, SystemClock::elapsedRealtime)
         listenerWindow = window
         receiver = object : BroadcastReceiver() {
             override fun onReceive(context: Context, intent: Intent) {
@@ -311,6 +311,7 @@ class RelayViewModel @JvmOverloads constructor(application: Application, private
             }
         }
     }
+    private fun listenerNow(wallNow: Long) = listenerWindow?.now(wallNow) ?: wallNow
     private fun listeningWindowEnded(now: Long): Boolean = listenerWindow?.expired()
         ?: state.value.request?.let { now >= (it.listeningDeadline ?: it.expiresAt) } ?: false
     private suspend fun sync(id: String) {
@@ -376,7 +377,7 @@ class RelayViewModel @JvmOverloads constructor(application: Application, private
     private fun clearSensitive() {
         listenerWindow?.close(); listenerWindow = null
         gate.clear(); consent = null; consentRequestId = null; consentLaunched = false
-        mutable.update { it.copy(candidates = emptyList(), codeDraft = "", autofillDeclined = false, consentAvailable = false) }
+        mutable.update { it.copy(candidates = emptyList(), codeDraft = "", autofillDeclined = false, consentAvailable = false, now = System.currentTimeMillis()) }
     }
     private fun unregisterReceiver() { receiver?.let { app.unregisterReceiver(it) }; receiver = null }
     private fun clearLocal() { poll?.cancel(); blocked = true; clearSensitive(); unregisterReceiver(); boundId = null; mutable.update { it.copy(request = null, discoveredRequest = null) } }

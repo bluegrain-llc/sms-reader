@@ -72,12 +72,14 @@ class SmsListenerWindowTest {
         assertTrue(window.accepts(true) { true })
     }
 
-    @Test fun epochProjectionAdvancesOnlyByElapsedTime() {
+    @Test fun epochProjectionIsLocalToEachWindowAndFreshStartsUseFreshEpoch() {
         var elapsed = 10_000L
-        val clock = MonotonicEpochClock(1_000_000L, elapsed) { elapsed }
-        assertEquals(1_000_000L, clock.now())
+        val old = SmsListenerWindow(elapsed, epoch = 1_000_000L) { elapsed }
         elapsed += 30_000
-        assertEquals(1_030_000L, clock.now())
+        assertEquals(1_030_000L, old.now(1_630_000L))
+        val fresh = SmsListenerWindow(elapsed, epoch = 1_630_000L) { elapsed }
+        assertEquals(1_630_000L, fresh.now(1_030_000L))
+        elapsed++
+        assertEquals(1_630_001L, fresh.now(1_030_000L))
     }
-
 }

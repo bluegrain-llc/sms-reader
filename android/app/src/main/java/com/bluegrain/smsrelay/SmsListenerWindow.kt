@@ -3,10 +3,11 @@ package com.bluegrain.smsrelay
 import kotlinx.coroutines.CompletableDeferred
 
 /** One local platform listening window; broadcasts carry no application request ID. */
-internal class SmsListenerWindow(private val started: Long, maximumAge: Long = 5 * 60_000L, private val elapsed: () -> Long) {
+internal class SmsListenerWindow(private val started: Long, maximumAge: Long = 5 * 60_000L, private val epoch: Long? = null, private val elapsed: () -> Long) {
     val ready = CompletableDeferred<Boolean>()
     private var closed = false
     private var lifetime = maximumAge.coerceIn(0, 5 * 60_000L)
+    fun now(fallback: Long) = epoch?.let { it + (elapsed() - started) } ?: fallback
     fun expired() = elapsed() - started >= lifetime
     fun shortenTo(maximumAge: Long) { lifetime = minOf(lifetime, maximumAge.coerceAtLeast(0)) }
 
@@ -17,8 +18,4 @@ internal class SmsListenerWindow(private val started: Long, maximumAge: Long = 5
     }
 
     fun close() { closed = true; ready.complete(false) }
-}
-
-internal class MonotonicEpochClock(private val epoch: Long, private val started: Long, private val elapsed: () -> Long) {
-    fun now() = epoch + (elapsed() - started)
 }

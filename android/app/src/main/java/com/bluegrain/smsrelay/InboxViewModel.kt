@@ -27,8 +27,7 @@ data class InboxState(val requests: List<RequestForm> = emptyList(), val form: R
 class InboxViewModel(application: Application) : AndroidViewModel(application) {
     private val app = application as RelayApplication
     private val repo get() = app.repository
-    private val clock = MonotonicEpochClock(System.currentTimeMillis(), SystemClock.elapsedRealtime(), SystemClock::elapsedRealtime)
-    private val mutable = MutableStateFlow(InboxState(now = clock.now()))
+    private val mutable = MutableStateFlow(InboxState())
     val state = mutable.asStateFlow()
     private var receiver: BroadcastReceiver? = null
     private var helperRequest: String? = null
@@ -51,8 +50,9 @@ class InboxViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
     }
+    private fun listenerNow(wallNow: Long) = listenerWindow?.now(wallNow) ?: wallNow
     private fun expireDraftsAndHelper() {
-        mutable.update { it.copy(now = clock.now()) }
+        mutable.update { it.copy(now = listenerNow(System.currentTimeMillis())) }
         drafts.entries.removeAll { it.value.expiresAt <= state.value.now }
         state.value.let { s ->
             s.form?.takeIf { s.now >= it.expiresAt && (s.values.isNotEmpty() || s.stepId != null || s.reviewing ||
@@ -66,7 +66,7 @@ class InboxViewModel(application: Application) : AndroidViewModel(application) {
         if (!app.configured) return
         if (sessionOwner != repo.ownerId) {
             stopHelper(null); submitBody = null; drafts.clear(); sessionOwner = repo.ownerId
-            mutable.update { InboxState(foreground = it.foreground, openingForms = it.openingForms, now = clock.now()) }
+            mutable.update { InboxState(foreground = it.foreground, openingForms = it.openingForms, now = listenerNow(System.currentTimeMillis())) }
         }
         refresh()
     }
@@ -194,8 +194,8 @@ class InboxViewModel(application: Application) : AndroidViewModel(application) {
         if (repo.listenerUntil > System.currentTimeMillis()) throw ApiFailure("sms_listener_busy", 409)
         stopHelper(null)
         helperRequest = form.id; helperField = field.id
-        val started = clock.now()
-        val window = SmsListenerWindow(SystemClock.elapsedRealtime(), form.expiresAt - started, SystemClock::elapsedRealtime)
+        val started = System.currentTimeMillis()
+        val window = SmsListenerWindow(SystemClock.elapsedRealtime(), form.expiresAt - started, started, SystemClock::elapsedRealtime)
         listenerWindow = window
         receiver = object : BroadcastReceiver() {
             override fun onReceive(context: Context, intent: Intent) {
@@ -246,7 +246,7 @@ class InboxViewModel(application: Application) : AndroidViewModel(application) {
     private fun stopHelper(message: String?) {
         listenerWindow?.close(); listenerWindow = null
         receiver?.let { app.unregisterReceiver(it) }; receiver = null; helperRequest = null
-        mutable.update { it.copy(helper = message, helperUntil = 0, consent = null) }
+        mutable.update { it.copy(helper = message, helperUntil = 0, consent = null, now = System.currentTimeMillis()) }
     }
     override fun onCleared() { stopHelper(null); super.onCleared() }
 }
