@@ -8,8 +8,10 @@
 Build the configured signed release candidate using `scripts/build-pilot.sh`. The
 record tool verifies APK signing and rejects debuggable or non-relay APKs. It
 collects physical device model, Android/API and Google Play-services version using
-fixed ADB metadata commands. Device serials are replaced with SHA-256 hashes. It
-never reads SMS, app files, screen contents, account identities or credentials.
+fixed ADB metadata commands. Device-reported hardware serials are replaced with
+SHA-256 hashes, so USB and network aliases of one phone share an identity. Phones
+without a usable hardware serial are refused. The tool never reads SMS, app files,
+screen contents, account identities or credentials.
 The artifact hash identifies the APK selected by the operator; the tool does not
 prove that this exact APK is installed. Install that candidate on both phones
 before testing. Bind the record to the explicitly selected project, region and

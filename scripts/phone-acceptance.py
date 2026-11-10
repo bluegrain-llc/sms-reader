@@ -47,11 +47,16 @@ def device_metadata(adb, serial):
         return run([adb, '-s', serial, 'shell', 'getprop', name]).strip()
     if serial.startswith('emulator-') or prop('ro.kernel.qemu') == '1':
         raise ValueError('Physical acceptance refuses emulator devices')
+    identity = prop('ro.serialno')
+    if not identity or identity.lower() == 'unknown':
+        identity = prop('ro.boot.serialno')
+    if not identity or identity.lower() in ('unknown', 'null', 'none', '0') or len(identity) > 120 or any(char.isspace() for char in identity):
+        raise ValueError('Stable physical device identity unavailable')
     play = run([adb, '-s', serial, 'shell', 'dumpsys', 'package', 'com.google.android.gms'])
     version = re.search(r'^\s*versionName=([^\s]+)', play, re.MULTILINE)
     if not version:
         raise ValueError('Google Play services version unavailable')
-    return {'deviceHash': hashlib.sha256(serial.encode()).hexdigest(),
+    return {'deviceHash': hashlib.sha256(identity.encode()).hexdigest(),
             'model': prop('ro.product.model'), 'android': prop('ro.build.version.release'),
             'api': prop('ro.build.version.sdk'), 'playServices': version.group(1)}
 
@@ -74,41 +79,56 @@ def initial_record(apk, commit, signer, aapt, devices, project, region, revision
 
 
 def validate(record):
-    if set(record) != {'schemaVersion', 'createdAt', 'commit', 'apkSha256', 'signerSha256', 'devices', 'cases', 'project', 'region', 'backendRevision'}:
+    def matches(pattern, value):
+        return isinstance(value, str) and re.fullmatch(pattern, value)
+
+    def timestamp(value):
+        if not isinstance(value, str):
+            raise ValueError('Invalid observation timestamp')
+        datetime.fromisoformat(value)
+
+    if not isinstance(record, dict) or set(record) != {'schemaVersion', 'createdAt', 'commit', 'apkSha256', 'signerSha256', 'devices', 'cases', 'project', 'region', 'backendRevision'}:
         raise ValueError('Unexpected record fields')
-    if record['schemaVersion'] != 1 or not re.fullmatch(r'[0-9a-f]{40}', record['commit']):
+    if type(record['schemaVersion']) is not int or record['schemaVersion'] != 1 or not matches(r'[0-9a-f]{40}', record['commit']):
         raise ValueError('Invalid record identity')
-    if not re.fullmatch(r'[0-9a-f]{64}', record['apkSha256']):
+    if not matches(r'[0-9a-f]{64}', record['apkSha256']):
         raise ValueError('Invalid artifact hash')
-    if not record['signerSha256'] or any(not re.fullmatch(r'[0-9a-f]{64}', value) for value in record['signerSha256']):
+    if not isinstance(record['signerSha256'], list) or not record['signerSha256'] or any(not matches(r'[0-9a-f]{64}', value) for value in record['signerSha256']):
         raise ValueError('Invalid signing certificate')
-    if not re.fullmatch(r'[a-z][a-z0-9-]{4,28}[a-z0-9]', record['project']):
+    if not matches(r'[a-z][a-z0-9-]{4,28}[a-z0-9]', record['project']):
         raise ValueError('Invalid project ID')
-    if not re.fullmatch(r'[a-z]+-[a-z]+[0-9]', record['region']):
+    if not matches(r'[a-z]+-[a-z]+[0-9]', record['region']):
         raise ValueError('Invalid region')
-    if not re.fullmatch(r'[a-z][a-z0-9-]{0,61}[a-z0-9]', record['backendRevision']):
+    if not matches(r'[a-z][a-z0-9-]{0,61}[a-z0-9]', record['backendRevision']):
         raise ValueError('Invalid backend revision')
-    datetime.fromisoformat(record['createdAt'])
+    timestamp(record['createdAt'])
+    if not isinstance(record['devices'], list):
+        raise ValueError('Invalid device list')
     identities = set()
     for device in record['devices']:
-        if set(device) != {'deviceHash', 'model', 'android', 'api', 'playServices'}:
+        if not isinstance(device, dict) or set(device) != {'deviceHash', 'model', 'android', 'api', 'playServices'}:
             raise ValueError('Unexpected device fields')
-        if not re.fullmatch(r'[0-9a-f]{64}', device['deviceHash']) or device['deviceHash'] in identities:
+        if not matches(r'[0-9a-f]{64}', device['deviceHash']) or device['deviceHash'] in identities:
             raise ValueError('Invalid or duplicate physical device')
         identities.add(device['deviceHash'])
         if not all(isinstance(device[key], str) and 0 < len(device[key]) <= 120 for key in device):
             raise ValueError('Invalid device metadata')
         if not device['api'].isdigit() or int(device['api']) < 26:
             raise ValueError('Unsupported device API')
-    if set(record['cases']) != set(CASES):
+    if not isinstance(record['cases'], dict) or set(record['cases']) != set(CASES):
         raise ValueError('Acceptance matrix does not match this tool version')
     for case, result in record['cases'].items():
-        if set(result) not in ({'status', 'reason'}, {'status', 'reason', 'observedAt'}):
+        if not isinstance(result, dict) or set(result) not in ({'status', 'reason'}, {'status', 'reason', 'observedAt'}):
             raise ValueError('Unexpected observation fields')
         if result['status'] not in ('pending', 'pass', 'fail', 'blocked') or result['reason'] not in REASONS:
             raise ValueError('Invalid observation')
-        if result['status'] != 'pending':
-            datetime.fromisoformat(result['observedAt'])
+        if result['status'] == 'pending':
+            if set(result) != {'status', 'reason'} or result['reason'] != 'not_run':
+                raise ValueError('Pending observation must be unobserved')
+        else:
+            timestamp(result['observedAt'])
+            if result['reason'] == 'not_run' or (result['status'] != 'pass' and result['reason'] == 'observed_expected_behavior'):
+                raise ValueError('Observation reason does not match outcome')
         if result['status'] == 'pass' and (len(identities) < CASES[case] or result['reason'] != 'observed_expected_behavior'):
             raise ValueError('Passing case requires physical device metadata and expected behavior')
 

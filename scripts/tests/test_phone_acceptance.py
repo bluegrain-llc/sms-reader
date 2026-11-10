@@ -1,6 +1,7 @@
 """Acceptance records must fail closed without physical release observations."""
 import copy
 import importlib.util
+import io
 import json
 from pathlib import Path
 import tempfile
@@ -58,6 +59,90 @@ class PhoneAcceptanceTest(unittest.TestCase):
             value[key] = [] if key == 'signerSha256' else 'invalid'
             with self.assertRaises(ValueError):
                 acceptance.validate(value)
+
+    def test_loaded_nested_payloads_are_rejected_without_rewriting_record(self):
+        for field in ('signerSha256', 'observedAt'):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as directory:
+                value = self.pending(2)
+                if field == 'signerSha256':
+                    value['cases'] = {case: self.passed() for case in acceptance.CASES}
+                    value[field] = {'c' * 64: {'sms': 'private-payload-fixture'}}
+                else:
+                    value['cases']['consent_approval'][field] = {'sms': 'private-payload-fixture'}
+                record = Path(directory) / 'record.json'
+                original = json.dumps(value)
+                record.write_text(original)
+                for command in (['summary', '--require-pass'],
+                                ['record', '--case', 'consent_approval', '--outcome', 'pass',
+                                 '--reason', 'observed_expected_behavior']):
+                    errors = io.StringIO()
+                    with patch('sys.argv', ['phone-acceptance', *command, '--file', str(record)]), patch('sys.stderr', errors):
+                        with self.assertRaises(SystemExit) as caught:
+                            acceptance.main()
+                    self.assertEqual(caught.exception.code, 2)
+                    self.assertNotIn('private-payload-fixture', errors.getvalue())
+                    self.assertEqual(record.read_text(), original)
+
+    def test_record_requires_expected_container_types(self):
+        replacements = {'signerSha256': ['c' * 64, {'sms': 'fixture'}],
+                        'devices': {}, 'cases': list(acceptance.CASES), 'createdAt': {}}
+        for key, replacement in replacements.items():
+            with self.subTest(key=key):
+                value = self.pending(2)
+                value[key] = replacement
+                with self.assertRaises(ValueError):
+                    acceptance.validate(value)
+        for replacement in (None, [], 'record'):
+            with self.assertRaises(ValueError):
+                acceptance.validate(replacement)
+
+    def test_observation_reason_and_timestamp_match_status(self):
+        for status, reason in (('pending', 'unexpected_behavior'), ('fail', 'not_run'),
+                               ('blocked', 'observed_expected_behavior')):
+            value = self.pending(2)
+            value['cases']['consent_approval'] = {'status': status, 'reason': reason,
+                                                 'observedAt': acceptance.now()}
+            with self.assertRaises(ValueError):
+                acceptance.validate(value)
+        value = self.pending(2)
+        value['cases']['consent_approval'] = self.passed()
+        value['cases']['consent_approval']['observedAt'] = {'sms': 'fixture'}
+        with self.assertRaises(ValueError):
+            acceptance.validate(value)
+
+    def test_adb_aliases_share_device_reported_identity(self):
+        def metadata(args):
+            if args[-1] == 'com.google.android.gms':
+                return 'versionName=25.0'
+            return {'ro.kernel.qemu': '0', 'ro.serialno': 'hardware-one',
+                    'ro.product.model': 'Test phone', 'ro.build.version.release': '15',
+                    'ro.build.version.sdk': '35'}[args[-1]]
+        with patch.object(acceptance, 'run', side_effect=metadata):
+            devices = [acceptance.device_metadata('adb', selector)
+                       for selector in ('usb-serial', '192.0.2.1:5555', 'model:Test_phone')]
+        self.assertEqual(len({device['deviceHash'] for device in devices}), 1)
+        value = self.pending()
+        value['devices'] = devices[:2]
+        value['cases']['two_phone_first_wins'] = self.passed()
+        with self.assertRaises(ValueError):
+            acceptance.validate(value)
+        with patch.object(acceptance, 'run', side_effect=lambda args: 'hardware-two' if args[-1] == 'ro.serialno' else metadata(args)):
+            value['devices'][1] = acceptance.device_metadata('adb', 'second-phone')
+        acceptance.validate(value)
+
+    def test_missing_device_identity_fails_closed_and_boot_serial_is_fallback(self):
+        def metadata(args):
+            if args[-1] == 'com.google.android.gms':
+                return 'versionName=25.0'
+            return {'ro.kernel.qemu': '0', 'ro.serialno': 'unknown',
+                    'ro.boot.serialno': 'hardware-one', 'ro.product.model': 'Test phone',
+                    'ro.build.version.release': '15', 'ro.build.version.sdk': '35'}[args[-1]]
+        with patch.object(acceptance, 'run', side_effect=metadata):
+            self.assertEqual(len(acceptance.device_metadata('adb', 'usb-serial')['deviceHash']), 64)
+        for unavailable in ('', 'unknown', 'null', 'none', '0', 'not an identity'):
+            with self.subTest(identity=unavailable), patch.object(acceptance, 'run', return_value=unavailable):
+                with self.assertRaises(ValueError):
+                    acceptance.device_metadata('adb', 'usb-serial')
 
     def test_record_binds_explicit_deployment_target(self):
         for key in ('project', 'region', 'backendRevision'):
