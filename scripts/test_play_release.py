@@ -188,10 +188,21 @@ class GateTest(unittest.TestCase):
                 if not accepted:
                     self.assertIn("Play APK signer mismatch", result["blockers"])
 
-    def test_wrong_upload_key_or_pilot_discontinuity_blocks(self):
-        self.record["signing"]["uploadSha256"] = PILOT
-        self.record["signing"]["playSha256"] = ["D" * 64]
-        self.assertFalse(self.check()["ready"])
+    def test_upload_key_must_differ_from_pilot_and_play_signers(self):
+        other_app_signer = "D" * 64
+        self.record["signing"]["playSha256"] = [PILOT, other_app_signer]
+        for upload in (PILOT, other_app_signer):
+            with self.subTest(upload=upload):
+                self.record["signing"]["uploadSha256"] = upload
+                def matching_artifacts(args):
+                    return "SHA256: " + upload if args[0] == "keytool" else self.tools(args)
+                self.assertEqual(self.check(run=matching_artifacts)["blockers"],
+                                 ["upload key must differ from app signing keys"])
+
+    def test_missing_pilot_continuity_blocks_otherwise_matching_artifacts(self):
+        self.record["signing"]["pilotSha256"] = "D" * 64
+        self.assertEqual(self.check()["blockers"],
+                         ["pilot signing identity absent from Play signing inventory"])
 
     def test_wrong_sdk_version_debug_and_sms_permission_block(self):
         self.manifest = "package: name='com.bluegrain.smsrelay' versionCode='12'\ntargetSdkVersion:'35'\napplication-debuggable\nuses-permission: name='android.permission.READ_SMS'"
@@ -306,6 +317,10 @@ class NativeTest(unittest.TestCase):
 
     def test_native_alignment_and_multi_header_walk(self):
         self.assertEqual(self.inspect(self.elf(16384, headers=2)), [])
+        mixed = bytearray(self.elf(16384, headers=2))
+        # Only the second PT_LOAD segment is misaligned.
+        struct.pack_into("<Q", mixed, len(mixed) - 8, 4096)
+        self.assertEqual(self.inspect(mixed), ["native load alignment below or incompatible with 16 KiB"])
         self.assertTrue(self.inspect(self.elf(4096)))
         self.assertTrue(self.inspect(self.elf(16384, virtual=1)))
 
