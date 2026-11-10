@@ -16,9 +16,23 @@ const root = new URL('../', import.meta.url), directory = new URL('server-rust/c
 const save = (name: string, value: unknown) => writeFileSync(new URL(name, directory), JSON.stringify(value, null, 2) + '\n');
 for (const [name, schema] of Object.entries({ form: formSchema, submission: submissionSchema, observation: observationSchema, webhook: webhookSchema, sms: requestSchema })) save(`${name}.schema.json`, z.toJSONSchema(schema));
 // Preserve the SDK's Zod preprocessing and issue order independently of REST.
+const capabilities = InitializeRequestSchema.shape.params.shape.capabilities.shape;
+const objectAssertion = capabilities.experimental.unwrap().valueType;
+const elicitationPreprocess = capabilities.elicitation.unwrap();
 function toolParser(schema: z.ZodType): unknown {
   const d = schema._zod.def as any;
+  if (d.type === 'custom') {
+    if (schema !== objectAssertion) throw Error('Unrecognized custom SDK predicate');
+    return { type: 'assert_object' };
+  }
+  if (d.type === 'pipe') {
+    if (schema !== elicitationPreprocess) throw Error('Unrecognized SDK preprocessing');
+    return { type: 'elicitation', schema: toolParser(d.out) };
+  }
+  if (!['string', 'number', 'boolean', 'literal', 'enum', 'object', 'array', 'optional', 'default', 'union', 'record', 'unknown', 'any', 'intersection'].includes(d.type)) throw Error(`Unsupported SDK schema type: ${d.type}`);
   const out: any = { type: d.type };
+  if (d.left) out.left = toolParser(d.left);
+  if (d.right) out.right = toolParser(d.right);
   if (d.checks) out.checks = d.checks.filter((c: any) => c._zod.def.check !== 'custom').map((c: any) => {
     const check = c._zod.def;
     return JSON.parse(JSON.stringify(check, (_key, value) => value instanceof RegExp ? { source: value.source, display: String(value) } : value));
@@ -43,6 +57,15 @@ const toolSchemas = { request_sms_code: z.object(requestSchema.shape), create_re
 };
 save('tool-parsers.json', Object.fromEntries(Object.entries(toolSchemas).map(([name, schema]) => [name, toolParser(schema)])));
 save('tool-envelope.json', { call: toolParser(CallToolRequestSchema), task: toolParser(TaskAugmentedRequestParamsSchema), request: toolParser(JSONRPCRequestSchema), message: toolParser(JSONRPCMessageSchema), initialize: toolParser(InitializeRequestSchema), list: toolParser(ListToolsRequestSchema), ping: toolParser(PingRequestSchema) });
+save('initialization-validation.json', [
+  { sampling: { tools: {}, context: {} } }, { experimental: { feature: {} }, extensions: { feature: [] } },
+  { elicitation: {} }, { elicitation: { form: { applyDefaults: true }, url: [] } }, { tasks: { list: {}, cancel: {} } },
+  { sampling: { tools: null } }, { experimental: { feature: 1 } }, { elicitation: [] }, { elicitation: { form: { applyDefaults: 'yes' } } },
+].map(capabilities => {
+  const input = { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-11-25', clientInfo: { name: 'fixture', version: '1' }, capabilities } };
+  const result = InitializeRequestSchema.safeParse(input);
+  return { input, valid: result.success, ...(result.success ? {} : { error: result.error.message }) };
+}));
 const basicForm = { title: ' Test ', body: 'Body', idempotencyKey: 'tool-input', actions: [{ id: 'ok', label: ' OK ', type: 'submit' }] };
 const toolCases: { name: keyof typeof toolSchemas; input: unknown }[] = [
   ...[{}, { requestId: 1 }, { requestId: '?' }, { requestId: 'valid', extra: true }].map(input => ({ name: 'get_sms_code_request' as const, input })),

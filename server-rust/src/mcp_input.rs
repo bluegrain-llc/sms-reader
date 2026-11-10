@@ -90,6 +90,25 @@ pub fn envelope(input: &Value) -> Option<(u16, Value)> {
     };
     error.map(|error| (200, json!({"jsonrpc":"2.0","id":input["id"],"error":error})))
 }
+pub fn normalized_envelope(input: &Value) -> Value {
+    let schema = match input["method"].as_str() {
+        Some("tools/call") => "call",
+        Some("tools/list") => "list",
+        Some("initialize") => "initialize",
+        Some("ping") => "ping",
+        _ => return input.clone(),
+    };
+    let (mut value, issues) = check(&envelopes()[schema], Some(input), &[]);
+    debug_assert!(issues.is_empty());
+    value["jsonrpc"] = input["jsonrpc"].clone();
+    value["id"] = input["id"].clone();
+    // These client features are accepted by the legacy SDK but unused by our
+    // tools. Avoid interpreting them through a newer SDK's capability types.
+    if schema == "initialize" {
+        value["params"]["capabilities"] = json!({});
+    }
+    value
+}
 fn issue(mut value: Value, path: &[Value], message: String) -> Value {
     value["path"] = json!(path);
     value["message"] = json!(message);
@@ -114,6 +133,39 @@ fn child_path(path: &[Value], key: Value) -> Vec<Value> {
 fn check(s: &Value, v: Option<&Value>, path: &[Value]) -> (Value, Vec<Value>) {
     let kind = text(s, "type");
     match kind {
+        "assert_object" => {
+            return if v.is_some_and(|v| v.is_object() || v.is_array()) {
+                (v.unwrap().clone(), vec![])
+            } else {
+                (
+                    Value::Null,
+                    vec![issue(
+                        json!({"code":"custom"}),
+                        path,
+                        "Invalid input".into(),
+                    )],
+                )
+            };
+        }
+        "elicitation" => {
+            let normalized = if v.is_some_and(|v| v.as_object().is_some_and(|m| m.is_empty())) {
+                Some(json!({"form":{}}))
+            } else {
+                v.cloned()
+            };
+            return check(&s["schema"], normalized.as_ref(), path);
+        }
+        "intersection" => {
+            let (mut left, mut errors) = check(&s["left"], v, path);
+            let (right, e) = check(&s["right"], v, path);
+            errors.extend(e);
+            if errors.is_empty()
+                && let (Some(left), Some(right)) = (left.as_object_mut(), right.as_object())
+            {
+                left.extend(right.clone());
+            }
+            return (left, errors);
+        }
         "unknown" | "any" => return (v.cloned().unwrap_or(Value::Null), vec![]),
         "optional" if v.is_none() => return (Value::Null, vec![]),
         "optional" => return check(&s["inner"], v, path),
@@ -377,6 +429,23 @@ mod tests {
     use super::*;
     #[test]
     fn captured_sdk_validation() {
+        let initialization: Value =
+            serde_json::from_str(include_str!("../compat/initialization-validation.json")).unwrap();
+        for case in initialization.as_array().unwrap() {
+            let (_, issues) = check(&envelopes()["initialize"], Some(&case["input"]), &[]);
+            assert_eq!(
+                issues.is_empty(),
+                case["valid"] == true,
+                "{}",
+                case["input"]
+            );
+            if !issues.is_empty() {
+                assert_eq!(
+                    serde_json::to_string_pretty(&issues).unwrap(),
+                    case["error"].as_str().unwrap()
+                );
+            }
+        }
         let cases: Value =
             serde_json::from_str(include_str!("../compat/tool-validation.json")).unwrap();
         for case in cases.as_array().unwrap() {

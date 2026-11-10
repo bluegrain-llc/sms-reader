@@ -82,13 +82,16 @@ async fn common(State(s): State<App>, mut request: Request, next: Next) -> Respo
     if is_head {
         *request.method_mut() = axum::http::Method::GET;
     }
-    let origin = header(request.headers(), "origin");
-    let mut response =
-        if origin.is_some_and(|o| !s.options.origins.iter().any(|allowed| allowed == o)) {
-            Error::Api(403, "origin_not_allowed").into_response()
-        } else {
-            next.run(request).await
-        };
+    let origin = request.headers().get("origin");
+    let mut response = if origin.is_some_and(|o| {
+        o.to_str()
+            .map(|o| !o.is_empty() && !s.options.origins.iter().any(|allowed| allowed == o))
+            .unwrap_or(true)
+    }) {
+        Error::Api(403, "origin_not_allowed").into_response()
+    } else {
+        next.run(request).await
+    };
     response
         .headers_mut()
         .insert("X-Content-Type-Options", "nosniff".parse().unwrap());
@@ -154,8 +157,25 @@ async fn json_body(body: Body, headers: &HeaderMap) -> Result<Vec<u8>> {
     let text = match charset {
         "utf-8" | "utf8" => String::from_utf8_lossy(bytes).into_owned(),
         "utf-16" | "utf-16le" | "utf-16be" => {
-            let be =
-                charset == "utf-16be" || (charset == "utf-16" && bytes.starts_with(&[0xfe, 0xff]));
+            let pairs = bytes.as_chunks::<2>().0;
+            let be = charset == "utf-16be"
+                || (charset == "utf-16"
+                    && if bytes.starts_with(&[0xfe, 0xff]) {
+                        true
+                    } else if bytes.starts_with(&[0xff, 0xfe]) {
+                        false
+                    } else {
+                        pairs
+                            .iter()
+                            .take(100)
+                            .filter(|p| p[0] == 0 && p[1] != 0)
+                            .count()
+                            > pairs
+                                .iter()
+                                .take(100)
+                                .filter(|p| p[0] != 0 && p[1] == 0)
+                                .count()
+                    });
             let units = bytes
                 .as_chunks::<2>()
                 .0
@@ -168,11 +188,7 @@ async fn json_body(body: Body, headers: &HeaderMap) -> Result<Vec<u8>> {
                     }
                 })
                 .collect::<Vec<_>>();
-            let mut text = String::from_utf16_lossy(&units);
-            if bytes.len() % 2 != 0 {
-                text.push('\u{fffd}');
-            }
-            text
+            crate::js_string::utf16_json(&units)?
         }
         "utf-32" | "utf-32le" | "utf-32be" => {
             let be = charset == "utf-32be"

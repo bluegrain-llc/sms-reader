@@ -596,7 +596,7 @@
                     "type": "string"
                   },
                   "value": {
-                    "type": "custom"
+                    "type": "assert_object"
                   }
                 }
               },
@@ -608,13 +608,13 @@
                     "context": {
                       "type": "optional",
                       "inner": {
-                        "type": "custom"
+                        "type": "assert_object"
                       }
                     },
                     "tools": {
                       "type": "optional",
                       "inner": {
-                        "type": "custom"
+                        "type": "assert_object"
                       }
                     }
                   }
@@ -623,7 +623,59 @@
               "elicitation": {
                 "type": "optional",
                 "inner": {
-                  "type": "pipe"
+                  "type": "elicitation",
+                  "schema": {
+                    "type": "intersection",
+                    "left": {
+                      "type": "object",
+                      "shape": {
+                        "form": {
+                          "type": "optional",
+                          "inner": {
+                            "type": "intersection",
+                            "left": {
+                              "type": "object",
+                              "shape": {
+                                "applyDefaults": {
+                                  "type": "optional",
+                                  "inner": {
+                                    "type": "boolean"
+                                  }
+                                }
+                              }
+                            },
+                            "right": {
+                              "type": "record",
+                              "key": {
+                                "type": "string"
+                              },
+                              "value": {
+                                "type": "unknown"
+                              }
+                            }
+                          }
+                        },
+                        "url": {
+                          "type": "optional",
+                          "inner": {
+                            "type": "assert_object"
+                          }
+                        }
+                      }
+                    },
+                    "right": {
+                      "type": "optional",
+                      "inner": {
+                        "type": "record",
+                        "key": {
+                          "type": "string"
+                        },
+                        "value": {
+                          "type": "unknown"
+                        }
+                      }
+                    }
+                  }
                 }
               },
               "roots": {
@@ -648,13 +700,13 @@
                     "list": {
                       "type": "optional",
                       "inner": {
-                        "type": "custom"
+                        "type": "assert_object"
                       }
                     },
                     "cancel": {
                       "type": "optional",
                       "inner": {
-                        "type": "custom"
+                        "type": "assert_object"
                       }
                     },
                     "requests": {
@@ -670,7 +722,7 @@
                                 "createMessage": {
                                   "type": "optional",
                                   "inner": {
-                                    "type": "custom"
+                                    "type": "assert_object"
                                   }
                                 }
                               },
@@ -685,7 +737,7 @@
                                 "create": {
                                   "type": "optional",
                                   "inner": {
-                                    "type": "custom"
+                                    "type": "assert_object"
                                   }
                                 }
                               },
@@ -708,7 +760,7 @@
                     "type": "string"
                   },
                   "value": {
-                    "type": "custom"
+                    "type": "assert_object"
                   }
                 }
               }

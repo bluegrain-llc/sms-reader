@@ -22,9 +22,14 @@ pub fn tools() -> Vec<Tool> {
 }
 impl ServerHandler for Mcp {
     fn get_info(&self) -> ServerConfig {
-        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
-            .with_server_info(Implementation::new("sms-code-relay", "0.6.0"))
-            .with_protocol_version(ProtocolVersion::V_2025_11_25)
+        ServerConfig::new(
+            ServerCapabilities::builder()
+                .enable_tools()
+                .enable_tool_list_changed()
+                .build(),
+        )
+        .with_server_info(Implementation::new("sms-code-relay", "0.6.0"))
+        .with_protocol_version(ProtocolVersion::V_2025_11_25)
     }
     fn supported_protocol_versions(&self) -> Cow<'static, [ProtocolVersion]> {
         Cow::Owned(
@@ -248,6 +253,7 @@ async fn run_sdk(
     if let Some((_, error)) = crate::mcp_input::envelope(&envelope) {
         return Some(error);
     }
+    envelope = crate::mcp_input::normalized_envelope(&envelope);
     let original_id = envelope["id"].clone();
     let list_tools = envelope["method"] == "tools/list";
     if original_id.as_i64().is_some_and(|n| n < 0) {

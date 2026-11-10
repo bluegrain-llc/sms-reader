@@ -33,6 +33,29 @@ pub fn utf8(s: &str) -> String {
 pub fn storage(s: &str) -> Result<String, std::char::DecodeUtf16Error> {
     char::decode_utf16(units(s)).collect()
 }
+pub fn utf16_json(units: &[u16]) -> crate::error::Result<String> {
+    let mut out = String::new();
+    let (mut quoted, mut escaped) = (false, false);
+    for c in char::decode_utf16(units.iter().copied()) {
+        match c {
+            Ok(c) => {
+                out.push(c);
+                if escaped {
+                    escaped = false;
+                } else if c == '\\' && quoted {
+                    escaped = true;
+                } else if c == '"' {
+                    quoted = !quoted;
+                }
+            }
+            Err(e) if quoted && !escaped => {
+                out.push_str(&format!("\\u{:04x}", e.unpaired_surrogate()))
+            }
+            Err(_) => return Err(crate::error::Error::Api(400, "invalid_input")),
+        }
+    }
+    Ok(out)
+}
 pub fn count(s: &str) -> usize {
     if !s.contains(MARK) {
         return s.chars().count();

@@ -89,6 +89,7 @@ test('HTTP errors, body bounds, auth ordering, headers and protocol negotiation 
       { path: '/health' }, { path: '/HEALTH' }, { path: '/health/' }, { path: '/health//' }, { path: '//health' }, { path: '/health', method: 'HEAD' }, { path: '/healthz' }, { path: '/missing' }, { path: '/v1/devices' },
       { path: '/health', headers: { origin: 'https://denied.example' } },
       { path: '/health', headers: { origin: 'https://allowed.example' } },
+      { path: '/health', headers: { origin: '' } },
       { path: '/v1/devices', headers: { authorization: 'Bearer wrong' } },
       { path: '/v1/requests', method: 'POST', headers: { 'content-type': 'application/json' }, body: '{' },
       { path: '/v1/requests', method: 'POST', headers: { 'content-type': 'application/json' }, body: '1' },
@@ -107,6 +108,7 @@ test('HTTP errors, body bounds, auth ordering, headers and protocol negotiation 
       ...['POLL', 'REVIEW', 'DECISION'].map(operation => ({ path: `/v1/connections/${operation}`, method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })),
       ...[gzipSync, deflateSync, brotliCompressSync].map((compress, i) => ({ path: '/v1/requests', method: 'POST', headers: { 'content-type': 'application/json', 'content-encoding': ['gzip', 'deflate', 'br'][i]!, authorization: `Bearer ${token}` }, body: compress(Buffer.from('{"purpose":"Compressed","idempotencyKey":"encoded-body"}')) })),
       { path: '/v1/requests', method: 'POST', headers: { 'content-type': 'application/json; charset=utf-16le', authorization: `Bearer ${token}` }, body: Buffer.from('{"purpose":"Compressed","idempotencyKey":"encoded-body"}', 'utf16le') },
+      { path: '/v1/requests', method: 'POST', headers: { 'content-type': 'application/json; charset=utf-16', authorization: `Bearer ${token}` }, body: Buffer.from('{"purpose":"Compressed","idempotencyKey":"encoded-body"}', 'utf16le').swap16() },
       { path: '/v1/requests', method: 'POST', headers: { 'content-type': 'application/json', 'content-encoding': 'gzip' }, body: gzipSync(Buffer.from(JSON.stringify({ purpose: 'x'.repeat(256 * 1024) }))) },
       { path: '/health', method: 'POST', headers: { 'content-type': 'text/plain' }, body: 'x'.repeat(256 * 1024 + 1) },
     ];
@@ -122,7 +124,7 @@ test('HTTP errors, body bounds, auth ordering, headers and protocol negotiation 
       assert.deepEqual(results[1], results[0], version);
     }
     const list = (id: number) => ({ jsonrpc: '2.0', id, method: 'tools/list' });
-    const rpc = async (base: string, body: string, headers: Record<string, string> = {}) => {
+    const rpc = async (base: string, body: RequestInit['body'], headers: Record<string, string> = {}) => {
       const response = await fetch(base + '/mcp', { method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream', authorization: `Bearer ${token}`, ...headers }, body, signal: AbortSignal.timeout(15_000) });
       const text = await response.text(); return { status: response.status, type: response.headers.get('content-type'), body: text ? JSON.parse(text) : null };
     };
@@ -139,6 +141,12 @@ test('HTTP errors, body bounds, auth ordering, headers and protocol negotiation 
     ] as [string, Record<string, string>][]) {
       assert.deepEqual(await rpc(bases[1]!, body, headers), await rpc(bases[0]!, body, headers), body.slice(0,150));
     }
+    for (const capabilities of [{ elicitation: {} }, { sampling: { tools: {}, context: {} } }, { experimental: { feature: {} }, extensions: { feature: [] } }, { tasks: { list: {}, cancel: {} } }, { sampling: { tools: null } }, { elicitation: [] }]) {
+      const body = JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-11-25', capabilities, clientInfo: { name: 'capabilities', version: '1' } } });
+      assert.deepEqual(await rpc(bases[1]!, body), await rpc(bases[0]!, body), JSON.stringify(capabilities));
+    }
+    const rawId = Buffer.from('{"jsonrpc":"2.0","id":"' + '\ud800' + '","method":"tools/list"}', 'utf16le');
+    assert.deepEqual(await rpc(bases[1]!, rawId, { 'content-type': 'application/json; charset=utf-16le' }), await rpc(bases[0]!, rawId, { 'content-type': 'application/json; charset=utf-16le' }));
     for (const [name, args] of [
       ['get_sms_code_request', {}], ['get_sms_code_request', { requestId: 1 }], ['get_sms_code_request', { requestId: '?' }],
       ['request_sms_code', { purpose: '   ', idempotencyKey: 'short' }], ['request_sms_code', { purpose: 'MCP extras', idempotencyKey: 'mcp-extras', ignored: true }],
@@ -158,6 +166,7 @@ test('HTTP errors, body bounds, auth ordering, headers and protocol negotiation 
       { name: 'poll_request_events', arguments: [] }, { name: 'poll_request_events', task: null },
       { name: 'poll_request_events', task: { ttl: 'bad' } }, { name: 1, arguments: {} },
       { name: 'poll_request_events', _meta: false },
+      { name: 'request_sms_code', arguments: { purpose: 'Ignored params', idempotencyKey: 'ignored-params' }, requestState: 1, inputResponses: 1 },
       { name: 'request_sms_code', arguments: { purpose: 'Surrogate', idempotencyKey: 'surrogate-ignored', ignored: '\ud800' } },
     ]) {
       const responses = await Promise.all(bases.map(async base => {
