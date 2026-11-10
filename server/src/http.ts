@@ -64,7 +64,7 @@ export function app(relay: Relay, options: HttpOptions) {
   const device = (req: Request) => idSchema.parse(req.params.deviceId);
   const request = (req: Request) => idSchema.parse(req.params.requestId);
   const body = <T extends z.ZodTypeAny>(req: Request, schema: T): z.infer<T> => schema.parse(req.body);
-  mountForms(app, relay.forms, owner, bearer, options.sseDurationMs);
+  mountForms(app, relay.forms, owner, bearer, agentRead, options.sseDurationMs);
   app.get('/v1/devices', async (req, res) => { res.json(await relay.listDevices((await owner(req)).uid)); });
   app.put('/v1/devices/:deviceId', async (req, res) => {
     const { uid } = await owner(req);

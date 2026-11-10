@@ -5,7 +5,7 @@ import { formSchema, observationSchema, submissionSchema, webhookSchema } from '
 import { idSchema } from './model.js';
 import { EventStreams } from './event-streams.js';
 
-export function mountForms(app: Express, forms: Forms, owner: (req: Request) => Promise<{ uid: string }>, bearer: (req: Request) => string, sseDurationMs = 100_000) {
+export function mountForms(app: Express, forms: Forms, owner: (req: Request) => Promise<{ uid: string }>, bearer: (req: Request) => string, agentRead: (req: Request) => Promise<string>, sseDurationMs = 100_000) {
   const streams = new EventStreams(forms);
   const id = (req: Request) => idSchema.parse(req.params.requestId);
   const phone = async (req: Request) => ({ uid: (await owner(req)).uid, deviceId: idSchema.parse(req.params.deviceId) });
@@ -24,10 +24,6 @@ export function mountForms(app: Express, forms: Forms, owner: (req: Request) => 
   app.post('/v2/webhooks', async (req, res) => { res.status(201).json(await forms.registerWebhook(bearer(req), webhookSchema.parse(req.body))); });
   app.get('/v2/webhooks', async (req, res) => { res.json(await forms.webhooks(await agentRead(req))); });
   app.delete('/v2/webhooks/:hookId', async (req, res) => { res.json(await forms.webhooks(bearer(req), idSchema.parse(req.params.hookId))); });
-  const agentRead = async (req: Request) => {
-    const secret = bearer(req), { grant } = await forms.db.runTransaction(tx => forms.relay.agent(tx, secret));
-    await forms.relay.access.read(grant.ownerId, grant.id); return secret;
-  };
   const cursor = (req: Request) => z.string().max(128).optional().parse(req.query.cursor ?? req.get('Last-Event-ID'));
   app.get('/v2/events', async (req, res) => { res.json(await forms.events(await agentRead(req), cursor(req))); });
   app.get('/v2/events/stream', async (req, res) => {

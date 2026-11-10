@@ -14,7 +14,7 @@ The account tombstone remains after cleanup to prevent stale installation access
 
 ## Web and Android
 
-Android confirms deletion, asks Google to reauthenticate the same Firebase account, refreshes the ID token, then requests deletion and clears local installation/session state after acceptance. Choosing a different account cannot delete the existing owner. Account access is blocked immediately while cleanup continues.
+Android confirms deletion, asks Google to reauthenticate the same Firebase account, refreshes the ID token, then requests deletion and clears local installation/session state after acceptance. Credential completion waits for an active refresh or other UI action, so returning from Google verification cannot silently discard deletion. Choosing a different account cannot delete the existing owner. Account access is blocked immediately while cleanup continues.
 
 The public `/account/delete` page offers the same flow without an installed app. Sign-in and receipts stay in page memory. `/privacy` explains current processing and retention. The pages have no analytics, use native accessible controls, prevent framing and disable referrer transmission. The deletion page uses pinned Firebase browser modules from Google's CDN and a per-response script nonce; OAuth opens a popup. No form answers are loaded on this page.
 
