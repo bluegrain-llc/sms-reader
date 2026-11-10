@@ -1,7 +1,7 @@
 //! Emulator-only test host. This target is never copied into the runtime image.
 use axum::{Json, Router, extract::State, response::IntoResponse, routing::post};
 use axum::{
-    body::Body,
+    body::{Body, Bytes},
     extract::Request,
     http::StatusCode,
     middleware::{self, Next},
@@ -30,7 +30,8 @@ impl Callback {
         let response = self
             .client
             .post(&self.url)
-            .json(&json!({"kind":kind,"args":args}))
+            .header("content-type", "application/json")
+            .body(js_json(&json!({"kind":kind,"args":args}), false))
             .send()
             .await
             .map_err(|_| Error::External)?;
@@ -78,12 +79,7 @@ impl Delivery for Callback {
         Box::pin(async move {
             self.send(
                 "notify",
-                json!([
-                    sms_code_relay::js_string::utf8(t),
-                    id,
-                    ttl,
-                    if form { json!("form") } else { Value::Null }
-                ]),
+                json!([t, id, ttl, if form { json!("form") } else { Value::Null }]),
             )
             .await?;
             Ok(())
@@ -102,8 +98,7 @@ impl Delivery for Callback {
         e: &'a Value,
     ) -> futures::future::BoxFuture<'a, Result<()>> {
         Box::pin(async move {
-            self.send("webhook", json!([sms_code_relay::js_string::utf8(u), s, e]))
-                .await?;
+            self.send("webhook", json!([u, s, e])).await?;
             Ok(())
         })
     }
@@ -121,7 +116,9 @@ impl http::Serving for Callback {
 impl Authentication for Callback {
     fn owner<'a>(&'a self, t: &'a str) -> futures::future::BoxFuture<'a, Result<Identity>> {
         Box::pin(async move {
-            let v = self.send("owner", json!([t])).await?;
+            let v = self
+                .send("owner", json!([sms_code_relay::js_string::encode(t)]))
+                .await?;
             Ok(Identity {
                 uid: text(&v, "uid").into(),
                 auth_time: v["authTime"].as_f64().unwrap_or(0.0),
@@ -130,13 +127,15 @@ impl Authentication for Callback {
     }
     fn worker<'a>(&'a self, t: &'a str) -> futures::future::BoxFuture<'a, Result<()>> {
         Box::pin(async move {
-            self.send("worker", json!([t])).await?;
+            self.send("worker", json!([sms_code_relay::js_string::encode(t)]))
+                .await?;
             Ok(())
         })
     }
     fn delete<'a>(&'a self, u: &'a str) -> futures::future::BoxFuture<'a, Result<()>> {
         Box::pin(async move {
-            self.send("delete", json!([u])).await?;
+            self.send("delete", json!([sms_code_relay::js_string::encode(u)]))
+                .await?;
             Ok(())
         })
     }
@@ -203,7 +202,13 @@ fn auth(v: &Value) -> Auth {
         }
     }
 }
-async fn call(State(h): State<Host>, Json(v): Json<Value>) -> impl IntoResponse {
+async fn call(State(h): State<Host>, body: Bytes) -> impl IntoResponse {
+    // Domain calls use the same JS string representation as production HTTP;
+    // ordinary serde JSON would leave literal private markers unescaped.
+    let v = match sms_code_relay::js_string::parse(&body) {
+        Ok(v) => v,
+        Err(_) => return Json(json!({"error":"invalid_input","status":400})).into_response(),
+    };
     let r = relay(&h, &v);
     let args = arr(&v, "args");
     let a = |i: usize| args.get(i).cloned().unwrap_or(Value::Null);
@@ -214,7 +219,7 @@ async fn call(State(h): State<Host>, Json(v): Json<Value>) -> impl IntoResponse 
                 let identity = sms_code_relay::google::Google::new("demo-sms-relay".into())
                     .verify_owner(&t(0))
                     .await?;
-                Ok(json!({"uid":identity.uid,"authTime":identity.auth_time}))
+                Ok(json!({"uid":sms_code_relay::js_string::encode(&identity.uid),"authTime":identity.auth_time}))
             }
             "register" => r.register(t(0), t(1), t(2), t(3), a(4) == 1).await,
             "createGrant" => {
@@ -379,7 +384,11 @@ async fn call(State(h): State<Host>, Json(v): Json<Value>) -> impl IntoResponse 
     }
     .await;
     match result {
-        Ok(value) => Json(json!({"value":value})).into_response(),
+        Ok(value) => (
+            [(axum::http::header::CONTENT_TYPE, "application/json")],
+            js_json(&json!({"value":value}), false),
+        )
+            .into_response(),
         Err(Error::Api(status, reason)) => {
             Json(json!({"error":reason,"status":status})).into_response()
         }

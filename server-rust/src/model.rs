@@ -12,6 +12,11 @@ pub fn now() -> i64 {
 pub fn hash(s: &str) -> String {
     format!("{:x}", Sha256::digest(s.as_bytes()))
 }
+/// Hash a string held in the internal JavaScript UTF-16 representation.
+/// Serialized JSON is already raw UTF-8 and must continue to use `hash`.
+pub fn hash_js(s: &str) -> String {
+    hash(&crate::js_string::utf8(s))
+}
 pub fn secret() -> String {
     let mut b = [0; 32];
     rand::rng().fill_bytes(&mut b);
@@ -241,4 +246,26 @@ pub fn sms_fingerprint(i: &Value) -> String {
         a.push(t.clone());
     }
     hash(&js_json(&json!(a), false))
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::*;
+    #[test]
+    fn identity_hash_decodes_internal_strings_but_json_hash_remains_raw() {
+        let raw = "owner-\u{f0000}\u{e000}";
+        let encoded = crate::js_string::encode(raw);
+        assert_ne!(hash(raw), hash(&encoded));
+        assert_eq!(hash_js(&encoded), hash(raw));
+        let serialized = js_json(&json!({"owner":encoded}), true);
+        assert_eq!(
+            serialized,
+            serde_json::to_string(&json!({"owner":raw})).unwrap()
+        );
+        assert_eq!(
+            hash(&serialized),
+            hash(&serde_json::to_string(&json!({"owner":raw})).unwrap())
+        );
+        assert_ne!(hash_js(&serialized), hash(&serialized));
+    }
 }

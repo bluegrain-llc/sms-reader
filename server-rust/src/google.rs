@@ -176,8 +176,9 @@ impl Google {
             .map_err(|_| Error::External)?
             .claims;
         ensure(
-            num(&claims, "iat") <= now() / 1000 + if worker { 300 } else { 0 }
-                && (!worker || num(&claims, "exp") <= now() / 1000 + 86400),
+            !worker
+                || (num(&claims, "iat") <= now() / 1000 + 300
+                    && num(&claims, "exp") <= now() / 1000 + 86400),
             401,
             "invalid_owner_session",
         )?;
@@ -191,6 +192,27 @@ impl Google {
             .unwrap_or_else(|| "https://identitytoolkit.googleapis.com".into());
         format!("{base}/v1/projects/{}/accounts:{method}", self.project)
     }
+    // Firebase Admin validates expiration, issuer and audience, but does not
+    // reject future iat/auth_time claims. Sensitive routes enforce recency.
+    fn owner_claims<'a>(&self, claims: &'a Value) -> Result<&'a str> {
+        let uid = text(claims, "sub");
+        ensure(
+            !uid.is_empty()
+                && uid.encode_utf16().count() <= 128
+                && claims["aud"] == self.project
+                && claims["iss"] == format!("https://securetoken.google.com/{}", self.project)
+                && num(claims, "exp") > now() / 1000
+                && claims["auth_time"].is_number(),
+            401,
+            "invalid_owner_session",
+        )?;
+        ensure(
+            claims["firebase"]["sign_in_provider"] == "google.com",
+            401,
+            "google_sign_in_required",
+        )?;
+        Ok(uid)
+    }
     pub async fn verify_owner(&self, token: &str) -> Result<Identity> {
         let claims = if self.auth_emulator.is_some() {
             let part = token.split('.').nth(1).ok_or(Error::External)?;
@@ -201,24 +223,7 @@ impl Google {
         } else {
             self.jwt(token, false).await?
         };
-        let uid = text(&claims, "sub");
-        ensure(
-            !uid.is_empty()
-                && uid.encode_utf16().count() <= 128
-                && claims["aud"] == self.project
-                && claims["iss"] == format!("https://securetoken.google.com/{}", self.project)
-                && num(&claims, "exp") > now() / 1000
-                && num(&claims, "iat") <= now() / 1000
-                && claims["auth_time"].is_number()
-                && num(&claims, "auth_time") <= now() / 1000,
-            401,
-            "invalid_owner_session",
-        )?;
-        ensure(
-            claims["firebase"]["sign_in_provider"] == "google.com",
-            401,
-            "google_sign_in_required",
-        )?;
+        let uid = self.owner_claims(&claims)?;
         let result = self
             .api(
                 self.auth_url("lookup"),
@@ -347,7 +352,7 @@ mod tests {
         json!({"sub":"owner", "iss":"https://securetoken.google.com/demo-sms-relay", "aud":"demo-sms-relay", "iat":now()/1000-1, "exp":now()/1000+3600, "auth_time":now()/1000-1, "firebase":{"sign_in_provider":"google.com"}})
     }
     #[tokio::test]
-    async fn signed_tokens_enforce_algorithm_issuer_audience_expiry_and_iat() {
+    async fn signed_tokens_enforce_algorithm_issuer_audience_expiry_and_signature() {
         let google = verifier().await;
         assert!(
             google
@@ -359,7 +364,6 @@ mod tests {
             ("iss", json!("https://evil.test")),
             ("aud", json!("other-project")),
             ("exp", json!(now() / 1000 - 1)),
-            ("iat", json!(now() / 1000 + 300)),
         ] {
             let mut c = claims();
             c[key] = value;
@@ -391,6 +395,58 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+    #[tokio::test]
+    async fn signed_owner_tokens_match_admin_clock_boundaries_without_expiry_leeway() {
+        let google = verifier().await;
+        // Both ordinary owner operations and the recent-auth +30-second window
+        // must reach route policy when the provider clock is ahead.
+        for skew in [1, 30, 31, 300] {
+            let mut c = claims();
+            c["iat"] = json!(now() / 1000 + skew);
+            c["auth_time"] = c["iat"].clone();
+            let decoded = google.jwt(&signed(&c, "test-key"), false).await.unwrap();
+            assert_eq!(google.owner_claims(&decoded).unwrap(), "owner");
+        }
+        for (key, value) in [
+            ("exp", json!(now() / 1000)),
+            ("exp", json!(now() / 1000 - 30)),
+            ("aud", json!("other-project")),
+            ("iss", json!("https://evil.test")),
+            ("nbf", json!(now() / 1000 + 30)),
+        ] {
+            let mut c = claims();
+            c[key] = value;
+            let verified = google.jwt(&signed(&c, "test-key"), false).await;
+            assert!(
+                verified
+                    .and_then(|v| google.owner_claims(&v).map(|_| ()))
+                    .is_err(),
+                "{key}"
+            );
+        }
+    }
+    #[tokio::test]
+    async fn deletion_provider_receives_the_original_literal_marker_uid() {
+        let (sender, mut received) = tokio::sync::mpsc::channel(1);
+        let router = axum::Router::new().fallback(move |axum::Json(body): axum::Json<Value>| {
+            let sender = sender.clone();
+            async move {
+                sender.send(body).await.unwrap();
+                axum::Json(json!({}))
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let mut google = Google::new("demo-sms-relay".into());
+        google.auth_emulator = Some(address.to_string());
+        // deletion_step has already crossed the internal JS representation
+        // boundary before invoking Authentication::delete / this provider.
+        let uid = "owner-\u{f0000}\u{e000}";
+        google.delete_identity(uid).await.unwrap();
+        assert_eq!(received.recv().await.unwrap(), json!({"localId":uid}));
+        server.abort();
     }
     #[tokio::test]
     async fn worker_requires_exact_audience_and_verified_service_identity() {

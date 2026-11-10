@@ -20,6 +20,7 @@ struct Contract {
     name: &'static str,
     schema: Value,
     validator: jsonschema::Validator,
+    lengths: Lengths,
 }
 fn contract(name: &str) -> &'static Contract {
     static CONTRACTS: OnceLock<Vec<Contract>> = OnceLock::new();
@@ -41,11 +42,13 @@ fn contract(name: &str) -> &'static Contract {
             .into_iter()
             .map(|(name, source)| {
                 let schema = serde_json::from_str(source).unwrap();
-                let validator = jsonschema::validator_for(&without_lengths(&schema)).unwrap();
+                let validator = compile(&schema);
+                let lengths = Lengths::new(&schema);
                 Contract {
                     name,
                     schema,
                     validator,
+                    lengths,
                 }
             })
             .collect()
@@ -84,47 +87,77 @@ fn without_lengths(v: &Value) -> Value {
         _ => v.clone(),
     }
 }
-fn lengths(schema: &Value, v: &Value) -> bool {
-    if let Some(s) = v.as_str() {
-        let n = crate::js_string::count(s) as u64;
-        if schema["minLength"].as_u64().is_some_and(|m| n < m)
-            || schema["maxLength"].as_u64().is_some_and(|m| n > m)
-        {
-            return false;
+#[cfg(test)]
+static COMPILATIONS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+fn compile(schema: &Value) -> jsonschema::Validator {
+    #[cfg(test)]
+    COMPILATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    jsonschema::validator_for(&without_lengths(schema)).unwrap()
+}
+// This mirrors the schema tree once. Each union branch keeps its structural
+// validator alongside the recursive JavaScript string-length checks.
+struct Lengths {
+    min: Option<u64>,
+    max: Option<u64>,
+    properties: std::collections::HashMap<String, Lengths>,
+    additional: Option<Box<Lengths>>,
+    items: Option<Box<Lengths>>,
+    unions: Vec<Vec<(jsonschema::Validator, Lengths)>>,
+}
+impl Lengths {
+    fn new(schema: &Value) -> Self {
+        Self {
+            min: schema["minLength"].as_u64(),
+            max: schema["maxLength"].as_u64(),
+            properties: schema["properties"]
+                .as_object()
+                .into_iter()
+                .flat_map(|m| m.iter())
+                .map(|(k, s)| (k.clone(), Self::new(s)))
+                .collect(),
+            additional: schema["additionalProperties"]
+                .is_object()
+                .then(|| Box::new(Self::new(&schema["additionalProperties"]))),
+            items: schema.get("items").map(|s| Box::new(Self::new(s))),
+            unions: ["oneOf", "anyOf"]
+                .into_iter()
+                .filter_map(|key| schema[key].as_array())
+                .map(|branches| {
+                    branches
+                        .iter()
+                        .map(|s| (compile(s), Self::new(s)))
+                        .collect()
+                })
+                .collect(),
         }
     }
-    if let Some(m) = v.as_object() {
-        for (k, v) in m {
-            if let Some(prop) = schema["properties"].get(k) {
-                if !lengths(prop, v) {
-                    return false;
-                }
-            } else if schema["additionalProperties"].is_object()
-                && !lengths(&schema["additionalProperties"], v)
-            {
+    fn valid(&self, v: &Value) -> bool {
+        if let Some(s) = v.as_str() {
+            let n = crate::js_string::count(s) as u64;
+            if self.min.is_some_and(|m| n < m) || self.max.is_some_and(|m| n > m) {
                 return false;
             }
         }
-    }
-    if let Some(a) = v.as_array()
-        && schema.get("items").is_some()
-        && !a.iter().all(|v| lengths(&schema["items"], v))
-    {
-        return false;
-    }
-    for key in ["oneOf", "anyOf"] {
-        if let Some(a) = schema[key].as_array()
-            && !a.iter().any(|s| {
-                jsonschema::validator_for(&without_lengths(s))
-                    .unwrap()
-                    .is_valid(v)
-                    && lengths(s, v)
-            })
+        if let Some(m) = v.as_object() {
+            for (k, v) in m {
+                if let Some(prop) = self.properties.get(k).or(self.additional.as_deref())
+                    && !prop.valid(v)
+                {
+                    return false;
+                }
+            }
+        }
+        if let (Some(a), Some(items)) = (v.as_array(), self.items.as_deref())
+            && !a.iter().all(|v| items.valid(v))
         {
             return false;
         }
+        self.unions.iter().all(|branches| {
+            branches
+                .iter()
+                .any(|(validator, lengths)| validator.is_valid(v) && lengths.valid(v))
+        })
     }
-    true
 }
 pub fn validate(name: &str, v: &Value) -> Result<()> {
     fn finite(v: &Value) -> bool {
@@ -139,7 +172,7 @@ pub fn validate(name: &str, v: &Value) -> Result<()> {
     ensure(
         finite(v)
             && contract.validator.is_valid(v)
-            && lengths(&contract.schema, v)
+            && contract.lengths.valid(v)
             && (name != "webhook"
                 || v["url"]
                     .as_str()
@@ -438,4 +471,37 @@ pub fn public_event(mut e: Value) -> Value {
         e.as_object_mut().unwrap().remove(k);
     }
     e
+}
+
+#[cfg(test)]
+mod caching_tests {
+    use super::*;
+    use std::sync::atomic::Ordering;
+    #[test]
+    fn recursive_validators_are_compiled_once_for_large_records() {
+        let _ = contract("submission"); // Initializes every contract and all recursive branches.
+        let compiled = COMPILATIONS.load(Ordering::Relaxed);
+        assert!(compiled > 5);
+        let values: serde_json::Map<String, Value> = (0..10_000)
+            .map(|i| (format!("field_{i}"), json!(true)))
+            .collect();
+        let mut input = json!({"submissionId":"large","action":"send","values":values});
+        for _ in 0..3 {
+            assert!(validate("submission", &input).is_ok());
+        }
+        input["values"]["field_0"] = json!("a".repeat(4001));
+        assert!(validate("submission", &input).is_err());
+        input["values"]["field_0"] = json!(["legal_id"]);
+        assert!(validate("submission", &input).is_ok());
+        input["values"]["field_0"] = json!(["illegal id"]);
+        assert!(validate("submission", &input).is_err());
+        input["values"]["field_0"] = json!({"unknown":true});
+        assert!(validate("submission", &input).is_err());
+        // Astral Unicode retains Zod code-point length behavior in union branches.
+        input["values"]["field_0"] = json!("😀".repeat(4000));
+        assert!(validate("submission", &input).is_ok());
+        input["values"]["field_0"] = json!("😀".repeat(4001));
+        assert!(validate("submission", &input).is_err());
+        assert_eq!(COMPILATIONS.load(Ordering::Relaxed), compiled);
+    }
 }

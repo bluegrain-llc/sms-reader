@@ -1,7 +1,7 @@
 use crate::{
     error::{Error, Result, ensure},
     http::Authentication,
-    model::{DAY, HISTORY, MINUTE, flag, hash, num, secret, text},
+    model::{DAY, HISTORY, MINUTE, flag, hash, hash_js, num, secret, text},
     relay::Relay,
     store::Query,
 };
@@ -61,7 +61,7 @@ impl Relay {
         }
         let uid = text(&attempt, "ownerId").to_owned();
         ensure(
-            !uid.is_empty() && hash(&uid) == id,
+            !uid.is_empty() && hash_js(&uid) == id,
             500,
             "invalid_legacy_deletion",
         )?;
@@ -114,7 +114,7 @@ impl Relay {
             .await?;
         let receipt = secret().replacen("smsr_", "smsd_", 1);
         let receipt_id = hash(&receipt);
-        let job_id = hash(&uid);
+        let job_id = hash_js(&uid);
         let expires_at = self.now() + DAY;
         let s = self.clone();
         let status = self

@@ -1,6 +1,6 @@
 use crate::{
     error::{Result, ensure},
-    model::{MINUTE, hash, num, text},
+    model::{MINUTE, hash_js, num, text},
     relay::Relay,
     store::Query,
 };
@@ -32,7 +32,7 @@ impl Relay {
                     }
                     let mut counters = Vec::with_capacity(scopes.len());
                     for (scope, limit) in scopes {
-                        let id = hash(&format!("{scope}:{window}"));
+                        let id = hash_js(&format!("{scope}:{window}"));
                         let count = num(&tx.get("accessRates", &id).await?, "count");
                         ensure(count < limit, 429, "poll_rate_limited")?;
                         counters.push((id, count));
@@ -59,8 +59,8 @@ impl Relay {
     ) -> Result<Value> {
         let id = Uuid::new_v4().to_string();
         let scopes = [
-            hash(&format!("owner:{uid}")),
-            hash(&format!("grant:{grant}")),
+            hash_js(&format!("owner:{uid}")),
+            hash_js(&format!("grant:{grant}")),
         ];
         let relay = self.clone();
         self.store
