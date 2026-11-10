@@ -26,6 +26,10 @@ impl Serialize for ExplicitNulls<'_> {
         serializer: S,
     ) -> std::result::Result<S::Ok, S::Error> {
         match self.0 {
+            Value::String(s) => serializer.serialize_str(
+                &crate::js_string::storage(s)
+                    .map_err(|_| serde::ser::Error::custom("invalid_utf16"))?,
+            ),
             Value::Null => firestore::serialize_as_null::serialize(&None::<Value>, serializer),
             Value::Array(values) => {
                 use serde::ser::SerializeSeq;
@@ -39,7 +43,9 @@ impl Serialize for ExplicitNulls<'_> {
                 use serde::ser::SerializeMap;
                 let mut map = serializer.serialize_map(Some(values.len()))?;
                 for (key, value) in values {
-                    map.serialize_entry(key, &ExplicitNulls(value))?;
+                    let key = crate::js_string::storage(key)
+                        .map_err(|_| serde::ser::Error::custom("invalid_utf16"))?;
+                    map.serialize_entry(&key, &ExplicitNulls(value))?;
                 }
                 map.end()
             }
@@ -66,7 +72,9 @@ impl Serialize for Document {
             self.fields.len() + usize::from(self.purge_at.is_some()),
         ))?;
         for (key, value) in &self.fields {
-            map.serialize_entry(key, &ExplicitNulls(value))?;
+            let key = crate::js_string::storage(key)
+                .map_err(|_| serde::ser::Error::custom("invalid_utf16"))?;
+            map.serialize_entry(&key, &ExplicitNulls(value))?;
         }
         if let Some(timestamp) = self.purge_at {
             map.serialize_entry("purgeAt", &TimestampValue(timestamp))?;
@@ -100,6 +108,7 @@ impl Document {
         if let Some(t) = self.purge_at {
             v["purgeAt"] = json!(t.as_millisecond());
         }
+        crate::js_string::encode_value(&mut v);
         v
     }
 }
@@ -202,7 +211,7 @@ async fn query(db: &FirestoreDb, q: Query) -> Result<Vec<Value>> {
     docs.into_iter()
         .map(|d| {
             let mut v = FirestoreDb::deserialize_doc_to::<Document>(&d)?.value();
-            v["__id"] = json!(d.name.rsplit('/').next().unwrap());
+            v["__id"] = json!(crate::js_string::encode(d.name.rsplit('/').next().unwrap()));
             Ok(v)
         })
         .collect()
@@ -213,7 +222,7 @@ async fn get(db: &FirestoreDb, c: &str, id: &str) -> Result<Value> {
         .select()
         .by_id_in(c)
         .obj::<Document>()
-        .one(id)
+        .one(&crate::js_string::utf8(id))
         .await?
         .map(Document::value)
         .unwrap_or(Value::Null))
@@ -308,8 +317,14 @@ impl Tx {
         if let Some(m) = v.as_object_mut() {
             m.remove("__id");
         }
-        self.writes
-            .update_object(c, id, &Document::from_value(v), None, None, vec![])?;
+        self.writes.update_object(
+            c,
+            crate::js_string::utf8(id),
+            &Document::from_value(v),
+            None,
+            None,
+            vec![],
+        )?;
         Ok(())
     }
     pub fn merge(&mut self, c: &str, id: &str, v: Value) -> Result<()> {
@@ -319,14 +334,20 @@ impl Tx {
             .keys()
             .map(|k| format!("`{}`", k.replace('`', "\\`")))
             .collect();
-        self.writes
-            .update_object(c, id, &Document::from_value(v), Some(keys), None, vec![])?;
+        self.writes.update_object(
+            c,
+            crate::js_string::utf8(id),
+            &Document::from_value(v),
+            Some(keys),
+            None,
+            vec![],
+        )?;
         Ok(())
     }
     pub fn create(&mut self, c: &str, id: &str, v: Value) -> Result<()> {
         self.writes.update_object(
             c,
-            id,
+            crate::js_string::utf8(id),
             &Document::from_value(v),
             None,
             Some(FirestoreWritePrecondition::Exists(false)),
@@ -335,7 +356,8 @@ impl Tx {
         Ok(())
     }
     pub fn delete(&mut self, c: &str, id: &str) -> Result<()> {
-        self.writes.delete_by_id(c, id, None)?;
+        self.writes
+            .delete_by_id(c, crate::js_string::utf8(id), None)?;
         Ok(())
     }
 }

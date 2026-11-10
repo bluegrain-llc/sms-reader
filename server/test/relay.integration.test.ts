@@ -541,6 +541,14 @@ integration('v2 REST, MCP, and SSE authenticate, replay from durable storage and
       body: JSON.stringify({ submissionId: 'wizard-via-rest', action: 'approve', values: { travel: false } }) })).status, 200);
     const wizardResult = await client.callTool({ name: 'get_request_result', arguments: { requestId: w.requestId } });
     assert.deepEqual(JSON.parse((wizardResult.content as { text: string }[])[0]!.text).result.values, { travel: false });
+    const tool = async (name: string, args: Record<string, unknown>) => {
+      const response = await client.callTool({ name, arguments: args }); assert.equal(response.isError, undefined);
+      return JSON.parse((response.content as { text: string }[])[0]!.text);
+    };
+    const pending = await tool('create_request', formInput('mcp-cancel-form'));
+    assert.equal((await tool('inspect_request', { requestId: pending.requestId })).status, 'pending');
+    assert.ok((await tool('poll_request_events', {})).events.some((event: { requestId: string }) => event.requestId === pending.requestId));
+    assert.equal((await tool('cancel_request', { requestId: pending.requestId })).status, 'cancelled');
     assert.equal((await fetch(base + '/internal/delivery', { method: 'POST', headers })).status, 401);
   } finally { await client.close(); await Promise.all([server, secondServer].map(s => new Promise<void>(resolve => s ? s.close(() => resolve()) : resolve()))); }
 });

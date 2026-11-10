@@ -41,6 +41,38 @@ pub fn parse(name: &str, input: Value) -> std::result::Result<Value, String> {
         ))
     }
 }
+pub fn envelope(input: &Value) -> Option<(u16, Value)> {
+    static PARSERS: OnceLock<Value> = OnceLock::new();
+    let parsers = PARSERS.get_or_init(|| {
+        serde_json::from_str(include_str!("../compat/tool-envelope.json")).unwrap()
+    });
+    if !check(&parsers["request"], Some(input), &[]).1.is_empty() {
+        return Some((
+            400,
+            json!({"jsonrpc":"2.0","error":{"code":-32700,"message":"Parse error: Invalid JSON-RPC message"},"id":null}),
+        ));
+    }
+    if input["method"] != "tools/call" {
+        return None;
+    }
+    let error = if input["params"]["task"].is_object()
+        && check(&parsers["task"], input.get("params"), &[])
+            .1
+            .is_empty()
+    {
+        Some(
+            json!({"code":-32603,"message":"Server does not support task creation (required for tools/call)"}),
+        )
+    } else {
+        let (_, issues) = check(&parsers["call"], Some(input), &[]);
+        if issues.is_empty() {
+            None
+        } else {
+            Some(json!({"code":-32603,"message":serde_json::to_string_pretty(&issues).unwrap()}))
+        }
+    };
+    error.map(|error| (200, json!({"jsonrpc":"2.0","id":input["id"],"error":error})))
+}
 fn issue(mut value: Value, path: &[Value], message: String) -> Value {
     value["path"] = json!(path);
     value["message"] = json!(message);
@@ -65,6 +97,7 @@ fn child_path(path: &[Value], key: Value) -> Vec<Value> {
 fn check(s: &Value, v: Option<&Value>, path: &[Value]) -> (Value, Vec<Value>) {
     let kind = text(s, "type");
     match kind {
+        "unknown" | "any" => return (v.cloned().unwrap_or(Value::Null), vec![]),
         "optional" if v.is_none() => return (Value::Null, vec![]),
         "optional" => return check(&s["inner"], v, path),
         "default" if v.is_none() => return (s["default"].clone(), vec![]),
@@ -72,6 +105,16 @@ fn check(s: &Value, v: Option<&Value>, path: &[Value]) -> (Value, Vec<Value>) {
         "union" => {
             let options = s["options"].as_array().unwrap();
             if let Some(d) = s["discriminator"].as_str() {
+                if !v.is_some_and(Value::is_object) {
+                    return (
+                        Value::Null,
+                        vec![issue(
+                            json!({"expected":"object","code":"invalid_type"}),
+                            path,
+                            format!("Invalid input: expected object, received {}", received(v)),
+                        )],
+                    );
+                }
                 let tag = v.and_then(|v| v.get(d));
                 if let Some(option) = options.iter().find(|o| {
                     o["shape"][d]["values"]
@@ -137,7 +180,7 @@ fn check(s: &Value, v: Option<&Value>, path: &[Value]) -> (Value, Vec<Value>) {
         }
         _ => {}
     }
-    if received(v) != kind {
+    if received(v) != if kind == "record" { "object" } else { kind } {
         return (
             Value::Null,
             vec![issue(
@@ -149,7 +192,15 @@ fn check(s: &Value, v: Option<&Value>, path: &[Value]) -> (Value, Vec<Value>) {
     }
     let mut out = v.unwrap().clone();
     let mut errors = vec![];
-    if kind == "object" {
+    if kind == "record" {
+        for (key, value) in out.as_object_mut().unwrap() {
+            let (_, e) = check(&s["key"], Some(&json!(key)), &child_path(path, json!(key)));
+            errors.extend(e);
+            let (parsed, e) = check(&s["value"], Some(value), &child_path(path, json!(key)));
+            *value = parsed;
+            errors.extend(e);
+        }
+    } else if kind == "object" {
         let mut result = serde_json::Map::new();
         let object = out.as_object().unwrap();
         for (key, schema) in s["shape"].as_object().unwrap() {
@@ -173,7 +224,7 @@ fn check(s: &Value, v: Option<&Value>, path: &[Value]) -> (Value, Vec<Value>) {
                     "Unrecognized key{suffix}: {}",
                     unknown
                         .iter()
-                        .map(|s| json!(s).to_string())
+                        .map(|s| crate::js_string::encode(&crate::js_string::quote(s)))
                         .collect::<Vec<_>>()
                         .join(", ")
                 ),
@@ -236,7 +287,7 @@ fn check(s: &Value, v: Option<&Value>, path: &[Value]) -> (Value, Vec<Value>) {
                     &c["value"]
                 };
                 let n = if kind == "string" {
-                    out.as_str().unwrap().chars().count() as f64
+                    crate::js_string::count(out.as_str().unwrap()) as f64
                 } else if kind == "array" {
                     out.as_array().unwrap().len() as f64
                 } else {

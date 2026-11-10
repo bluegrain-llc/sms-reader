@@ -31,7 +31,7 @@ struct Keys {
 #[derive(Clone)]
 pub struct Identity {
     pub uid: String,
-    pub auth_time: i64,
+    pub auth_time: f64,
 }
 impl Google {
     pub fn new(project: String) -> Self {
@@ -169,7 +169,7 @@ impl Google {
         let uid = text(&claims, "sub");
         ensure(
             !uid.is_empty()
-                && js_len(uid) <= 128
+                && uid.encode_utf16().count() <= 128
                 && claims["aud"] == self.project
                 && claims["iss"] == format!("https://securetoken.google.com/{}", self.project)
                 && num(&claims, "exp") > now() / 1000
@@ -204,7 +204,7 @@ impl Google {
         )?;
         Ok(Identity {
             uid: uid.into(),
-            auth_time: num(&claims, "auth_time"),
+            auth_time: num(&claims, "auth_time") as f64,
         })
     }
     pub async fn delete_identity(&self, uid: &str) -> Result<()> {
@@ -244,7 +244,7 @@ impl Delivery for Google {
             if form {
                 data["kind"] = json!("form");
             }
-            self.api(format!("https://fcm.googleapis.com/v1/projects/{}/messages:send",self.project),json!({"message":{"token":token,"data":data,"android":{"priority":"HIGH","ttl":format!("{}.{:03}s",ttl.max(0)/1000,ttl.max(0)%1000),"collapse_key":id}}}),false).await?;
+            self.api(format!("https://fcm.googleapis.com/v1/projects/{}/messages:send",self.project),json!({"message":{"token":crate::js_string::utf8(token),"data":data,"android":{"priority":"HIGH","ttl":format!("{}.{:03}s",ttl.max(0)/1000,ttl.max(0)%1000),"collapse_key":id}}}),false).await?;
             Ok(())
         })
     }

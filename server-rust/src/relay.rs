@@ -468,7 +468,7 @@ impl Relay {
         self.advance(&uid).await?;
         let s = self.clone();
         self.store.tx(move|tx|{let(s,secret,input)=(s.clone(),secret.clone(),input.clone());Box::pin(async move{
- let(g,a)=s.agent(tx,&secret).await?;let id=hash(&format!("{}:{}",text(&g,"id"),text(&input,"idempotencyKey")));let fp=sms_fingerprint(&input);let mut old=tx.get("requests",&id).await?;let ds=s.devices(tx,text(&g,"ownerId")).await?;
+ let(g,a)=s.agent(tx,&secret).await?;let id=hash(&crate::js_string::utf8(&format!("{}:{}",text(&g,"id"),text(&input,"idempotencyKey"))));let fp=sms_fingerprint(&input);let mut old=tx.get("requests",&id).await?;let ds=s.devices(tx,text(&g,"ownerId")).await?;
  if !old.is_null(){ensure(text(&old,"fingerprint")==fp,409,"idempotency_conflict")?;s.expire(tx,&mut old,&a,true,&ds)?;return Ok(view(&old));}
  ensure(!ds.is_empty(),409,"devices_unavailable")?;let mut queue=arr(&a,"queueIds");ensure(queue.len()<20,429,"queue_full")?;
  let owner_rate=bump(&rate(&a,"rate",s.now()),s.now(),5)?;let grant_rate=bump(&g["rate"],s.now(),3)?;

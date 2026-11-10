@@ -93,7 +93,9 @@ impl ServerHandler for Mcp {
         .await;
         let result = match result {
             Ok(v) => {
-                let mut out = CallToolResult::success(vec![ContentBlock::text(js_json(&v, false))]);
+                let mut out = CallToolResult::success(vec![ContentBlock::text(
+                    crate::js_string::encode(&js_json(&v, false)),
+                )]);
                 out.structured_content = Some(v);
                 out.is_error = None;
                 out.result_type = None;
@@ -118,11 +120,17 @@ pub async fn handle(
     relay: Relay,
     secret: String,
     request: axum::extract::Request,
+    envelope: Value,
 ) -> axum::response::Response {
     use rmcp::transport::streamable_http_server::{
         StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
     };
     use tower::ServiceExt;
+    if envelope.get("id").is_some()
+        && let Some((status, error)) = crate::mcp_input::envelope(&envelope)
+    {
+        return crate::http::json_response(error, status);
+    }
     let service = StreamableHttpService::new(
         move || {
             Ok(Mcp {
@@ -134,10 +142,20 @@ pub async fn handle(
         StreamableHttpServerConfig::default()
             .with_legacy_session_mode(false)
             .with_json_response(true)
-            .with_max_request_body_bytes(256 * 1024)
+            .with_max_request_body_bytes(
+                (256 * 1024).max(serde_json::to_vec(&envelope).unwrap().len()),
+            )
             .disable_allowed_hosts()
             .disable_allowed_origins(),
     );
     let response = service.oneshot(request).await.unwrap();
-    response.map(axum::body::Body::new)
+    let (mut parts, body) = response.into_parts();
+    let bytes = axum::body::to_bytes(axum::body::Body::new(body), usize::MAX)
+        .await
+        .unwrap();
+    let body = serde_json::from_slice::<Value>(&bytes)
+        .map(|v| js_json(&v, false).into_bytes())
+        .unwrap_or_else(|_| bytes.to_vec());
+    parts.headers.remove(axum::http::header::CONTENT_LENGTH);
+    axum::response::Response::from_parts(parts, axum::body::Body::from(body))
 }

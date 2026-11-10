@@ -5,6 +5,7 @@ pub mod forms;
 pub mod forms_model;
 pub mod google;
 pub mod http;
+pub mod js_string;
 pub mod mcp;
 mod mcp_input;
 pub mod model;

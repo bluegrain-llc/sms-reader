@@ -54,7 +54,7 @@ pub fn js_whitespace(c: char) -> bool {
     matches!(c, '\u{0009}'..='\u{000d}'|'\u{0020}'|'\u{00a0}'|'\u{1680}'|'\u{2000}'..='\u{200a}'|'\u{2028}'|'\u{2029}'|'\u{202f}'|'\u{205f}'|'\u{3000}'|'\u{feff}')
 }
 pub fn js_len(s: &str) -> usize {
-    s.encode_utf16().count()
+    crate::js_string::units(s).len()
 }
 pub fn id(s: &str) -> Result<()> {
     ensure(
@@ -96,7 +96,7 @@ pub fn string(v: &Value, k: &str, min: usize, max: usize, trim: bool) -> Result<
         s
     };
     ensure(
-        (min..=max).contains(&s.chars().count()),
+        (min..=max).contains(&crate::js_string::count(s)),
         400,
         "invalid_input",
     )?;
@@ -165,7 +165,7 @@ pub fn js_json(v: &Value, canonical: bool) -> String {
     match v {
         Value::Null => "null".into(),
         Value::Bool(b) => b.to_string(),
-        Value::String(s) => serde_json::to_string(s).unwrap(),
+        Value::String(s) => crate::js_string::quote(s),
         Value::Number(n) => ryu_js::Buffer::new().format(n.as_f64().unwrap()).to_owned(),
         Value::Array(a) => format!(
             "[{}]",
@@ -182,7 +182,7 @@ pub fn js_json(v: &Value, canonical: bool) -> String {
             };
             let mut keys = m.keys().collect::<Vec<_>>();
             if canonical {
-                keys.sort_by(|a, b| a.encode_utf16().cmp(b.encode_utf16()));
+                keys.sort_by_key(|a| crate::js_string::units(a));
             }
             keys.sort_by_key(|k| index(k).map(|n| (0, n)).unwrap_or((1, 0)));
             format!(
@@ -190,7 +190,7 @@ pub fn js_json(v: &Value, canonical: bool) -> String {
                 keys.iter()
                     .map(|k| format!(
                         "{}:{}",
-                        serde_json::to_string(k).unwrap(),
+                        crate::js_string::quote(k),
                         js_json(&m[*k], canonical)
                     ))
                     .collect::<Vec<_>>()

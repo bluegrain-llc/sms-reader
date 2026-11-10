@@ -7,6 +7,7 @@ import { z } from 'zod';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { getParseErrorMessage } from '@modelcontextprotocol/sdk/server/zod-compat.js';
+import { CallToolRequestSchema, TaskAugmentedRequestParamsSchema, JSONRPCRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { app } from '../server/src/http.js';
 import type { Relay } from '../server/src/relay.js';
 import { requestSchema, idSchema } from '../server/src/model.js';
@@ -27,6 +28,8 @@ function toolParser(schema: z.ZodType): unknown {
   if (d.innerType) out.inner = toolParser(d.innerType);
   if (d.type === 'default') out.default = d.defaultValue;
   if (d.element) out.element = toolParser(d.element);
+  if (d.keyType) out.key = toolParser(d.keyType);
+  if (d.valueType) out.value = toolParser(d.valueType);
   if (d.options) out.options = d.options.map(toolParser);
   if (d.discriminator) out.discriminator = d.discriminator;
   if (d.values) out.values = d.values;
@@ -39,12 +42,13 @@ const toolSchemas = { request_sms_code: z.object(requestSchema.shape), create_re
   poll_request_events: z.object({ cursor: z.string().max(128).optional() }),
 };
 save('tool-parsers.json', Object.fromEntries(Object.entries(toolSchemas).map(([name, schema]) => [name, toolParser(schema)])));
+save('tool-envelope.json', { call: toolParser(CallToolRequestSchema), task: toolParser(TaskAugmentedRequestParamsSchema), request: toolParser(JSONRPCRequestSchema) });
 const basicForm = { title: ' Test ', body: 'Body', idempotencyKey: 'tool-input', actions: [{ id: 'ok', label: ' OK ', type: 'submit' }] };
 const toolCases: { name: keyof typeof toolSchemas; input: unknown }[] = [
   ...[{}, { requestId: 1 }, { requestId: '?' }, { requestId: 'valid', extra: true }].map(input => ({ name: 'get_sms_code_request' as const, input })),
   ...[{ purpose: '  ', idempotencyKey: 'short' }, { purpose: ' Text ', idempotencyKey: 'valid-key', extra: true }].map(input => ({ name: 'request_sms_code' as const, input })),
   ...[basicForm, { ...basicForm, expiresInSeconds: 1.1 }, { ...basicForm, expiresInSeconds: 1e20 }, { ...basicForm, expiresInSeconds: 1 },
-    { ...basicForm, actions: [] }, { ...basicForm, fields: [{ type: 'invalid' }] },
+    { ...basicForm, actions: [] }, { ...basicForm, fields: [{ type: 'invalid' }] }, { ...basicForm, fields: [null] },
     { ...basicForm, fields: [{ id: 'f', label: ' F ', type: 'text', extra: 1 }] },
     { ...basicForm, steps: [{ id: 'one', title: 'One', fieldIds: [], when: { fieldId: 'f', equals: null } }] },
   ].map(input => ({ name: 'create_request' as const, input })),
@@ -72,6 +76,10 @@ const canonical = (v: unknown) => JSON.stringify(v, (_key, value) => value && ty
 const inputs: unknown[] = [null, ['Sign in', null], ['Sign in', null, 'Title'], { é: '😀', z: 1.0, '10': 1e-7, '2': 1e21, '01': 1e-6, '4294967294': -0, '4294967295': 1.2345678901234567 }, [1e-7, 1e-6, 1e20, 1e21, -0, 333333333.3333333], { a: null }, {}];
 inputs.push(formSchema.parse({ title: '  Test  ', body: 'Body', idempotencyKey: 'hash-fixture', fields: [{ id: 'code', type: 'text', label: ' Code ', input: 'sms_code' }], actions: [{ id: 'yes', type: 'submit', label: ' Yes ' }] }));
 save('hashes.json', inputs.flatMap(input => [false, true].map(sorted => { const text = sorted ? canonical(input) : JSON.stringify(input); return { input, canonical: sorted, json: text, hash: createHash('sha256').update(text).digest('hex') }; })));
+save('js-strings.json', ['\ud800', '\udfff', '\ud800\ud800', '😀', '\u{f0000}\ue000', '\\ud800'].map(input => ({
+  input, json: JSON.stringify(input), units: input.length, points: Array.from(input).length,
+  utf8: Buffer.from(input).toString('utf8'), jsonHash: createHash('sha256').update(JSON.stringify(input)).digest('hex'),
+})));
 const source = readFileSync(new URL('server/src/http.ts', root), 'utf8');
 const start = source.indexOf('<!doctype html>'), end = source.indexOf('`);', start);
 if (start < 0 || end < 0) throw Error('Pairing HTML source moved; update its capture');

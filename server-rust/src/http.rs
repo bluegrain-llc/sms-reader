@@ -67,11 +67,14 @@ pub fn bearer(h: &HeaderMap) -> Result<String> {
 impl App {
     async fn owner(&self, h: &HeaderMap) -> Result<Identity> {
         let token = bearer(h).map_err(|_| Error::Api(401, "invalid_owner_session"))?;
-        self.options
+        let mut identity = self
+            .options
             .auth
             .owner(&token)
             .await
-            .map_err(|_| Error::Api(401, "invalid_owner_session"))
+            .map_err(|_| Error::Api(401, "invalid_owner_session"))?;
+        identity.uid = crate::js_string::encode(&identity.uid);
+        Ok(identity)
     }
 }
 async fn common(State(s): State<App>, mut request: Request, next: Next) -> Response {
@@ -105,7 +108,7 @@ async fn handle(State(s): State<App>, request: Request) -> Response {
         Err(e) => e.into_response(),
     }
 }
-fn json_response(v: Value, status: u16) -> Response {
+pub(crate) fn json_response(v: Value, status: u16) -> Response {
     (
         StatusCode::from_u16(status).unwrap(),
         [("Content-Type", "application/json; charset=utf-8")],
@@ -264,7 +267,7 @@ async fn route(s: App, request: Request) -> Result<Response> {
     };
     let mut input = Value::Null;
     if is_json && !bytes.is_empty() {
-        input = serde_json::from_slice(&bytes).map_err(|_| Error::Api(400, "invalid_input"))?;
+        input = crate::js_string::parse(&bytes).map_err(|_| Error::Api(400, "invalid_input"))?;
         js_numbers(&mut input);
         ensure(input.is_object() || input.is_array(), 400, "invalid_input")?;
     }
@@ -300,7 +303,9 @@ async fn route(s: App, request: Request) -> Result<Response> {
         let value =
             query_value("cursor")?.or_else(|| header(&headers, "Last-Event-ID").map(str::to_owned));
         ensure(
-            value.as_ref().is_none_or(|v| v.chars().count() <= 128),
+            value
+                .as_ref()
+                .is_none_or(|v| crate::js_string::count(v) <= 128),
             400,
             "invalid_input",
         )?;
@@ -437,12 +442,15 @@ async fn route(s: App, request: Request) -> Result<Response> {
         ("DELETE", ["v1", "account"]) => {
             let identity = s.owner(&headers).await?;
             ensure(
-                now() / 1000 - identity.auth_time < 300,
+                now() as f64 / 1000.0 - identity.auth_time < 300.0,
                 401,
                 "recent_sign_in_required",
             )?;
             r.delete_account(identity.uid.clone()).await?;
-            s.options.auth.delete(&identity.uid).await?;
+            s.options
+                .auth
+                .delete(&crate::js_string::utf8(&identity.uid))
+                .await?;
             json!({"ok":true})
         }
         ("GET", ["v1", "history"]) => r.history(s.owner(&headers).await?.uid, None).await?,
@@ -561,8 +569,9 @@ async fn route(s: App, request: Request) -> Result<Response> {
         ("POST", ["mcp"]) => {
             let secret = bearer(&headers)?;
             r.check_agent(&secret).await?;
-            let request = Request::from_parts(parts, Body::from(js_json(&input, false)));
-            return Ok(crate::mcp::handle(r.clone(), secret, request).await);
+            let request =
+                Request::from_parts(parts, Body::from(serde_json::to_vec(&input).unwrap()));
+            return Ok(crate::mcp::handle(r.clone(), secret, request, input).await);
         }
         (_, ["mcp"]) => return Err(Error::Api(405, "method_not_allowed")),
         _ => return Err(Error::Api(404, "not_found")),

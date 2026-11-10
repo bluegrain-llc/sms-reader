@@ -171,7 +171,7 @@ impl Relay {
         let definition = definition(raw)?;
         let s = self.clone();
         let result=self.store.tx(move|tx|{let(s,secret,def)=(s.clone(),secret.clone(),definition.clone());Box::pin(async move{
- let(mut g,a)=s.form_agent(tx,&secret).await?;let id=hash(&format!("v2:{}:{}",text(&g,"id"),text(&def,"idempotencyKey")));let fp=hash(&js_json(&def,true));let mut old=tx.get("formRequests",&id).await?;
+ let(mut g,a)=s.form_agent(tx,&secret).await?;let id=hash(&crate::js_string::utf8(&format!("v2:{}:{}",text(&g,"id"),text(&def,"idempotencyKey"))));let fp=hash(&js_json(&def,true));let mut old=tx.get("formRequests",&id).await?;
  if !old.is_null(){ensure(num(&old,"purgeAt")>s.now(),410,"request_retention_ended")?;ensure(text(&old,"fingerprint")==fp,409,"idempotency_conflict")?;s.form_expire(tx,&mut old,&mut g,true).await?;return Ok(form_view(&old));}
  let ds=s.devices(tx,text(&g,"ownerId")).await?.into_iter().filter(|d|def.get("steps").is_none()||d["wizardVersion"]==1).collect::<Vec<_>>();let pending=tx.query(Query::new("formRequests").eq("ownerId",g["ownerId"].clone()).eq("status","pending").limit(101)).await?;
  ensure(!ds.is_empty(),409,if def.get("steps").is_some(){"wizard_devices_unavailable"}else{"devices_unavailable"})?;ensure(pending.len()<100,429,"inbox_full")?;let gr=bump(&rate(&g,"formRate",s.now()),s.now(),30)?;let ar=bump(&rate(&a,"formRate",s.now()),s.now(),100)?;

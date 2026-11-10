@@ -173,6 +173,25 @@
         }
       ],
       "fields": [
+        null
+      ]
+    },
+    "error": "MCP error -32602: Input validation error: Invalid arguments for tool create_request: Invalid input: expected object, received null at fields[0]"
+  },
+  {
+    "name": "create_request",
+    "input": {
+      "title": " Test ",
+      "body": "Body",
+      "idempotencyKey": "tool-input",
+      "actions": [
+        {
+          "id": "ok",
+          "label": " OK ",
+          "type": "submit"
+        }
+      ],
+      "fields": [
         {
           "id": "f",
           "label": " F ",

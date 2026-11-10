@@ -98,6 +98,7 @@ test('HTTP errors, body bounds, auth ordering, headers and protocol negotiation 
       { path: '/internal/delivery', method: 'POST' }, { path: '/internal/maintenance', method: 'POST' },
       { path: '/v2/requests/nope', headers: { authorization: `Bearer ${token}` } },
       { path: '/v1/devices/nope', method: 'PATCH', headers: { 'content-type': 'application/json' }, body: '{"paused":"yes"}' },
+      { path: '/v1/requests', method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer bad' }, body: '{"purpose":"\\ud800","idempotencyKey":"surrogate-invalid-token"}' },
       { path: `/v1/grants/${grantId}&ignored`, method: 'DELETE', headers: { authorization: 'Bearer owner-session' } },
       ...['POLL', 'REVIEW', 'DECISION'].map(operation => ({ path: `/v1/connections/${operation}`, method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })),
       ...[gzipSync, deflateSync, brotliCompressSync].map((compress, i) => ({ path: '/v1/requests', method: 'POST', headers: { 'content-type': 'application/json', 'content-encoding': ['gzip', 'deflate', 'br'][i]!, authorization: `Bearer ${token}` }, body: compress(Buffer.from('{"purpose":"Compressed","idempotencyKey":"encoded-body"}')) })),
@@ -120,6 +121,7 @@ test('HTTP errors, body bounds, auth ordering, headers and protocol negotiation 
       ['get_sms_code_request', {}], ['get_sms_code_request', { requestId: 1 }], ['get_sms_code_request', { requestId: '?' }],
       ['request_sms_code', { purpose: '   ', idempotencyKey: 'short' }], ['request_sms_code', { purpose: 'MCP extras', idempotencyKey: 'mcp-extras', ignored: true }],
       ['create_request', { ...form('mcp-extra-form'), ignored: true }], ['create_request', { ...form('mcp-invalid-form'), fields: [{ type: 'invalid' }] }],
+      ['create_request', { ...form('mcp-null-field'), fields: [null] }],
       ['poll_request_events', { cursor: 'x'.repeat(129) }], ['not_a_tool', {}],
     ] as const) {
       const responses = await Promise.all(bases.map(async base => {
@@ -128,6 +130,25 @@ test('HTTP errors, body bounds, auth ordering, headers and protocol negotiation 
       }));
       assert.deepEqual(responses[1], responses[0], `${name} ${JSON.stringify(args)}`);
     }
+    for (const params of [
+      { name: 'request_sms_code', arguments: { purpose: 'Task', idempotencyKey: 'task-envelope' }, task: { ttl: 60000 } },
+      { name: 'poll_request_events', arguments: null },
+      { name: 'poll_request_events', arguments: [] }, { name: 'poll_request_events', task: null },
+      { name: 'poll_request_events', task: { ttl: 'bad' } }, { name: 1, arguments: {} },
+      { name: 'poll_request_events', _meta: false },
+      { name: 'request_sms_code', arguments: { purpose: 'Surrogate', idempotencyKey: 'surrogate-ignored', ignored: '\ud800' } },
+    ]) {
+      const responses = await Promise.all(bases.map(async base => {
+        const response = await fetch(base + '/mcp', { method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream', authorization: `Bearer ${token}` }, body: JSON.stringify({ jsonrpc: '2.0', id: 3, method: 'tools/call', params }), signal: AbortSignal.timeout(15_000) });
+        return response.json();
+      }));
+      assert.deepEqual(responses[1], responses[0], JSON.stringify(params));
+    }
+    const deletes = await Promise.all(bases.map(async base => {
+      const response = await fetch(base + '/v1/account', { method: 'DELETE', headers: { authorization: 'Bearer owner-session' }, signal: AbortSignal.timeout(15_000) });
+      return { status: response.status, body: await response.json() };
+    }));
+    assert.deepEqual(deletes[1], deletes[0]); assert.equal(deletes[0]!.status, 200);
   } finally { await Promise.all(servers.map(server => new Promise<void>(resolve => server.close(() => resolve())))); }
 });
 
@@ -182,4 +203,37 @@ test('native Firebase verifier checks Google provider, disabled/deleted users an
   await assert.rejects(verify(idToken));
   await auth.deleteUser(localId);
   await assert.rejects(verify(idToken));
+});
+
+test('isolated UTF-16 JSON and literal marker characters preserve storage and wire behavior', { timeout: 60_000 }, async () => {
+  await ts.register(uid, did, 'Phone', 'synthetic-fcm');
+  const { token, grantId } = await ts.createGrant(uid, did, 'Caller', 30);
+  await ts.forms.approve(uid, grantId, true);
+  const servers = [app(ts, options).listen(0, '127.0.0.1'), rustApp(rust, options).listen()];
+  try {
+    await Promise.all(servers.map(server => once(server, 'listening')));
+    const bases = servers.map(server => `http://127.0.0.1:${(server.address() as { port: number }).port}`);
+    for (const base of bases) {
+      const response = await fetch(base + '/v2/requests', { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: JSON.stringify({ title: '\ud800', body: 'Body', idempotencyKey: 'isolated-storage', actions: [{ id: 'ok', label: 'OK', type: 'submit' }] }), signal: AbortSignal.timeout(15_000) });
+      assert.equal(response.status, 500); assert.deepEqual(await response.json(), { error: 'internal_error' });
+    }
+    for (const [i, base] of bases.entries()) {
+      const body = JSON.stringify({ title: 'Unicode', body: '\u{f0000}\ue000', idempotencyKey: `unicode-form-${i}`, actions: [{ id: 'ok', label: 'OK', type: 'submit' }] });
+      const post = async (target: string) => {
+        const response = await fetch(target + '/v2/requests', { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body, signal: AbortSignal.timeout(15_000) });
+        assert.equal(response.status, 201, await response.clone().text()); return response.json() as Promise<any>;
+      };
+      const first = await post(base); assert.equal(first.title, 'Unicode'); assert.equal(first.body, '\u{f0000}\ue000');
+      const replay = await post(bases[1 - i]!); assert.equal(replay.requestId, first.requestId); assert.equal(replay.title, 'Unicode'); assert.equal(replay.body, first.body);
+      const inspections = await Promise.all(bases.map(async target => {
+        const response = await fetch(target + '/mcp', { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', accept: 'application/json, text/event-stream' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'inspect_request', arguments: { requestId: first.requestId } } }), signal: AbortSignal.timeout(15_000) });
+        return response.json();
+      }));
+      for (const inspection of inspections as any[]) {
+        assert.deepEqual(JSON.parse(inspection.result.content[0].text), inspection.result.structuredContent);
+        inspection.result.content[0].text = JSON.parse(inspection.result.content[0].text);
+      }
+      assert.deepEqual(inspections[1], inspections[0]);
+    }
+  } finally { await Promise.all(servers.map(server => new Promise<void>(resolve => server.close(() => resolve())))); }
 });

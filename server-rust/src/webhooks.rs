@@ -36,7 +36,8 @@ pub fn public_address(ip: IpAddr) -> bool {
         .any(|n| n.contains(&ip))
 }
 pub async fn destination(raw: &str) -> Result<(url::Url, SocketAddr)> {
-    let url = url::Url::parse(raw).map_err(|_| Error::Api(400, "invalid_webhook_url"))?;
+    let url = url::Url::parse(&crate::js_string::utf8(raw))
+        .map_err(|_| Error::Api(400, "invalid_webhook_url"))?;
     ensure(
         url.scheme() == "https"
             && url.username().is_empty()

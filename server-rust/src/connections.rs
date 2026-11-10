@@ -6,7 +6,7 @@ use crate::{
 use rand::RngCore;
 use serde_json::{Value, json};
 pub fn user_code(s: &str) -> Result<String> {
-    ensure(s.chars().count() <= 32, 400, "invalid_input")?;
+    ensure(crate::js_string::count(s) <= 32, 400, "invalid_input")?;
     let code = s.to_uppercase().replace([' ', '-'], "");
     ensure(
         code.len() == 10

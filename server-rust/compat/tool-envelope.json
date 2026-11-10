@@ -1,0 +1,237 @@
+{
+  "call": {
+    "type": "object",
+    "shape": {
+      "method": {
+        "type": "literal",
+        "values": [
+          "tools/call"
+        ]
+      },
+      "params": {
+        "type": "object",
+        "shape": {
+          "_meta": {
+            "type": "optional",
+            "inner": {
+              "type": "object",
+              "shape": {
+                "progressToken": {
+                  "type": "optional",
+                  "inner": {
+                    "type": "union",
+                    "options": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "number",
+                        "checks": [
+                          {
+                            "type": "number",
+                            "check": "number_format",
+                            "abort": false,
+                            "format": "safeint"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                },
+                "io.modelcontextprotocol/related-task": {
+                  "type": "optional",
+                  "inner": {
+                    "type": "object",
+                    "shape": {
+                      "taskId": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                }
+              },
+              "strict": false
+            }
+          },
+          "task": {
+            "type": "optional",
+            "inner": {
+              "type": "object",
+              "shape": {
+                "ttl": {
+                  "type": "optional",
+                  "inner": {
+                    "type": "number",
+                    "checks": []
+                  }
+                }
+              }
+            }
+          },
+          "name": {
+            "type": "string"
+          },
+          "arguments": {
+            "type": "optional",
+            "inner": {
+              "type": "record",
+              "key": {
+                "type": "string"
+              },
+              "value": {
+                "type": "unknown"
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "task": {
+    "type": "object",
+    "shape": {
+      "_meta": {
+        "type": "optional",
+        "inner": {
+          "type": "object",
+          "shape": {
+            "progressToken": {
+              "type": "optional",
+              "inner": {
+                "type": "union",
+                "options": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "number",
+                    "checks": [
+                      {
+                        "type": "number",
+                        "check": "number_format",
+                        "abort": false,
+                        "format": "safeint"
+                      }
+                    ]
+                  }
+                ]
+              }
+            },
+            "io.modelcontextprotocol/related-task": {
+              "type": "optional",
+              "inner": {
+                "type": "object",
+                "shape": {
+                  "taskId": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          },
+          "strict": false
+        }
+      },
+      "task": {
+        "type": "optional",
+        "inner": {
+          "type": "object",
+          "shape": {
+            "ttl": {
+              "type": "optional",
+              "inner": {
+                "type": "number",
+                "checks": []
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "request": {
+    "type": "object",
+    "shape": {
+      "jsonrpc": {
+        "type": "literal",
+        "values": [
+          "2.0"
+        ]
+      },
+      "id": {
+        "type": "union",
+        "options": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "number",
+            "checks": [
+              {
+                "type": "number",
+                "check": "number_format",
+                "abort": false,
+                "format": "safeint"
+              }
+            ]
+          }
+        ]
+      },
+      "method": {
+        "type": "string"
+      },
+      "params": {
+        "type": "optional",
+        "inner": {
+          "type": "object",
+          "shape": {
+            "_meta": {
+              "type": "optional",
+              "inner": {
+                "type": "object",
+                "shape": {
+                  "progressToken": {
+                    "type": "optional",
+                    "inner": {
+                      "type": "union",
+                      "options": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "number",
+                          "checks": [
+                            {
+                              "type": "number",
+                              "check": "number_format",
+                              "abort": false,
+                              "format": "safeint"
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  },
+                  "io.modelcontextprotocol/related-task": {
+                    "type": "optional",
+                    "inner": {
+                      "type": "object",
+                      "shape": {
+                        "taskId": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  }
+                },
+                "strict": false
+              }
+            }
+          },
+          "strict": false
+        }
+      }
+    },
+    "strict": true
+  }
+}
