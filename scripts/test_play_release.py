@@ -36,7 +36,7 @@ class GateTest(unittest.TestCase):
             with zipfile.ZipFile(path, "w") as archive:
                 archive.writestr("fixture.txt", "synthetic artifact")
             self.record["artifacts"][kind] = {"path": path.name, "sha256": gate.sha256(path)}
-        evidence = {"result": "passed", "commit": self.record["commit"], "aabSha256": self.record["artifacts"]["aab"]["sha256"], "apkSha256": self.record["artifacts"]["playApk"]["sha256"], "splitSha256": [], "reviewCycles": [{"head": str(index) * 40, "findingsAddressed": True} for index in range(5)], "checks": {name: True for name in gate.RECOVERY_CHECKS}}
+        evidence = {"result": "passed", "commit": self.record["commit"], "aabSha256": self.record["artifacts"]["aab"]["sha256"], "apkSha256": self.record["artifacts"]["playApk"]["sha256"], "splitSha256": [], "reviewCycles": [{"head": str(index) * 40, "findingsAddressed": True} for index in range(5)], "checks": {name: True for name in (*gate.RECOVERY_CHECKS, *gate.CLOUD_CHECKS)}}
         for label in gate.EVIDENCE:
             path = self.base / (label + ".json")
             path.write_text(json.dumps(evidence))
@@ -123,6 +123,15 @@ class GateTest(unittest.TestCase):
                 path.write_text(json.dumps({**complete, "checks": checks}))
                 self.record["evidence"]["capacityCostRestore"]["sha256"] = gate.sha256(path)
                 self.assertIn("capacityCostRestore: capacity, backup, ledger and live restore checks incomplete", self.check()["blockers"])
+
+    def test_cloud_baseline_alone_cannot_satisfy_fault_acceptance(self):
+        path = self.base / "cloudAcceptance.json"
+        complete = json.loads(path.read_text())
+        for checks in ({"baseline": True}, None, *({**complete["checks"], name: False} for name in gate.CLOUD_CHECKS)):
+            with self.subTest(checks=checks):
+                path.write_text(json.dumps({**complete, "checks": checks}))
+                self.record["evidence"]["cloudAcceptance"]["sha256"] = gate.sha256(path)
+                self.assertIn("cloudAcceptance: baseline, fault drills and cleanup incomplete", self.check()["blockers"])
 
     def test_new_personal_account_requires_fourteen_days_and_twelve_testers(self):
         self.record["cohort"].update(startedAt=(NOW - timedelta(days=7)).isoformat(), continuousTesters=11)
@@ -245,6 +254,15 @@ class GateTest(unittest.TestCase):
                 raise FileNotFoundError()
             return self.tools(args)
         self.assertIn("live GitHub prerequisite/CI verification failed", self.check(run=run)["blockers"])
+
+    def test_staging_callback_container_check_is_required(self):
+        def run(args):
+            output = self.tools(args)
+            if args[:2] == ["gh", "api"]:
+                return "\n".join(line for line in output.splitlines()
+                                 if json.loads(line)["name"] != "Staging callback probe container")
+            return output
+        self.assertIn("required CI checks missing on candidate commit", self.check(run=run)["blockers"])
 
     def test_url_200_with_pilot_or_unconfigured_page_does_not_pass(self):
         class Response:

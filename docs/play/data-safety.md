@@ -23,6 +23,7 @@ This is a source-backed inventory for the operator's Console answers, not a subm
 - Codes/results go to the caller the owner approved; events can go to its signed webhook. Evaluate Console's sharing exceptions against this exact user-facing behavior, rather than declaring every external transfer exempt.
 - HTTPS is required. Server operators remain able to process live results; do not claim end-to-end encryption.
 - Required notification consent does not replace prominent explanation of SMS approval or per-caller permission. Forms require their own access approval and explicit final submission.
+- The [staging acceptance probe](../CLOUD_ACCEPTANCE.md) is a separate disposable service, never a production relay feature. Its `acceptanceCallbacks` records hold temporary webhook signing secrets and sanitized synthetic receipts with 24-hour expiry plus asynchronous TTL. Delete probe fixtures after each run and remove the receiver/temporary admin secret when the campaign ends; keep them outside metadata backup exports. Use isolated test identities and no real codes/answers. Local harness tests and a built probe image do not establish live acceptance or change the production collection inventory.
 
 ## Operator sign-off gates
 

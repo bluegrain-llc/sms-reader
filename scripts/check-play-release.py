@@ -29,10 +29,15 @@ RECOVERY_CHECKS = (
     "lockedIndependentLedger", "denialsReplayed", "servingGateFailClosed",
     "metadataRestoreDrill", "signingRestoreDrill", "infrastructureRestoreDrill",
 )
+CLOUD_CHECKS = (
+    "baseline", "enqueue-recovery", "worker-recovery", "duplicate-delivery",
+    "provider-outage", "storage-outage", "interrupted-deletion", "cleanup",
+)
 REQUIRED_CI = {
     "Server unit tests and type check", "Firestore, Auth, REST and MCP integration tests",
     "Container build and HTTP smoke test", "Android unit tests, lint and build",
     "Android emulator UI integration tests", "Play release gate unit tests",
+    "Staging callback probe container",
 }
 
 
@@ -251,6 +256,10 @@ def check_record(record, base, offline=False, run=command, now=None):
                 checks = evidence.get("checks", {})
                 require(isinstance(checks, dict) and all(checks.get(name) is True for name in RECOVERY_CHECKS),
                         "capacityCostRestore: capacity, backup, ledger and live restore checks incomplete")
+            if label == "cloudAcceptance":
+                checks = evidence.get("checks", {})
+                require(isinstance(checks, dict) and all(checks.get(name) is True for name in CLOUD_CHECKS),
+                        "cloudAcceptance: baseline, fault drills and cleanup incomplete")
         except (OSError, ValueError, AttributeError):
             blockers.append(label + ": invalid evidence JSON")
 
