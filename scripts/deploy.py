@@ -16,12 +16,14 @@ def run(args, *, capture=True):
 
 
 def config(env):
-    c = {key: env.get(key, '') for key in ['PROJECT_ID', 'IMAGE_URI', 'COMMIT_SHA', 'RELAY_SMOKE_TOKEN']}
+    c = {key: env.get(key, '') for key in ['PROJECT_ID', 'IMAGE_URI', 'COMMIT_SHA', 'RELAY_SMOKE_TOKEN', 'SECURITY_LEDGER_BUCKET']}
     for key, value in c.items():
         if not value:
             raise ValueError(f'Set {key}')
     if not re.fullmatch(r'[a-z][a-z0-9-]{4,61}[a-z0-9]', c['PROJECT_ID']):
         raise ValueError('Invalid project ID')
+    if not re.fullmatch(r'[a-z0-9][a-z0-9._-]{1,220}[a-z0-9]', c['SECURITY_LEDGER_BUCKET']):
+        raise ValueError('Invalid security ledger bucket')
     if not re.fullmatch(r'[a-f0-9]{40}', c['COMMIT_SHA']):
         raise ValueError('COMMIT_SHA must be a full lowercase Git SHA')
     if not re.fullmatch(r'[a-z0-9-]+-docker\.pkg\.dev/' + re.escape(c['PROJECT_ID']) + r'/[a-z0-9_./-]+@sha256:[a-f0-9]{64}', c['IMAGE_URI']):
@@ -71,6 +73,12 @@ def deploy(c):
     save('preflight')
     changed = False
     try:
+        # Verify source binding and actual locked retention/access policy before
+        # creating a revision. A missing ledger must never reach promotion.
+        ledger_env = os.environ.copy()
+        ledger_env.update(SECURITY_LEDGER_BUCKET=c['SECURITY_LEDGER_BUCKET'], GOOGLE_CLOUD_PROJECT=project)
+        subprocess.run(['node', '--import', 'tsx', 'scripts/check-security-ledger.ts'], env=ledger_env,
+                       check=True, capture_output=True)
         # An index deployment is additive; destructive schema changes require a separate migration.
         run(['npx', 'firebase', 'deploy', '--only', 'firestore', '--project', project], capture=False)
         for attempt in range(120):
@@ -84,7 +92,8 @@ def deploy(c):
             time.sleep(5)
         # One deploy creates the final configured revision; no follow-up config revision.
         runtime = {'GOOGLE_CLOUD_PROJECT': project, 'SERVICE_URL': url, 'SCHEDULER_EMAIL': scheduler,
-                   'DELIVERY_QUEUE': queue, 'ANDROID_SIGNING_SHA256S': json.dumps(c['CERTS'])}
+                   'DELIVERY_QUEUE': queue, 'ANDROID_SIGNING_SHA256S': json.dumps(c['CERTS']),
+                   'SECURITY_LEDGER_BUCKET': c['SECURITY_LEDGER_BUCKET']}
         # Preserve unrelated runtime settings, including secrets and approved origins.
         # update-env-vars supports custom separators; values here cannot contain this sentinel.
         values = '^|^' + '|'.join(f'{k}={v}' for k, v in runtime.items())

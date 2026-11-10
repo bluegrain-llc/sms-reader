@@ -3,8 +3,10 @@ import { z } from 'zod';
 import { Forms } from './forms.js';
 import { formSchema, observationSchema, submissionSchema, webhookSchema } from './forms-model.js';
 import { idSchema } from './model.js';
+import { EventStreams } from './event-streams.js';
 
 export function mountForms(app: Express, forms: Forms, owner: (req: Request) => Promise<{ uid: string }>, bearer: (req: Request) => string, agentRead: (req: Request) => Promise<string>, sseDurationMs = 100_000) {
+  const streams = new EventStreams(forms);
   const id = (req: Request) => idSchema.parse(req.params.requestId);
   const phone = async (req: Request) => ({ uid: (await owner(req)).uid, deviceId: idSchema.parse(req.params.deviceId) });
   app.post('/v2/requests', async (req, res) => { res.status(201).json(await forms.create(bearer(req), formSchema.parse(req.body))); });
@@ -28,44 +30,67 @@ export function mountForms(app: Express, forms: Forms, owner: (req: Request) => 
     let closed = res.destroyed, timer: ReturnType<typeof setTimeout> | undefined, resume: (() => void) | undefined;
     let deadlineTimer: ReturnType<typeof setTimeout> | undefined, destroyTimer: ReturnType<typeof setTimeout> | undefined;
     let release: Awaited<ReturnType<typeof forms.relay.access.stream>> | undefined;
-    res.once('close', () => {
-      closed = true; clearTimeout(timer); clearTimeout(deadlineTimer); clearTimeout(destroyTimer); resume?.();
-      if (release) void release().catch(() => {}); // Lease expiry recovers unavailable storage.
-    });
-    const secret = await agentRead(req); let next = cursor(req);
-    let page = await forms.events(secret, next);
-    const { grant } = await forms.db.runTransaction(tx => forms.relay.agent(tx, secret));
-    release = await forms.relay.access.stream(grant.ownerId, grant.id, sseDurationMs);
-    const remaining = Math.max(0, release.deadline - forms.relay.now());
-    if (closed || !remaining) { await release(); if (!closed) res.end(); return; }
+    let releasing = false;
+    let feed: Awaited<ReturnType<EventStreams['subscribe']>> | undefined;
+    const cancellation = new AbortController();
+    const detach = () => {
+      clearTimeout(timer); clearTimeout(deadlineTimer); resume?.();
+      cancellation.abort(); feed?.stop();
+      // Deadline and response close can both detach. Start the storage release
+      // once so completion observers join its actual transaction.
+      if (release && !releasing) { releasing = true; void release().catch(() => {}); } // Lease expiry recovers unavailable storage.
+    };
+    res.once('close', () => { closed = true; detach(); clearTimeout(destroyTimer); });
     const stop = () => {
-      closed = true; clearTimeout(timer); clearTimeout(deadlineTimer); resume?.();
+      closed = true; detach();
       if (!res.destroyed) {
         res.end();
         // Bound a backpressured response independently of any pending database read.
         destroyTimer ??= setTimeout(() => res.destroy(), 1000);
       }
     };
+    const secret = await agentRead(req); let next = cursor(req);
+    let page = await forms.events(secret, next);
+    const { grant } = await forms.db.runTransaction(tx => forms.relay.agent(tx, secret));
+    release = await forms.relay.access.stream(grant.ownerId, grant.id, sseDurationMs);
+    const remaining = Math.max(0, release.deadline - forms.relay.now());
+    if (closed || !remaining) { detach(); if (!closed) res.end(); return; }
     deadlineTimer = setTimeout(stop, remaining);
     try {
+      // A deadline or disconnect detaches even while the watch is initializing.
+      feed = await streams.subscribe(secret, { changed: () => resume?.(), closed: stop }, cancellation.signal);
+      if (closed || feed.failed()) return;
+      const tail = async () => {
+        const sequence = next ? Number(next.slice(-16)) : 0;
+        const events = feed!.tail(sequence), oldest = feed!.oldest();
+        return events.length && oldest !== undefined && sequence < oldest - 1
+          ? forms.events(secret, next) : { events, cursor: next ?? null };
+      };
       res.set({ 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache, no-store', 'X-Accel-Buffering': 'no' }); res.flushHeaders();
-      res.write('retry: 1000\n\n');
-      while (!closed) {
+      if (!res.write('retry: 1000\n\n')) { stop(); return; }
+      while (!closed && !feed.failed()) {
+        const revision = feed.revision();
         for (const e of page.events) {
-          if (closed) break;
-          if (!res.write(`id: ${e.id}\nevent: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`)) {
-            // A slow consumer reconnects using its last received event ID.
-            stop(); break;
-          }
+          if (closed || feed.failed()) break;
+          if (!res.write(`id: ${e.id}\nevent: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`)) { stop(); break; }
           next = e.id;
         }
-        if (closed) break;
-        res.write(': heartbeat\n\n');
-        await new Promise<void>(resolve => { resume = resolve; timer = setTimeout(resolve, 1000); });
-        if (!closed) page = await forms.events(secret, next);
+        if (closed || feed.failed()) break;
+        // Replay is paginated from durable storage; the bounded tail handles steady-state delivery.
+        if (page.events.length === 100) { page = await forms.events(secret, next); continue; }
+        page = await tail();
+        if (closed || feed.failed()) break;
+        if (page.events.length) continue;
+        if (!res.write(': heartbeat\n\n')) { stop(); break; }
+        await new Promise<void>(resolve => {
+          const done = () => { clearTimeout(timer); resume = undefined; resolve(); };
+          resume = done;
+          timer = setTimeout(done, 1000);
+          if (closed || feed!.failed() || feed!.revision() !== revision) done();
+        });
+        if (!closed && !feed.failed()) page = await tail();
       }
     } catch { /* revoked credentials or unavailable storage: reconnect and authenticate again */ }
     finally { stop(); }
-
   });
 }
