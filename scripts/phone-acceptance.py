@@ -56,7 +56,7 @@ def device_metadata(adb, serial):
             'api': prop('ro.build.version.sdk'), 'playServices': version.group(1)}
 
 
-def initial_record(apk, commit, signer, aapt, devices):
+def initial_record(apk, commit, signer, aapt, devices, project, region, revision):
     if not re.fullmatch(r'[0-9a-f]{40}', commit):
         raise ValueError('Commit must be a full Git SHA')
     manifest = run([aapt, 'dump', 'badging', str(apk)])
@@ -68,12 +68,13 @@ def initial_record(apk, commit, signer, aapt, devices):
         raise ValueError('APK signer certificate not verified')
     return {'schemaVersion': 1, 'createdAt': now(), 'commit': commit,
             'apkSha256': hashlib.sha256(apk.read_bytes()).hexdigest(),
+            'project': project, 'region': region, 'backendRevision': revision,
             'signerSha256': [value.lower() for value in digests], 'devices': devices,
             'cases': {case: {'status': 'pending', 'reason': 'not_run'} for case in CASES}}
 
 
 def validate(record):
-    if set(record) != {'schemaVersion', 'createdAt', 'commit', 'apkSha256', 'signerSha256', 'devices', 'cases'}:
+    if set(record) != {'schemaVersion', 'createdAt', 'commit', 'apkSha256', 'signerSha256', 'devices', 'cases', 'project', 'region', 'backendRevision'}:
         raise ValueError('Unexpected record fields')
     if record['schemaVersion'] != 1 or not re.fullmatch(r'[0-9a-f]{40}', record['commit']):
         raise ValueError('Invalid record identity')
@@ -81,6 +82,12 @@ def validate(record):
         raise ValueError('Invalid artifact hash')
     if not record['signerSha256'] or any(not re.fullmatch(r'[0-9a-f]{64}', value) for value in record['signerSha256']):
         raise ValueError('Invalid signing certificate')
+    if not re.fullmatch(r'[a-z][a-z0-9-]{4,28}[a-z0-9]', record['project']):
+        raise ValueError('Invalid project ID')
+    if not re.fullmatch(r'[a-z]+-[a-z]+[0-9]', record['region']):
+        raise ValueError('Invalid region')
+    if not re.fullmatch(r'[a-z][a-z0-9-]{0,61}[a-z0-9]', record['backendRevision']):
+        raise ValueError('Invalid backend revision')
     datetime.fromisoformat(record['createdAt'])
     identities = set()
     for device in record['devices']:
@@ -134,6 +141,9 @@ def main():
     init = commands.add_parser('init', help='Create pending matrix for one signed release artifact')
     init.add_argument('--apk', type=Path, required=True)
     init.add_argument('--commit', required=True)
+    init.add_argument('--project', required=True)
+    init.add_argument('--region', required=True)
+    init.add_argument('--backend-revision', required=True)
     init.add_argument('--apksigner', required=True)
     init.add_argument('--aapt', required=True)
     init.add_argument('--adb', default='adb')
@@ -153,7 +163,7 @@ def main():
                 if args.file.exists():
                     raise ValueError('Record already exists; use a new file for a new candidate')
                 devices = [device_metadata(args.adb, serial) for serial in args.serial]
-                value = initial_record(args.apk, args.commit, args.apksigner, args.aapt, devices)
+                value = initial_record(args.apk, args.commit, args.apksigner, args.aapt, devices, args.project, args.region, args.backend_revision)
                 save(args.file, value)
                 print('Pending release matrix created; no physical outcomes claimed')
             else:

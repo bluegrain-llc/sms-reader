@@ -15,6 +15,7 @@ spec.loader.exec_module(acceptance)
 class PhoneAcceptanceTest(unittest.TestCase):
     def pending(self, devices=0):
         return {'schemaVersion': 1, 'createdAt': acceptance.now(), 'commit': 'a' * 40,
+                'project': 'relay-staging', 'region': 'us-central1', 'backendRevision': 'relay-00001-abc',
                 'apkSha256': 'b' * 64, 'signerSha256': ['c' * 64],
                 'devices': [{'deviceHash': str(index) * 64, 'model': 'Test device',
                              'android': '15', 'api': '35', 'playServices': '25.0'} for index in range(devices)],
@@ -58,6 +59,17 @@ class PhoneAcceptanceTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 acceptance.validate(value)
 
+    def test_record_binds_explicit_deployment_target(self):
+        for key in ('project', 'region', 'backendRevision'):
+            value = self.pending(2)
+            del value[key]
+            with self.assertRaises(ValueError):
+                acceptance.validate(value)
+            value = self.pending(2)
+            value[key] = 'not a deployment identifier'
+            with self.assertRaises(ValueError):
+                acceptance.validate(value)
+
     def test_emulator_refused_before_package_inspection(self):
         with patch.object(acceptance, 'run') as run:
             with self.assertRaises(ValueError):
@@ -74,10 +86,10 @@ class PhoneAcceptanceTest(unittest.TestCase):
             apk.write_bytes(b'test fixture')
             with patch.object(acceptance, 'run', return_value="package: name='com.bluegrain.smsrelay'\napplication-debuggable"):
                 with self.assertRaises(ValueError):
-                    acceptance.initial_record(apk, 'a' * 40, 'signer', 'aapt', [])
+                    acceptance.initial_record(apk, 'a' * 40, 'signer', 'aapt', [], 'relay-staging', 'us-central1', 'relay-00001-abc')
             with patch.object(acceptance, 'run', side_effect=["package: name='com.bluegrain.smsrelay'", '']):
                 with self.assertRaises(ValueError):
-                    acceptance.initial_record(apk, 'a' * 40, 'signer', 'aapt', [])
+                    acceptance.initial_record(apk, 'a' * 40, 'signer', 'aapt', [], 'relay-staging', 'us-central1', 'relay-00001-abc')
 
     def test_summary_gate_fails_until_all_required_observations_pass(self):
         with tempfile.TemporaryDirectory() as directory:

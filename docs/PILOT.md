@@ -12,12 +12,14 @@ fixed ADB metadata commands. Device serials are replaced with SHA-256 hashes. It
 never reads SMS, app files, screen contents, account identities or credentials.
 The artifact hash identifies the APK selected by the operator; the tool does not
 prove that this exact APK is installed. Install that candidate on both phones
-before testing. Keep project/region in the separate private deployment record.
+before testing. Bind the record to the explicitly selected project, region and
+backend revision from the private deployment record.
 
 ```sh
 python3 scripts/phone-acceptance.py init \
   --file artifacts/acceptance/current-release.json \
   --apk artifacts/sms-code-relay-pilot.apk --commit "$(git rev-parse HEAD)" \
+  --project "$PROJECT_ID" --region "$REGION" --backend-revision "$REVISION" \
   --apksigner "$ANDROID_HOME/build-tools/36.0.0/apksigner" \
   --aapt "$ANDROID_HOME/build-tools/36.0.0/aapt" \
   --adb "$ANDROID_HOME/platform-tools/adb" \
