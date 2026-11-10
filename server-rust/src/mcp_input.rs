@@ -125,6 +125,32 @@ fn issue(mut value: Value, path: &[Value], message: String) -> Value {
     value["message"] = json!(message);
     value
 }
+fn bound_issue(kind: &str, big: bool, length: bool, bound: &Value, path: &[Value]) -> Value {
+    let mut error =
+        json!({"origin":kind,"code":if big {"too_big"} else {"too_small"}, "inclusive":true});
+    error[if big { "maximum" } else { "minimum" }] = bound.clone();
+    let predicate = if length {
+        format!(
+            "to have {}{bound} {}",
+            if big { "<=" } else { ">=" },
+            if kind == "string" {
+                "characters"
+            } else {
+                "items"
+            }
+        )
+    } else {
+        format!("to be {}{bound}", if big { "<=" } else { ">=" })
+    };
+    issue(
+        error,
+        path,
+        format!(
+            "Too {}: expected {kind} {predicate}",
+            if big { "big" } else { "small" }
+        ),
+    )
+}
 fn received(v: Option<&Value>) -> &'static str {
     match v {
         None => "undefined",
@@ -328,6 +354,16 @@ fn check(s: &Value, v: Option<&Value>, path: &[Value]) -> (Value, Vec<Value>) {
         }
         out = Value::Object(result);
     } else if kind == "array" {
+        // Zod caps oversized containers before visiting their elements.
+        if let Some(cap) = s["checks"].as_array().into_iter().flatten().find(|c| {
+            text(c, "check") == "max_length"
+                && out.as_array().unwrap().len() as u64 > c["maximum"].as_u64().unwrap()
+        }) {
+            return (
+                out,
+                vec![bound_issue("array", true, true, &cap["maximum"], path)],
+            );
+        }
         for (i, value) in out.as_array_mut().unwrap().iter_mut().enumerate() {
             let (parsed, e) = check(&s["element"], Some(value), &child_path(path, json!(i)));
             *value = parsed;
@@ -394,30 +430,7 @@ fn check(s: &Value, v: Option<&Value>, path: &[Value]) -> (Value, Vec<Value>) {
                 } else {
                     n < bound.as_f64().unwrap()
                 } {
-                    let mut e = json!({"origin":kind,"code":if big{"too_big"}else{"too_small"}});
-                    e[if big { "maximum" } else { "minimum" }] = bound.clone();
-                    e["inclusive"] = json!(true);
-                    let predicate = if length {
-                        format!(
-                            "to have {}{bound} {}",
-                            if big { "<=" } else { ">=" },
-                            if kind == "string" {
-                                "characters"
-                            } else {
-                                "items"
-                            }
-                        )
-                    } else {
-                        format!("to be {}{bound}", if big { "<=" } else { ">=" })
-                    };
-                    errors.push(issue(
-                        e,
-                        path,
-                        format!(
-                            "Too {}: expected {kind} {predicate}",
-                            if big { "big" } else { "small" }
-                        ),
-                    ));
+                    errors.push(bound_issue(kind, big, length, bound, path));
                 }
             }
             "string_format" => {

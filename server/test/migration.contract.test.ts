@@ -86,6 +86,19 @@ for (const direction of ['typescript-to-rust', 'rust-to-typescript']) {
       assert.equal((await reader.forms.get({ secret: token }, prototype.requestId)).status, 'pending');
       await writer.forms.cancel(token, prototype.requestId);
     }
+    await writer.register(uid, 'constructor', 'Prototype device', 'synthetic-fcm', 1);
+    const observed = await writer.forms.create(token, form('cross-device-prototype'));
+    const eventCursor = (await writer.forms.events(token)).cursor!;
+    for (const backend of [writer, reader]) {
+      await assert.rejects(backend.forms.observe(uid, 'constructor', observed.requestId, { type: 'input.ready', fieldId: 'code', listenerStartedAt: time }), /input_already_started/);
+      for (const type of ['request.opened', 'notification.tapped'] as const) {
+        const view = await backend.forms.observe(uid, 'constructor', observed.requestId, { type });
+        assert.equal(view.firstOpenedAt, null); assert.deepEqual(view.helpers, {});
+      }
+    }
+    assert.deepEqual((await reader.forms.events(token, eventCursor)).events, []);
+    const prototypeDevice = (await db.collection('devices').doc('constructor').get()).data()!;
+    assert.ok(!prototypeDevice.formListenerUntil);
     await writer.forms.registerWebhook(token, { url: 'https://8.8.8.8/#', events: ['request.created'] });
     assert.equal((await reader.forms.webhooks(token))[0]!.url, 'https://8.8.8.8/#');
   });
@@ -182,6 +195,7 @@ test('HTTP errors, body bounds, auth ordering, headers and protocol negotiation 
       ['request_sms_code', { purpose: '   ', idempotencyKey: 'short' }], ['request_sms_code', { purpose: 'MCP extras', idempotencyKey: 'mcp-extras', ignored: true }],
       ['create_request', { ...form('mcp-extra-form'), ignored: true }], ['create_request', { ...form('mcp-invalid-form'), fields: [{ type: 'invalid' }] }],
       ['create_request', { ...form('mcp-null-field'), fields: [null] }],
+      ['create_request', { ...form('mcp-cap-first'), fields: Array(31).fill(null) }],
       ['poll_request_events', { cursor: 'x'.repeat(129) }], ['not_a_tool', {}],
     ] as const) {
       const responses = await Promise.all(bases.map(async base => {

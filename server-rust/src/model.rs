@@ -17,6 +17,29 @@ pub fn secret() -> String {
     rand::rng().fill_bytes(&mut b);
     format!("smsr_{}", URL_SAFE_NO_PAD.encode(b))
 }
+pub fn js_property<'a>(values: &'a Value, key: &str) -> Option<&'a Value> {
+    values.get(key).or_else(|| {
+        // Legacy maps are ordinary JS objects: omitted prototype names resolve
+        // to a non-primitive value. Never persist this lookup-only sentinel.
+        static INHERITED: std::sync::OnceLock<Value> = std::sync::OnceLock::new();
+        matches!(
+            key,
+            "constructor"
+                | "__defineGetter__"
+                | "__defineSetter__"
+                | "hasOwnProperty"
+                | "__lookupGetter__"
+                | "__lookupSetter__"
+                | "isPrototypeOf"
+                | "propertyIsEnumerable"
+                | "toString"
+                | "valueOf"
+                | "__proto__"
+                | "toLocaleString"
+        )
+        .then(|| INHERITED.get_or_init(|| json!({})))
+    })
+}
 pub fn text<'a>(v: &'a Value, k: &str) -> &'a str {
     v[k].as_str().unwrap_or("")
 }
