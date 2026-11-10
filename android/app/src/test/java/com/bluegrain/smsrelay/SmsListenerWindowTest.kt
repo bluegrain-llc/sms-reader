@@ -72,4 +72,12 @@ class SmsListenerWindowTest {
         assertTrue(window.accepts(true) { true })
     }
 
+    @Test fun epochProjectionAdvancesOnlyByElapsedTime() {
+        var elapsed = 10_000L
+        val clock = MonotonicEpochClock(1_000_000L, elapsed) { elapsed }
+        assertEquals(1_000_000L, clock.now())
+        elapsed += 30_000
+        assertEquals(1_030_000L, clock.now())
+    }
+
 }

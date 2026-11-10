@@ -27,7 +27,8 @@ data class InboxState(val requests: List<RequestForm> = emptyList(), val form: R
 class InboxViewModel(application: Application) : AndroidViewModel(application) {
     private val app = application as RelayApplication
     private val repo get() = app.repository
-    private val mutable = MutableStateFlow(InboxState())
+    private val clock = MonotonicEpochClock(System.currentTimeMillis(), SystemClock.elapsedRealtime(), SystemClock::elapsedRealtime)
+    private val mutable = MutableStateFlow(InboxState(now = clock.now()))
     val state = mutable.asStateFlow()
     private var receiver: BroadcastReceiver? = null
     private var helperRequest: String? = null
@@ -45,16 +46,19 @@ class InboxViewModel(application: Application) : AndroidViewModel(application) {
             var tick = 0
             while (true) {
                 delay(1_000)
-                mutable.update { it.copy(now = System.currentTimeMillis()) }
-                drafts.entries.removeAll { it.value.expiresAt <= state.value.now }
-                state.value.let { s ->
-                    s.form?.takeIf { s.now >= it.expiresAt && (s.values.isNotEmpty() || s.stepId != null || s.reviewing ||
-                        s.fieldErrors.isNotEmpty() || submitBody != null || helperRequest == it.id) }?.let(::showLoaded)
-                }
-                if (listenerWindow?.expired() == true) stopHelper("SMS listening ended. You can still enter the code manually.")
+                expireDraftsAndHelper()
                 if (++tick % 5 == 0 && state.value.foreground && app.configured && repo.signedIn && repo.registered && !state.value.busy) refresh()
             }
         }
+    }
+    private fun expireDraftsAndHelper() {
+        mutable.update { it.copy(now = clock.now()) }
+        drafts.entries.removeAll { it.value.expiresAt <= state.value.now }
+        state.value.let { s ->
+            s.form?.takeIf { s.now >= it.expiresAt && (s.values.isNotEmpty() || s.stepId != null || s.reviewing ||
+                s.fieldErrors.isNotEmpty() || submitBody != null || helperRequest == it.id) }?.let(::showLoaded)
+        }
+        if (listenerWindow?.expired() == true) stopHelper("SMS listening ended. You can still enter the code manually.")
     }
     fun foreground(value: Boolean) { mutable.update { it.copy(foreground = value) }; if (value) refresh() }
     private var sessionOwner: String? = null
@@ -62,7 +66,7 @@ class InboxViewModel(application: Application) : AndroidViewModel(application) {
         if (!app.configured) return
         if (sessionOwner != repo.ownerId) {
             stopHelper(null); submitBody = null; drafts.clear(); sessionOwner = repo.ownerId
-            mutable.update { InboxState(foreground = it.foreground, openingForms = it.openingForms) }
+            mutable.update { InboxState(foreground = it.foreground, openingForms = it.openingForms, now = clock.now()) }
         }
         refresh()
     }
@@ -190,7 +194,7 @@ class InboxViewModel(application: Application) : AndroidViewModel(application) {
         if (repo.listenerUntil > System.currentTimeMillis()) throw ApiFailure("sms_listener_busy", 409)
         stopHelper(null)
         helperRequest = form.id; helperField = field.id
-        val started = System.currentTimeMillis()
+        val started = clock.now()
         val window = SmsListenerWindow(SystemClock.elapsedRealtime(), form.expiresAt - started, SystemClock::elapsedRealtime)
         listenerWindow = window
         receiver = object : BroadcastReceiver() {

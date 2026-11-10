@@ -138,6 +138,38 @@ class ListenerStatusTest {
         assertEquals(mapOf("code" to "manual"), vm.state.value.values)
     }
 
+    @Test fun formTimerKeepsOriginalClockAndEarlierFormExpiry() = fixture { stores ->
+        var elapsed = 378L
+        val epoch = 1_000_000L
+        val window = SmsListenerWindow(0, 30_000) { elapsed }
+        instrumentation.runOnMainSync {
+            val vm = InboxViewModel(app); retain(stores, vm)
+            field(vm, "clock", MonotonicEpochClock(epoch, 0) { elapsed })
+            val form = RequestForm("form", "Assistant", "Verify", "", "pending", epoch + 30_000,
+                emptyList(), emptyList(), null)
+            state<InboxState>(vm).value = InboxState(form = form, values = mapOf("code" to "manual"), now = epoch,
+                helperUntil = epoch + 30_000)
+            field(vm, "helperRequest", form.id); field(vm, "listenerWindow", window)
+            val tick = vm.javaClass.getDeclaredMethod("expireDraftsAndHelper").apply { isAccessible = true }
+            for (wallNow in listOf(epoch + 660_000, epoch - 660_000)) {
+                state<InboxState>(vm).value = vm.state.value.copy(now = wallNow)
+                tick.invoke(vm)
+                assertEquals(epoch + elapsed, vm.state.value.now)
+                assertSame(window, field(vm, "listenerWindow"))
+                assertEquals(mapOf("code" to "manual"), vm.state.value.values)
+            }
+            elapsed = 29_999
+            tick.invoke(vm)
+            assertSame(window, field(vm, "listenerWindow"))
+            elapsed++
+            tick.invoke(vm)
+            assertNull(field(vm, "listenerWindow"))
+            assertEquals(0L, vm.state.value.helperUntil)
+            assertTrue(vm.state.value.values.isEmpty())
+            assertEquals("pending", vm.state.value.form?.status)
+        }
+    }
+
     @Test fun formHelperReboundWhileWaitingIgnoresBothSignalKinds() {
         for (status in listOf(CommonStatusCodes.TIMEOUT, CommonStatusCodes.SUCCESS)) fixture { stores ->
             lateinit var vm: InboxViewModel

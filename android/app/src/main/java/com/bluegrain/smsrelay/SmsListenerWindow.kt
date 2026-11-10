@@ -18,3 +18,7 @@ internal class SmsListenerWindow(private val started: Long, maximumAge: Long = 5
 
     fun close() { closed = true; ready.complete(false) }
 }
+
+internal class MonotonicEpochClock(private val epoch: Long, private val started: Long, private val elapsed: () -> Long) {
+    fun now() = epoch + (elapsed() - started)
+}
