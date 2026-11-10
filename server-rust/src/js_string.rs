@@ -34,9 +34,15 @@ pub fn storage(s: &str) -> Result<String, std::char::DecodeUtf16Error> {
     char::decode_utf16(units(s)).collect()
 }
 pub fn count(s: &str) -> usize {
+    if !s.contains(MARK) {
+        return s.chars().count();
+    }
     char::decode_utf16(units(s)).count()
 }
 pub fn quote(s: &str) -> String {
+    if !s.contains(MARK) {
+        return serde_json::to_string(s).unwrap();
+    }
     let mut out = String::from("\"");
     for c in char::decode_utf16(units(s)) {
         match c {
@@ -137,13 +143,68 @@ pub fn parse(raw: &[u8]) -> serde_json::Result<Value> {
             out.push_str(&digits);
         }
     }
-    serde_json::from_str(&out)
+    // Validate all syntax without constructing nested values. Every domain
+    // schema ends well before depth 64; deeper values are either rejected by
+    // their parent type or discarded by the SDK. Bound their representation
+    // without rejecting JSON that JavaScript parses and then ignores.
+    let _: &serde_json::value::RawValue = serde_json::from_str(&out)?;
+    let mut bounded = String::with_capacity(out.len());
+    let (mut quoted, mut escaped, mut depth, mut skip) = (false, false, 0usize, false);
+    for c in out.chars() {
+        if quoted {
+            if !skip {
+                bounded.push(c);
+            }
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == '"' {
+                quoted = false;
+            }
+        } else if c == '"' {
+            quoted = true;
+            if !skip {
+                bounded.push(c);
+            }
+        } else if c == '{' || c == '[' {
+            depth += 1;
+            if !skip {
+                bounded.push(c);
+                if depth == 64 {
+                    skip = true;
+                }
+            }
+        } else if c == '}' || c == ']' {
+            if skip && depth == 64 {
+                skip = false;
+            }
+            if !skip {
+                bounded.push(c);
+            }
+            depth -= 1;
+        } else if !skip {
+            bounded.push(c);
+        }
+    }
+    serde_json::from_str(&bounded)
 }
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
     fn javascript_strings_round_trip() {
+        let nested = format!(
+            "{{\"ignored\":{}0{}}}",
+            "[".repeat(10000),
+            "]".repeat(10000)
+        );
+        assert!(parse(nested.as_bytes()).is_ok());
+        assert!(parse(nested.replace("0", "0,").as_bytes()).is_err());
+        assert_eq!(
+            crate::model::js_json(&parse(br#"[1e400,-1e400]"#).unwrap(), false),
+            "[null,null]"
+        );
         let fixtures = parse(include_bytes!("../compat/js-strings.json")).unwrap();
         for f in fixtures.as_array().unwrap() {
             let s = f["input"].as_str().unwrap();

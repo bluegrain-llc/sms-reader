@@ -128,7 +128,7 @@ impl Google {
             .ok_or(Error::External)?;
         let key = DecodingKey::from_jwk(key).map_err(|_| Error::External)?;
         let mut validation = Validation::new(Algorithm::RS256);
-        validation.leeway = 0;
+        validation.leeway = if worker { 300 } else { 0 };
         validation.validate_nbf = true;
         if worker {
             let audience = self.service_url.as_deref().ok_or(Error::External)?;
@@ -142,7 +142,8 @@ impl Google {
             .map_err(|_| Error::External)?
             .claims;
         ensure(
-            num(&claims, "iat") <= now() / 1000,
+            num(&claims, "iat") <= now() / 1000 + if worker { 300 } else { 0 }
+                && (!worker || num(&claims, "exp") <= now() / 1000 + 86400),
             401,
             "invalid_owner_session",
         )?;
@@ -353,6 +354,35 @@ mod tests {
         let google = verifier().await;
         let mut c = json!({"iss":"https://accounts.google.com", "sub":"worker", "aud":"https://relay.example.test", "email":"scheduler@example.test", "email_verified":true,"iat":now()/1000-1,"exp":now()/1000+3600});
         assert!(google.verify_worker(&signed(&c, "test-key")).await.is_ok());
+        for (key, value) in [
+            ("iat", json!(now() / 1000 + 299)),
+            ("exp", json!(now() / 1000 - 299)),
+        ] {
+            let mut skew = c.clone();
+            skew[key] = value;
+            assert!(
+                google
+                    .verify_worker(&signed(&skew, "test-key"))
+                    .await
+                    .is_ok(),
+                "{key}"
+            );
+        }
+        for (key, value) in [
+            ("iat", json!(now() / 1000 + 301)),
+            ("exp", json!(now() / 1000 - 301)),
+            ("exp", json!(now() / 1000 + 86401)),
+        ] {
+            let mut skew = c.clone();
+            skew[key] = value;
+            assert!(
+                google
+                    .verify_worker(&signed(&skew, "test-key"))
+                    .await
+                    .is_err(),
+                "{key}"
+            );
+        }
         for (key, value) in [
             ("aud", json!("https://other.example.test")),
             ("email", json!("intruder@example.test")),

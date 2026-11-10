@@ -166,7 +166,10 @@ pub fn js_json(v: &Value, canonical: bool) -> String {
         Value::Null => "null".into(),
         Value::Bool(b) => b.to_string(),
         Value::String(s) => crate::js_string::quote(s),
-        Value::Number(n) => ryu_js::Buffer::new().format(n.as_f64().unwrap()).to_owned(),
+        Value::Number(n) => n
+            .as_f64()
+            .map(|n| ryu_js::Buffer::new().format(n).to_owned())
+            .unwrap_or_else(|| "null".into()),
         Value::Array(a) => format!(
             "[{}]",
             a.iter()

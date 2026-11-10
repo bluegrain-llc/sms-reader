@@ -41,21 +41,38 @@ pub fn parse(name: &str, input: Value) -> std::result::Result<Value, String> {
         ))
     }
 }
-pub fn envelope(input: &Value) -> Option<(u16, Value)> {
+fn envelopes() -> &'static Value {
     static PARSERS: OnceLock<Value> = OnceLock::new();
-    let parsers = PARSERS.get_or_init(|| {
-        serde_json::from_str(include_str!("../compat/tool-envelope.json")).unwrap()
-    });
+    PARSERS
+        .get_or_init(|| serde_json::from_str(include_str!("../compat/tool-envelope.json")).unwrap())
+}
+pub fn message_valid(input: &Value) -> bool {
+    check(&envelopes()["message"], Some(input), &[])
+        .1
+        .is_empty()
+}
+pub fn is_initialize(input: &Value) -> bool {
+    check(&envelopes()["initialize"], Some(input), &[])
+        .1
+        .is_empty()
+}
+pub fn envelope(input: &Value) -> Option<(u16, Value)> {
+    let parsers = envelopes();
     if !check(&parsers["request"], Some(input), &[]).1.is_empty() {
         return Some((
             400,
             json!({"jsonrpc":"2.0","error":{"code":-32700,"message":"Parse error: Invalid JSON-RPC message"},"id":null}),
         ));
     }
-    if input["method"] != "tools/call" {
-        return None;
-    }
-    let error = if input["params"]["task"].is_object()
+    let schema = match input["method"].as_str() {
+        Some("tools/call") => "call",
+        Some("tools/list") => "list",
+        Some("initialize") => "initialize",
+        Some("ping") => "ping",
+        _ => return None,
+    };
+    let error = if schema == "call"
+        && input["params"]["task"].is_object()
         && check(&parsers["task"], input.get("params"), &[])
             .1
             .is_empty()
@@ -64,7 +81,7 @@ pub fn envelope(input: &Value) -> Option<(u16, Value)> {
             json!({"code":-32603,"message":"Server does not support task creation (required for tools/call)"}),
         )
     } else {
-        let (_, issues) = check(&parsers["call"], Some(input), &[]);
+        let (_, issues) = check(&parsers[schema], Some(input), &[]);
         if issues.is_empty() {
             None
         } else {
@@ -192,6 +209,21 @@ fn check(s: &Value, v: Option<&Value>, path: &[Value]) -> (Value, Vec<Value>) {
     }
     let mut out = v.unwrap().clone();
     let mut errors = vec![];
+    if kind == "number" && out.as_f64().is_none() {
+        let received = if out.to_string().starts_with('-') {
+            "-Infinity"
+        } else {
+            "Infinity"
+        };
+        return (
+            out,
+            vec![issue(
+                json!({"expected":"number","code":"invalid_type","received":received}),
+                path,
+                format!("Invalid input: expected number, received {received}"),
+            )],
+        );
+    }
     if kind == "record" {
         for (key, value) in out.as_object_mut().unwrap() {
             let (_, e) = check(&s["key"], Some(&json!(key)), &child_path(path, json!(key)));

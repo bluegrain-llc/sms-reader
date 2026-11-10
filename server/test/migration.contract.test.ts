@@ -97,6 +97,10 @@ test('HTTP errors, body bounds, auth ordering, headers and protocol negotiation 
       { path: '/connect?code=AAAAAAAAAA&code=BBBBBBBBBB' }, { path: '/mcp' },
       { path: '/internal/delivery', method: 'POST' }, { path: '/internal/maintenance', method: 'POST' },
       { path: '/v2/requests/nope', headers: { authorization: `Bearer ${token}` } },
+      { path: '/v1/requests/%ZZ' }, { path: '/v1/requests/%ZZ', headers: { authorization: `Bearer ${token}` } },
+      { path: '/v1/devices/%FF', method: 'POST' },
+      { path: '/v2/webhooks', method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer bad' }, body: '{"url":"not a url","events":["request.created"]}' },
+      { path: '/v2/webhooks', method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer bad' }, body: '{"url":"mailto:user@example.test","events":["request.created"]}' },
       { path: '/v1/devices/nope', method: 'PATCH', headers: { 'content-type': 'application/json' }, body: '{"paused":"yes"}' },
       { path: '/v1/requests', method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer bad' }, body: '{"purpose":"\\ud800","idempotencyKey":"surrogate-invalid-token"}' },
       { path: `/v1/grants/${grantId}&ignored`, method: 'DELETE', headers: { authorization: 'Bearer owner-session' } },
@@ -116,6 +120,24 @@ test('HTTP errors, body bounds, auth ordering, headers and protocol negotiation 
         body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: version, capabilities: {}, clientInfo: { name: 'migration', version: '1' } } }), signal: AbortSignal.timeout(15_000) });
         const v = await response.json() as any; return { status: response.status, protocol: v.result?.protocolVersion, server: v.result?.serverInfo }; }));
       assert.deepEqual(results[1], results[0], version);
+    }
+    const list = (id: number) => ({ jsonrpc: '2.0', id, method: 'tools/list' });
+    const rpc = async (base: string, body: string, headers: Record<string, string> = {}) => {
+      const response = await fetch(base + '/mcp', { method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream', authorization: `Bearer ${token}`, ...headers }, body, signal: AbortSignal.timeout(15_000) });
+      const text = await response.text(); return { status: response.status, type: response.headers.get('content-type'), body: text ? JSON.parse(text) : null };
+    };
+    for (const [body, headers] of [
+      [JSON.stringify([list(1), list(2)]), {}], [JSON.stringify([list(1)]), {}], ['[]', {}],
+      [JSON.stringify(list(-1)), {}], [JSON.stringify(list(1)), { 'mcp-protocol-version': '2024-10-07' }],
+      [JSON.stringify(list(1)), { 'mcp-protocol-version': 'unsupported' }],
+      [JSON.stringify(list(1)), { accept: 'application/json' }], [JSON.stringify(list(1)), { 'content-type': 'text/plain' }],
+      [JSON.stringify(Array.from({ length: 101 }, (_, i) => list(i))), {}],
+      [JSON.stringify({ ...list(1), params: { cursor: 1 } }), {}],
+      ...[130, 10000].map(depth => [`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"request_sms_code","arguments":{"purpose":"Ignored depth","idempotencyKey":"depth-${depth}","ignored":${'['.repeat(depth)}0${']'.repeat(depth)}}}}`, {}]),
+      ['{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"request_sms_code","arguments":{"purpose":"Ignored overflow","idempotencyKey":"overflow-ignored","ignored":1e400}}}', {}],
+      ['{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"create_request","arguments":{"title":"Test","body":"Body","actions":[{"id":"ok","type":"submit","label":"OK"}],"idempotencyKey":"overflow-bounds","expiresInSeconds":1e400}}}', {}],
+    ] as [string, Record<string, string>][]) {
+      assert.deepEqual(await rpc(bases[1]!, body, headers), await rpc(bases[0]!, body, headers), body.slice(0,150));
     }
     for (const [name, args] of [
       ['get_sms_code_request', {}], ['get_sms_code_request', { requestId: 1 }], ['get_sms_code_request', { requestId: '?' }],

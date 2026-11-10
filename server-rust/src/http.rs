@@ -288,6 +288,32 @@ async fn route(s: App, request: Request) -> Result<Response> {
         .collect::<Vec<_>>();
     let segments = parts_of_path.iter().map(String::as_str).collect::<Vec<_>>();
     let p = segments.as_slice();
+    // Express decodes matched path parameters before invoking authentication.
+    let parameters: Vec<&str> = match p {
+        ["v1" | "v2", "requests", id]
+        | ["v1", "grants", id]
+        | ["v2", "webhooks", id]
+        | ["v1", "devices", id] => vec![id],
+        ["v1", "requests", id, "cancel"]
+        | ["v2", "requests", id, "cancel" | "result"]
+        | ["v2", "grants", id, "forms"]
+        | ["v1", "devices", id, "grants" | "history"]
+        | ["v2", "devices", id, "inbox"] => vec![id],
+        ["v1" | "v2", "devices", device, "requests", id]
+        | ["v1", "devices", device, "requests", id, "events"]
+        | [
+            "v2",
+            "devices",
+            device,
+            "requests",
+            id,
+            "events" | "submissions",
+        ] => vec![device, id],
+        _ => vec![],
+    };
+    for parameter in parameters {
+        urlencoding(parameter)?;
+    }
     let r = &s.relay;
     let mut status = 200;
     let query_value = |key: &str| -> Result<Option<String>> {
@@ -586,14 +612,14 @@ fn urlencoding(s: &str) -> Result<String> {
             let high = input.next().and_then(|b| (b as char).to_digit(16));
             let low = input.next().and_then(|b| (b as char).to_digit(16));
             let (Some(high), Some(low)) = (high, low) else {
-                return Err(Error::Api(400, "invalid_input"));
+                return Err(Error::External);
             };
             bytes.push((high * 16 + low) as u8);
         } else {
             bytes.push(b);
         }
     }
-    String::from_utf8(bytes).map_err(|_| Error::Api(400, "invalid_input"))
+    String::from_utf8(bytes).map_err(|_| Error::External)
 }
 async fn stream(s: App, secret: String, cursor: Option<String>) -> Result<Response> {
     let mut page = s.relay.events(secret.clone(), cursor.clone()).await?;

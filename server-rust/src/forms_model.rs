@@ -109,6 +109,14 @@ fn lengths(schema: &Value, v: &Value) -> bool {
     true
 }
 pub fn validate(name: &str, v: &Value) -> Result<()> {
+    fn finite(v: &Value) -> bool {
+        match v {
+            Value::Number(n) => n.as_f64().is_some(),
+            Value::Array(a) => a.iter().all(finite),
+            Value::Object(m) => m.values().all(finite),
+            _ => true,
+        }
+    }
     static VALIDATORS: OnceLock<Vec<jsonschema::Validator>> = OnceLock::new();
     let all = VALIDATORS.get_or_init(|| {
         ["form", "submission", "observation", "webhook", "sms"]
@@ -125,7 +133,13 @@ pub fn validate(name: &str, v: &Value) -> Result<()> {
         _ => unreachable!(),
     };
     ensure(
-        all[i].is_valid(v) && lengths(schema(name), v),
+        finite(v)
+            && all[i].is_valid(v)
+            && lengths(schema(name), v)
+            && (name != "webhook"
+                || v["url"]
+                    .as_str()
+                    .is_some_and(|s| url::Url::parse(&crate::js_string::utf8(s)).is_ok())),
         400,
         "invalid_input",
     )

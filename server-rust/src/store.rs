@@ -26,6 +26,17 @@ impl Serialize for ExplicitNulls<'_> {
         serializer: S,
     ) -> std::result::Result<S::Ok, S::Error> {
         match self.0 {
+            Value::Number(n) => {
+                if let Some(n) = n.as_i64() {
+                    serializer.serialize_i64(n)
+                } else if let Some(n) = n.as_u64() {
+                    serializer.serialize_u64(n)
+                } else if let Some(n) = n.as_f64() {
+                    serializer.serialize_f64(n)
+                } else {
+                    Err(serde::ser::Error::custom("invalid_number"))
+                }
+            }
             Value::String(s) => serializer.serialize_str(
                 &crate::js_string::storage(s)
                     .map_err(|_| serde::ser::Error::custom("invalid_utf16"))?,

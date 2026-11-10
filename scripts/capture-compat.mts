@@ -7,7 +7,7 @@ import { z } from 'zod';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { getParseErrorMessage } from '@modelcontextprotocol/sdk/server/zod-compat.js';
-import { CallToolRequestSchema, TaskAugmentedRequestParamsSchema, JSONRPCRequestSchema } from '@modelcontextprotocol/sdk/types.js';
+import { CallToolRequestSchema, TaskAugmentedRequestParamsSchema, JSONRPCRequestSchema, JSONRPCMessageSchema, InitializeRequestSchema, ListToolsRequestSchema, PingRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { app } from '../server/src/http.js';
 import type { Relay } from '../server/src/relay.js';
 import { requestSchema, idSchema } from '../server/src/model.js';
@@ -42,7 +42,7 @@ const toolSchemas = { request_sms_code: z.object(requestSchema.shape), create_re
   poll_request_events: z.object({ cursor: z.string().max(128).optional() }),
 };
 save('tool-parsers.json', Object.fromEntries(Object.entries(toolSchemas).map(([name, schema]) => [name, toolParser(schema)])));
-save('tool-envelope.json', { call: toolParser(CallToolRequestSchema), task: toolParser(TaskAugmentedRequestParamsSchema), request: toolParser(JSONRPCRequestSchema) });
+save('tool-envelope.json', { call: toolParser(CallToolRequestSchema), task: toolParser(TaskAugmentedRequestParamsSchema), request: toolParser(JSONRPCRequestSchema), message: toolParser(JSONRPCMessageSchema), initialize: toolParser(InitializeRequestSchema), list: toolParser(ListToolsRequestSchema), ping: toolParser(PingRequestSchema) });
 const basicForm = { title: ' Test ', body: 'Body', idempotencyKey: 'tool-input', actions: [{ id: 'ok', label: ' OK ', type: 'submit' }] };
 const toolCases: { name: keyof typeof toolSchemas; input: unknown }[] = [
   ...[{}, { requestId: 1 }, { requestId: '?' }, { requestId: 'valid', extra: true }].map(input => ({ name: 'get_sms_code_request' as const, input })),
