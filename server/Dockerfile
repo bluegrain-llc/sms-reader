@@ -9,7 +9,9 @@ RUN npm run build --workspace server
 RUN npm prune --omit=dev --workspace server --include-workspace-root=false && mkdir -p server/node_modules
 
 FROM node:24-bookworm-slim
+ARG SOURCE_REVISION=unknown
 LABEL org.opencontainers.image.source="https://github.com/bluegrain-llc/sms-reader"
+LABEL org.opencontainers.image.revision=$SOURCE_REVISION
 ENV NODE_ENV=production PORT=8080
 WORKDIR /app
 COPY --from=build --chown=node:node /app/node_modules ./node_modules

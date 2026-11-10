@@ -30,3 +30,9 @@ Publishing uses the repository's temporary `GITHUB_TOKEN` with `packages: write`
 Delivery publishes installable/build artifacts; deploying to the existing Cloud Run service uses the explicit project and signing fingerprint procedure in [DEPLOYMENT.md](DEPLOYMENT.md). Signed pilot APKs require the private signing key and release configuration described there. These credentials are never needed by CI.
 
 The Android UI job removes unused .NET and Android NDK installations from its disposable hosted runner before starting the emulator. API 36 images can require over 7 GiB for userdata despite the requested 2 GiB data-partition setting; a low-space runner can exit before ADB starts. This cleanup preserves the Java/Kotlin toolchain and Android SDK packages used by the tests.
+
+## Protected production release
+
+The separate manually dispatched `Protected production release` workflow accepts a successful `main` push CI run ID, verifies that run's archived image/checksum/commit, builds and verifies signed release artifacts and deploys the tested image by Artifact Registry digest. It uses a protected GitHub environment and Google Workload Identity Federation. Repository administrators must configure the environment approval and branch restrictions before use.
+
+Deployment stages a fully configured zero-traffic revision, verifies its tagged URL and promotes 5%, 25%, then 100% with observation windows and rollback on failure. The image is not rebuilt during cloud deployment. Five application review/fix cycles, required CI and external release acceptance remain independent gates; this workflow does not submit anything to Google Play. See [deployment configuration and recovery](DEPLOYMENT.md).

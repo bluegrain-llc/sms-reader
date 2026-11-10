@@ -1,79 +1,59 @@
-# Firebase and Cloud Run deployment
+# Deployment and release
 
-Use a dedicated Firebase/Google Cloud project with billing enabled. Deployment creates billable resources; the checked-in scripts do not run automatically. The machine's default gcloud project is never selected implicitly.
+The production release path deploys a tested image digest. It never builds local source during deployment. Cloud Run keeps scale-to-zero, a 120-second request timeout and a per-revision maximum of ten instances (concurrent revisions can exceed ten total during rollout). Resource creation and traffic changes remain explicit operator actions against a named project.
 
-## Project prerequisites
+## One-time infrastructure setup
 
-1. Create/select a Firebase project and a Firestore **Native mode** default database. Choose its region deliberately; keep Cloud Run nearby.
-2. Enable Firebase Authentication's **Google** provider. Configure its support email and OAuth consent branding/test users for the pilot.
-3. Register Android package `com.bluegrain.smsrelay`. Record the Firebase app ID, API key, project ID, project number (FCM sender ID), and the OAuth **web application** client ID. These are configuration values; do not put service-account private keys in the APK.
-4. Keep the FCM HTTP v1 API enabled. The server uses its Cloud Run service identity and Application Default Credentials, without a downloaded key.
-5. The deploying identity needs permission to enable APIs, create service accounts and repositories, grant project roles, deploy Cloud Run, submit Cloud Build jobs, deploy Firestore rules/indexes/TTL policies, and create Scheduler jobs. Cloud Build must be able to push to the chosen Artifact Registry repository. Ensure the Cloud Scheduler service agent retains its standard service-agent role so it can mint OIDC tokens.
+Select a dedicated Firebase project and billing account. Create the Native Firestore database in the intended region, enable Google sign-in, register Android package `com.bluegrain.smsrelay`, and register the signing fingerprints with Firebase/OAuth. Record app ID, API key, sender ID and the OAuth web client ID. These client configuration values are not service-account secrets.
 
-```sh
-npm ci
-export PROJECT_ID=your-explicit-project
-export REGION=us-central1
-./scripts/deploy.sh
-```
+Run `npm ci`, then set `PROJECT_ID`, `REGION` and `SERVICE_URL` explicitly and run `scripts/provision.sh`. It provisions API access, service identities, Artifact Registry, the delivery queue, Firestore rules/indexes and the authenticated minute-by-minute Scheduler. It does not deploy application traffic or create the Firestore database. Supply an existing canonical HTTPS service URL; do not use a candidate-tag hostname as the Scheduler audience.
 
-The deployment script enables required APIs, creates dedicated server, build, and scheduler identities, builds the Docker image, deploys public HTTPS ingress with application authentication, configures the minute-by-minute maintenance job, and deploys Firestore rules and indexes. The server identity receives `roles/datastore.user`, `roles/firebaseauth.admin`, and `roles/firebasecloudmessaging.admin`. The separate build identity receives `roles/cloudbuild.builds.builder`, and Cloud Build writes to Cloud Logging. The scheduler identity is authorized by the application's verified OIDC email/audience, rather than application bearer tokens.
+The server identity receives Firestore, Firebase Auth administration, FCM and task-enqueue access and can act as the Scheduler identity for task OIDC. Firestore direct-client rules remain deny-all. Keep all emulator environment variables absent in cloud revisions.
 
-Firestore's direct client rules deny every read/write. Admin SDK access is controlled by IAM. The code/results/purpose/FCM-token fields are excluded from indexing where appropriate. Firestore indexes must finish building before relying on history or maintenance queries. Confirm TTL is enabled for `results.purgeAt`, `requests.purgeAt`, and `audit.purgeAt`; the field overrides are part of the checked-in index configuration.
+Initial staging bootstrap is separate from production rollout: create a fully configured baseline service in a disposable project, with no production data or clients. Record its canonical URL, configure Scheduler and pair a dedicated smoke caller there. The guarded rollout deliberately refuses a service without an existing named 100% traffic allocation. Never use bootstrap commands to replace an existing production service.
 
-The script is rerunnable and updates the existing service and Scheduler job. It uses immutable timestamp image tags. It never creates a Firestore database or changes authentication providers automatically; complete those console prerequisites first. Changing data location after creation requires migration.
+## Protected GitHub release configuration
 
-## Cloud Run settings
+Create a GitHub environment named `production`, restrict deployments to protected `main`, and configure required human reviewers. GitHub environment protection is a repository setting, not something a workflow file can enforce by itself. Do not enable the release workflow for production until these controls are verified.
 
-- `GOOGLE_CLOUD_PROJECT`: selected Firebase project.
-- `SERVICE_URL`: exact Cloud Run HTTPS URL and Scheduler OIDC audience, no trailing slash.
-- `SCHEDULER_EMAIL`: dedicated scheduler service-account email.
-- `ALLOWED_ORIGINS`: optional comma-separated exact browser origins; empty denies browser-origin requests. Native Android and ordinary MCP clients need no entry. A browser integration additionally needs its own deliberate CORS design; no permissive CORS middleware is supplied.
-- `PORT`: injected by Cloud Run (8080 in local container).
+Configure Workload Identity Federation to accept only this repository's `production` environment subject. No downloaded service-account JSON keys are used. The release service account needs Artifact Registry write, Cloud Run deployment, act-as on the server identity, Firestore index/rules deployment, Firebase Android app config read access and Cloud Logging read access. Use repository-specific/project-scoped bindings; no project Owner role is needed. Provisioning IAM is a separate operator duty.
 
-Do not enable request-body/header dumps, HTTP interceptors, APM body capture, or query-string credentials. Cloud Run access logs contain route/status metadata; the service logs only static event names. Use status/error counts and Scheduler failures for monitoring. Alarm on maintenance failure, oldest pending delivery age, quota errors, and growth of expired result documents. Firestore TTL is asynchronous and is a backstop, not an API expiry check.
+Environment variables:
 
-For local service development, run with Application Default Credentials for a dedicated development project or explicit emulator variables. Emulator authentication bypasses real JWT signing by Firebase design; never set `FIREBASE_AUTH_EMULATOR_HOST` or `FIRESTORE_EMULATOR_HOST` on the deployed service.
+- `GCP_PROJECT_ID`, `GCP_REGION` (default `us-central1`), `GCP_SERVICE` (default `sms-code-relay`).
+- `GCP_WORKLOAD_IDENTITY_PROVIDER`, `GCP_RELEASE_SERVICE_ACCOUNT`.
+- `ANDROID_SIGNING_SHA256S`: JSON array of public uppercase colon-separated app signing fingerprints, including pilot/Play identities currently supported.
+- `ANDROID_UPLOAD_SHA256`: public upload-key fingerprint used to verify the CI-signed APK/AAB. It may differ from Play's installed-app signer.
+- `RELAY_KEY_ALIAS`, `RELAY_URL`, `FIREBASE_APP_ID`, `FIREBASE_API_KEY`, `FIREBASE_SENDER_ID`, `GOOGLE_WEB_CLIENT_ID`.
 
-## Android signing and configuration
+Environment secrets: `RELAY_KEYSTORE_BASE64`, `RELAY_STORE_PASSWORD`, `RELAY_KEY_PASSWORD`, and `RELAY_SMOKE_TOKEN`. The smoke token belongs to a dedicated paired caller. Smoke only lists tools and checks an absent request; it never creates a request or triggers SMS. Signing material is written to a private temporary file and removed on success or failure.
 
-Use JDK 17+ (JDK 21 is verified), SDK 36, and the included Gradle 8.13 wrapper with distribution checksum. Keep pilot values in environment variables or `~/.gradle/gradle.properties`, using [the example](../android/pilot.properties.example). `RELAY_URL` must be HTTPS; cleartext traffic is disabled.
+## Release procedure
 
-```sh
-export RELAY_KEYSTORE=/private/path/sms-relay-pilot.jks
-export RELAY_STORE_PASSWORD='set-privately'
-export RELAY_KEY_PASSWORD='set-privately'
-export RELAY_KEY_ALIAS=pilot
-# Set the Firebase and URL variables shown in pilot.properties.example too.
-./scripts/build-pilot.sh
-```
+1. Wait for the `CI and delivery` push run on `main` to succeed. Its tested container archive includes a SHA-256 checksum and an OCI commit label.
+2. Dispatch `Protected production release` from `main`, supplying that CI run ID. The workflow rejects incomplete, failed, non-main, fork or unrelated workflow runs.
+3. The workflow verifies the archive/commit label, builds release lint/R8/APK/AAB with complete configuration, verifies the Android configuration against the registered Firebase app and canonical Cloud Run URL, then verifies both signatures against the upload certificate and copies the tested container into Artifact Registry.
+4. Deployment consumes the Artifact Registry digest, deploys additive indexes and waits for READY. It creates one fully configured revision with zero traffic and tag `candidate`.
+5. The tagged URL must pass health, unauthenticated rejection, App Links certificate matching, authenticated REST and MCP tool-list checks before receiving traffic.
+6. Traffic progresses through 5%, 25%, then 100%, each with at least 60 seconds of observation, repeat smoke checks and a candidate HTTP 5xx log check. No traffic-stage advances after failed checks.
+7. Retain `release-evidence`: exact commit/digest/revision, previous traffic allocation, signed artifacts, checksums and signature results. Staging/load/physical acceptance remains separate from these deployment smoke checks.
 
-The build script creates the key only when the target path does not exist, runs unit tests and release lint, then copies the signed APK/AAB and checksums into ignored `artifacts/`. It never overwrites an existing key. Back up the key privately: Android upgrades must use the same signing identity.
+The release workflow serializes production deploys and does not cancel an in-progress deployment for a later one. Staging may use the same scripts with a separate explicit project and identities. For an operator-run deployment set `PROJECT_ID`, `IMAGE_URI` (`LOCATION-docker.pkg.dev/PROJECT/REPO/IMAGE@sha256:...`), full `COMMIT_SHA`, `RELAY_SMOKE_TOKEN`, and certificate configuration before invoking `scripts/deploy.sh`. The operator must first establish the same successful-CI provenance; the protected workflow automates that check.
 
-Before sign-in testing, register the certificate's SHA-1 and SHA-256 in the Firebase Android app settings. The Google OAuth Android client must match package name and signing certificate; `GOOGLE_WEB_CLIENT_ID` must be the web client in the same project. For Play App Signing, register the Play signing certificate as well. No `google-services.json` is needed: the app initializes Firebase explicitly from BuildConfig values.
+`DEPLOYMENT_MANIFEST_PATH` defaults to `artifacts/deployment.json`. Its JSON fields include `projectId`, `region`, `service`, `serviceUrl`, `revision`, `image`, `commit`, `schedulerEmail`, `deliveryQueue`, `candidateUrl`, `previousTraffic`, `previousImages` and `status`. No token or signing secret is written. `PROMOTION_HOLD_SECONDS` may extend, but cannot shorten, the 60-second observation period.
 
-## Deployed verification
+## Failure and rollback
 
-Check `/health`, Scheduler's authenticated invocation, Firestore index readiness, expiry cleanup, FCM reception with the app stopped/backgrounded, and Google sign-in from the signed APK. Run:
+Before promotion, errors leave the named previous revisions serving traffic. After promotion begins, a failed smoke/log check or handled interruption restores the exact previous percentage split, never `LATEST`. The manifest reports `rolled-back` or `rollback-required`. SIGKILL, runner loss and failed rollback RPCs still require operator recovery; inspect actual Cloud Run traffic before retrying.
 
-```sh
-RELAY_URL=https://SERVICE RELAY_TOKEN='provided-privately' node examples/mcp-smoke.mjs
-```
+Use `previousTraffic` in the retained manifest to restore the recorded allocation with `gcloud run services update-traffic SERVICE --project PROJECT --region REGION --to-revisions REVISION=PERCENT,...`. Confirm service health, authenticated caller access, Scheduler and delivery after recovery. Do not rerun promotion until the failure is understood. A successful smoke check is not a completed live rollback drill; record that drill separately in staging.
 
-This opens and cancels a real request and may send a generic phone notification if maintenance dispatches it before cancellation; it triggers no SMS. Then run the physical checklist in [PILOT.md](PILOT.md). Keep the rollout private until every required case is recorded. Review current Play target API, privacy, data safety, and account-deletion requirements before publication.
+Deploy indexes/additive backend changes before phones. Preserve existing request fields, caller credentials and signing identities. Do not deploy an older backend after introducing records it cannot safely interpret. Destructive schema changes require a separate reviewed migration and a compatible rollback target; container rollback cannot undo a schema migration.
 
+## Android and privacy
 
-## v0.2 rollout and compatibility
+Use JDK 17+ (JDK 21 in CI), SDK 36 and the pinned Gradle wrapper. `scripts/build-pilot.sh` validates the exact Gradle-property-preferred public settings, rejects known placeholders and checks Firebase project-number consistency and creates a private pilot signing key only when the chosen path does not already exist. Back up signing keys outside the repository. For Play builds, use a separate upload key and register the certificates of the APKs Play actually signs.
 
-Deploy the `ownerId + createdAt DESC` history index and wait for READY before sending phone traffic to v0.2. The per-phone state map is excluded from indexing. Check that no legacy request is active during the pilot upgrade; existing sign-in, registrations and caller credentials remain usable. Existing caller credentials now notify all the owner's available phones for new requests.
+The backend accepts `ANDROID_SIGNING_SHA256S` as a JSON array and continues to accept legacy `ANDROID_SIGNING_SHA256`. Asset Links contains the deduplicated union; malformed fingerprints fail closed. Do not drop an active certificate until its installed clients have migrated.
 
-Stage the new Cloud Run image with no traffic, verify health and authenticated MCP version/tool listing, then explicitly move traffic to that verified revision. A service pinned to a revision needs an explicit traffic update during future deployments. New manager grants and multi-phone queued requests require v0.2-compatible server code; do not roll back to the v0.1 data model after creating them. Keep prior signing credentials for an Android in-place upgrade.
-
-
-## Direct pairing (v0.3)
-
-Before running the deployment script, export the public `ANDROID_SIGNING_SHA256` value (also propagated to the runtime) to the APK signing certificate's uppercase colon-separated SHA-256 fingerprint. The backend serves this public certificate in `/.well-known/assetlinks.json`. `SERVICE_URL` must be the canonical HTTPS service URL. The release manifest derives its verified App Link host from `RELAY_URL`; custom-scheme and manual-code fallbacks remain available.
-
-Deploy Firestore retention/index overrides for `connections` (seven days), `connectionCodes` (ten-minute approval window), and `connectionRates` (ten-minute quota window). All use `purgeAt`, scheduled cleanup, and TTL backstops. No additional composite indexes are required beyond the five existing SMS indexes. Verify the public asset-links response against the APK signer before upgrading phones.
-
-Manager creation/provisioning APIs are retired and their child credentials are rejected. Direct pairing creates owner-bound caller grants without a parent credential. Existing ordinary pilot grants remain compatible. Configure an ingress proxy hop only for a trusted proxy deployment; production Cloud Run uses one hop, while direct local servers use zero. Verify source/global creation quotas and owner decision quotas before exposing pairing outside the private pilot.
+Do not enable request/header/body capture. Use [production monitoring, alert provisioning and incident runbooks](OPERATIONS.md) for maintenance, delivery age, provider failures and overdue result deletion. API expiry is independent of asynchronous TTL cleanup. Signed release and cloud smoke evidence do not replace physical-phone consent, denial, lifecycle or multi-phone acceptance in [PILOT.md](PILOT.md).
