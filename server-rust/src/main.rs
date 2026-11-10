@@ -3,6 +3,7 @@ use sms_code_relay::{
     http::{Options, app},
     model,
     relay::Relay,
+    security::RecoveryGate,
     store::Store,
 };
 use std::{sync::Arc, time::Duration};
@@ -22,7 +23,15 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         return Err("emulators_not_allowed_on_cloud_run".into());
     }
     let google = Arc::new(Google::new(project.clone()));
+    if let Some(bucket) = google
+        .security_bucket
+        .as_deref()
+        .filter(|bucket| !bucket.is_empty())
+    {
+        sms_code_relay::security::validate_bucket(bucket)?;
+    }
     let store = Store::new(&project).await?;
+    let gate = RecoveryGate::start(store.clone(), google.clone());
     let relay = Relay {
         store,
         clock: Arc::new(model::now),
@@ -31,6 +40,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let router = app(
         relay,
         Options {
+            serving: Some(gate.clone()),
             auth: google,
             public_url: std::env::var("SERVICE_URL").ok(),
             android_cert: std::env::var("ANDROID_SIGNING_SHA256").ok(),
@@ -56,7 +66,10 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         listener,
         router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
-    .with_graceful_shutdown(shutdown())
+    .with_graceful_shutdown(async move {
+        shutdown().await;
+        gate.close();
+    })
     .await?;
     Ok(())
 }

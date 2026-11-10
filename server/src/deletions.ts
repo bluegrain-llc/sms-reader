@@ -1,4 +1,6 @@
 import { randomBytes, randomUUID } from 'node:crypto';
+import type { RecordSecurity } from './security-ledger.js';
+import { MaintenancePages } from './maintenance-pages.js';
 import { telemetry, category } from './telemetry.js';
 import { Access } from './access.js';
 import { Firestore } from 'firebase-admin/firestore';
@@ -12,7 +14,7 @@ export interface DeletionJob {
 }
 /** The account tombstone survives cleanup. Receipts authorize status only, never account access. */
 export class Deletions {
-  constructor(readonly db: Firestore, readonly now: () => number, readonly wake: () => Promise<void>) {}
+  constructor(readonly db: Firestore, readonly now: () => number, readonly wake: () => Promise<void>, readonly recordSecurity: RecordSecurity = async () => {}) {}
   private initialJob(uid: string, legacyAt?: number): DeletionJob {
     const acceptedAt = Number.isFinite(legacyAt) ? Math.min(legacyAt!, this.now()) : this.now();
     return { ownerId: uid, status: 'pending', createdAt: acceptedAt, updatedAt: this.now(), nextAt: this.now(), backlogAt: acceptedAt, lease: null,
@@ -20,27 +22,41 @@ export class Deletions {
   }
   /** Adopt interrupted pre-worker deletions before sampling or executing the durable queue. */
   async migrateLegacy() {
-    const attempts = await this.db.collection('deletionAttempts').orderBy('nextAt').limit(100).get();
-    for (const attempt of attempts.docs) await this.db.runTransaction(async tx => {
-      const current = await tx.get(attempt.ref);
-      if (!current.exists) return;
-      const uid: unknown = current.data()?.ownerId;
+    return new MaintenancePages(this.db).run('legacy-deletion', this.db.collection('deletionAttempts').where('nextAt', '<=', this.now()),
+      'nextAt', 8, async id => {
+      const attempt = await this.db.collection('deletionAttempts').doc(id).get();
+      if (!attempt.exists) return;
+      const uid: unknown = attempt.data()?.ownerId;
       ensure(typeof uid === 'string' && uid.length > 0 && hash(uid) === attempt.id, 500, 'invalid_legacy_deletion');
-      const account = this.db.collection('accounts').doc(uid), job = this.db.collection('deletionJobs').doc(attempt.id);
-      const [owner, existing] = await Promise.all([tx.get(account), tx.get(job)]);
-      // Legacy completion was committed only after both record and identity cleanup succeeded.
-      if (!owner.data()?.deletionTelemetryComplete) {
-        const adopted = this.initialJob(uid, current.data()?.nextAt);
-        if (!existing.exists) tx.create(job, adopted);
-        else if (existing.data()?.status !== 'completed') tx.update(job, {
-          createdAt: Math.min(existing.data()!.createdAt, adopted.createdAt), backlogAt: Math.min(existing.data()!.backlogAt, adopted.backlogAt),
-        });
-      }
-      tx.set(account, { deleting: true });
-      tx.delete(attempt.ref);
-    });
+      const abort = new AbortController(); let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        // A ledger outage cannot consume the unrelated worker's whole budget.
+        await Promise.race([this.recordSecurity({ ownerId: uid, kind: 'account.delete', target: uid }, abort.signal),
+          new Promise<never>((_resolve, reject) => { timer = setTimeout(() => {
+            abort.abort(); reject(Object.assign(Error('legacy_ledger_timeout'), { code: 'ETIMEDOUT' }));
+          }, 5000); })]);
+      } finally { clearTimeout(timer); }
+      await this.db.runTransaction(async tx => {
+        const current = await tx.get(attempt.ref);
+        if (!current.exists) return;
+        ensure(current.data()?.ownerId === uid, 500, 'invalid_legacy_deletion');
+        const account = this.db.collection('accounts').doc(uid), job = this.db.collection('deletionJobs').doc(attempt.id);
+        const [owner, existing] = await Promise.all([tx.get(account), tx.get(job)]);
+        // Legacy completion was committed only after both record and identity cleanup succeeded.
+        if (!owner.data()?.deletionTelemetryComplete) {
+          const adopted = this.initialJob(uid, current.data()?.nextAt);
+          if (!existing.exists) tx.create(job, adopted);
+          else if (existing.data()?.status !== 'completed') tx.update(job, {
+            createdAt: Math.min(existing.data()!.createdAt, adopted.createdAt), backlogAt: Math.min(existing.data()!.backlogAt, adopted.backlogAt),
+          });
+        }
+        tx.set(account, { deleting: true });
+        tx.delete(attempt.ref);
+      });
+    }, 8);
   }
   async request(uid: string) {
+    await this.recordSecurity({ ownerId: uid, kind: 'account.delete', target: uid });
     const receipt = `smsd_${randomBytes(32).toString('base64url')}`, jobId = hash(uid), expiresAt = this.now() + DAY;
     const ref = this.db.collection('deletionJobs').doc(jobId);
     const status = await this.db.runTransaction(async tx => {
@@ -113,8 +129,8 @@ export class Deletions {
     }
   }
   async dispatch(deleteIdentity: (uid: string) => Promise<void>) {
-    const deadline = Date.now() + 40_000;
     await this.migrateLegacy();
+    const deadline = Date.now() + 40_000;
     // Fair rounds let multiple owners make progress; wall-clock budget fits the HTTP deadline.
     for (let round = 0; round < 40 && Date.now() < deadline; round++) {
       const jobs = await this.db.collection('deletionJobs').where('nextAt', '<=', this.now()).orderBy('nextAt').limit(10).get();

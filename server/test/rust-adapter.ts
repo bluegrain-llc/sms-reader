@@ -9,6 +9,7 @@ import type { HttpOptions } from '../src/http.js';
 import type { Firestore } from 'firebase-admin/firestore';
 import { sendWebhook } from '../src/webhooks.js';
 import { telemetry } from '../src/telemetry.js';
+import type { RecordSecurity } from '../src/security-ledger.js';
 let host: Promise<string> | undefined, child: ChildProcess | undefined, callbacks: Server | undefined;
 let callbackPort = 0, next = 0;
 const clients = new Map<number, RustRelay>();
@@ -18,6 +19,9 @@ async function init() {
   if (!host) host = (async () => {
     if (!process.env.FIRESTORE_EMULATOR_HOST) throw Error('Rust contracts require emulator');
     callbacks = createServer(async (req, res) => {
+      const cancellation = new AbortController();
+      req.once('aborted', () => cancellation.abort());
+      res.once('close', () => { if (!res.writableFinished) cancellation.abort(); });
       try {
         const parts: Buffer[] = []; for await (const chunk of req) parts.push(chunk);
         const { kind, args } = JSON.parse(Buffer.concat(parts).toString());
@@ -25,6 +29,8 @@ async function init() {
         const relay = clients.get(Number(url.pathname.slice(1)))!;
         if (kind === 'now') { res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify(relay.now())); return; }
         if (kind === 'telemetry') { telemetry.emit(args[0]); res.end('null'); return; }
+        if (kind === 'security') { await relay.recordSecurity(args[0], cancellation.signal); res.end('null'); return; }
+        if (kind === 'serving') { relay.options!.assertServing!(); res.end('null'); return; }
         const remove = deleteCallbacks.get(Number(url.searchParams.get('delete')));
         const fn = (kind === 'notify' ? relay.notify : kind === 'wake' ? relay.wake : kind === 'webhook' ? relay.callback
           : kind === 'owner' ? relay.options!.verifyOwner : kind === 'worker' ? relay.options!.verifyScheduler : remove ?? relay.options!.deleteIdentity) as (...args: unknown[]) => Promise<unknown>;
@@ -62,7 +68,7 @@ export class RustRelay {
   readonly connections: any;
   readonly access: any;
   readonly deletions: any;
-  constructor(readonly db: Firestore, readonly notify: Notify, readonly now = Date.now, readonly wake: () => Promise<void> = async () => {}) {
+  constructor(readonly db: Firestore, readonly notify: Notify, readonly now = Date.now, readonly wake: () => Promise<void> = async () => {}, readonly recordSecurity: RecordSecurity = async () => {}) {
     clients.set(this.id, this);
     this.forms = new Proxy({}, { get: (target, method) => method in target ? Reflect.get(target, method) : (...args: unknown[]) => this.call(`forms.${String(method)}`, args) });
     this.connections = new Proxy({}, { get: (_t, method) => (...args: unknown[]) => this.call(`connections.${String(method)}`, args) });
@@ -103,7 +109,7 @@ class RustServer extends EventEmitter {
     super(); relay.options = options;
     this.pending = (async () => {
       const response = await fetch(`${await init()}/start`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...await relay.payload(), options }), signal: AbortSignal.timeout(15_000) });
+        body: JSON.stringify({ ...await relay.payload(), options, hasServing: typeof options.assertServing === 'function' }), signal: AbortSignal.timeout(15_000) });
       const result = await response.json() as { port: number; id: string }; this.port = result.port; this.id = result.id; this.emit('listening');
     })();
     this.pending.catch(error => this.emit('error', error));

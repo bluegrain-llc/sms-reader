@@ -21,6 +21,12 @@ impl Relay {
         Ok((g, a))
     }
     pub async fn approve_forms(&self, uid: String, id: String, approved: bool) -> Result<()> {
+        if !approved {
+            self.validate_owner_grant(uid.clone(), id.clone()).await?;
+            self.delivery
+                .security(json!({"ownerId":uid,"kind":"forms.deny","target":id}))
+                .await?;
+        }
         let s = self.clone();
         let gid = id.clone();
         self.store
@@ -382,6 +388,18 @@ if text(r,"status")!="pending"{return Ok(form_view(r));}ensure(!flag(&c.d,"pause
         Ok(hook)
     }
     pub async fn webhooks(&self, secret: String, remove: Option<String>) -> Result<Value> {
+        if let Some(target) = &remove {
+            let relay = self.clone();
+            let key = secret.clone();
+            let grant = self
+                .store
+                .tx(move |tx| {
+                    let (relay, key) = (relay.clone(), key.clone());
+                    Box::pin(async move { Ok(relay.form_agent(tx, &key).await?.0) })
+                })
+                .await?;
+            self.delivery.security(json!({"ownerId":grant["ownerId"],"kind":"webhook.delete","target":target,"grantId":grant["id"]})).await?;
+        }
         let s = self.clone();
         self.store
             .tx(move |tx| {

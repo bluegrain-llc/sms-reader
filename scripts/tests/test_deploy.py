@@ -14,7 +14,8 @@ class DeploymentSafety(unittest.TestCase):
     def setUp(self):
         self.env = {'PROJECT_ID': 'demo-sms-relay', 'COMMIT_SHA': 'a' * 40,
                     'IMAGE_URI': 'us-central1-docker.pkg.dev/demo-sms-relay/relay/app@sha256:' + 'b' * 64,
-                    'RELAY_SMOKE_TOKEN': 'private-fixture', 'ANDROID_SIGNING_SHA256': ':'.join(['AA'] * 32)}
+                    'RELAY_SMOKE_TOKEN': 'private-fixture', 'ANDROID_SIGNING_SHA256': ':'.join(['AA'] * 32),
+                    'SECURITY_LEDGER_BUCKET': 'independent-test-ledger'}
 
     def test_refuses_mutable_or_cross_project_images_before_cloud_calls(self):
         for bad in ['app:latest', self.env['IMAGE_URI'].replace('demo-sms-relay', 'other-project')]:
@@ -22,6 +23,9 @@ class DeploymentSafety(unittest.TestCase):
                 d.config({**self.env, 'IMAGE_URI': bad})
         with self.assertRaises(ValueError):
             d.config({**self.env, 'ANDROID_SIGNING_SHA256S': '["bad"]'})
+        for bucket in ['', 'gs://invalid', 'unsafe|injection']:
+            with self.subTest(bucket=bucket), self.assertRaises(ValueError):
+                d.config({**self.env, 'SECURITY_LEDGER_BUCKET': bucket})
 
     def exercise(self, failure=None, **options):
         calls = []
@@ -50,8 +54,11 @@ class DeploymentSafety(unittest.TestCase):
             return ''
         def fake_smoke(*args, **kwargs):
             smoke_calls.append(args)
+            if failure == 'ledger' and args[0][-1] == 'scripts/check-security-ledger.ts':
+                raise RuntimeError('ledger unavailable')
             if failure == 'smoke':
-                raise RuntimeError('failed')
+                if args[0][-1] == 'scripts/release-smoke.mjs':
+                    raise RuntimeError('failed')
         with tempfile.TemporaryDirectory() as folder:
             cfg = d.config({**self.env, **options, 'DEPLOYMENT_MANIFEST_PATH': str(Path(folder) / 'manifest.json')})
             with patch.object(d, 'run', side_effect=fake_run), patch.object(d.subprocess, 'run', side_effect=fake_smoke), patch.object(d.time, 'time', return_value=1000), patch.object(d.time, 'sleep'):
@@ -64,11 +71,13 @@ class DeploymentSafety(unittest.TestCase):
         return calls, traffic, manifest, smoke_calls
 
     def test_bad_indexes_digest_or_smoke_never_change_traffic(self):
-        for failure in ['index', 'digest', 'smoke']:
+        for failure in ['ledger', 'index', 'digest', 'smoke']:
             with self.subTest(failure=failure):
-                _, traffic, manifest, _ = self.exercise(failure)
+                calls, traffic, manifest, _ = self.exercise(failure)
                 self.assertEqual(traffic, [])
                 self.assertEqual(manifest['status'], 'failed-before-promotion')
+                if failure == 'ledger':
+                    self.assertFalse(any(c[:3] == ['gcloud', 'run', 'deploy'] or c[:2] == ['npx', 'firebase'] for c in calls))
 
     def test_canary_failure_restores_exact_original_split(self):
         _, traffic, manifest, _ = self.exercise('canary')
@@ -87,8 +96,10 @@ class DeploymentSafety(unittest.TestCase):
         deploy = next(c for c in calls if c[:3] == ['gcloud', 'run', 'deploy'])
         self.assertIn('--no-traffic', deploy)
         self.assertIn('SERVICE_URL=https://service.example', deploy[deploy.index('--update-env-vars') + 1])
+        self.assertIn('SECURITY_LEDGER_BUCKET=independent-test-ledger', deploy[deploy.index('--update-env-vars') + 1])
         self.assertEqual([int(c[c.index('--to-revisions') + 1].split(',')[-1].split('=')[1]) for c in traffic], [5, 25, 100])
-        self.assertEqual(len(smokes), 4)
+        self.assertEqual(len(smokes), 5)
+        self.assertEqual(smokes[0][0], ['node', '--import', 'tsx', 'scripts/check-security-ledger.ts'])
         self.assertEqual(manifest['status'], 'promoted')
         self.assertNotIn('private-fixture', json.dumps(manifest))
         self.assertEqual(set(manifest['previousImages']), {'old-a', 'old-b'})
@@ -96,14 +107,14 @@ class DeploymentSafety(unittest.TestCase):
     def test_rust_defaults_to_zero_traffic_after_verified_smoke(self):
         _, traffic, manifest, smokes = self.exercise(BACKEND='rust')
         self.assertEqual(traffic, [])
-        self.assertEqual(len(smokes), 1)
+        self.assertEqual(len(smokes), 2)
         self.assertEqual(manifest['status'], 'staged')
         self.assertEqual(manifest['backend'], 'rust')
 
     def test_explicit_rust_promotion_keeps_guarded_canary_steps(self):
         _, traffic, manifest, smokes = self.exercise(BACKEND='rust', TRAFFIC_MODE='live')
         self.assertEqual(len(traffic), 3)
-        self.assertEqual(len(smokes), 4)
+        self.assertEqual(len(smokes), 5)
         self.assertEqual(manifest['status'], 'promoted')
 
     def test_invalid_migration_selection_fails_before_cloud_calls(self):

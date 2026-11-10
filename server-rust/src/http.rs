@@ -21,6 +21,9 @@ use std::{
     task::{Context, Poll},
     time::{Duration, Instant},
 };
+pub trait Serving: Send + Sync {
+    fn assert_serving(&self) -> futures::future::BoxFuture<'_, Result<()>>;
+}
 pub trait Authentication: Send + Sync {
     fn owner<'a>(&'a self, token: &'a str) -> futures::future::BoxFuture<'a, Result<Identity>>;
     fn worker<'a>(&'a self, token: &'a str) -> futures::future::BoxFuture<'a, Result<()>>;
@@ -40,6 +43,7 @@ impl Authentication for Google {
 #[derive(Clone)]
 pub struct Options {
     pub auth: Arc<dyn Authentication>,
+    pub serving: Option<Arc<dyn Serving>>,
     pub public_url: Option<String>,
     pub android_cert: Option<String>,
     pub android_certs: Option<Value>,
@@ -52,10 +56,16 @@ pub struct Options {
 #[derive(Clone)]
 struct App {
     relay: Relay,
+    streams: crate::event_streams::EventStreams,
     options: Options,
 }
 pub fn app(relay: Relay, options: Options) -> Router {
-    let state = App { relay, options };
+    let streams = crate::event_streams::EventStreams::new(relay.clone());
+    let state = App {
+        relay,
+        options,
+        streams,
+    };
     Router::new()
         .fallback(handle)
         .layer(middleware::from_fn_with_state(state.clone(), common))
@@ -561,6 +571,16 @@ async fn route(s: App, request: Request) -> Result<Response> {
         .collect::<Vec<_>>();
     let segments = parts_of_path.iter().map(String::as_str).collect::<Vec<_>>();
     let p = segments.as_slice();
+    let health = method == axum::http::Method::GET && matches!(p, ["health" | "healthz"]);
+    if !health
+        && (headers
+            .get("authorization")
+            .is_some_and(|value| !value.as_bytes().is_empty())
+            || (method == axum::http::Method::POST && matches!(p, ["v1", "connections"])))
+        && let Some(gate) = &s.options.serving
+    {
+        gate.assert_serving().await?;
+    }
     // Express decodes matched path parameters before invoking authentication.
     let parameters: Vec<&str> = match p {
         ["v1" | "v2", "requests", id]
@@ -1033,6 +1053,27 @@ fn signing_fingerprints(legacy: Option<&str>, additional: Option<&Value>) -> Res
     ensure(!fingerprints.is_empty(), 503, "app_links_not_configured")?;
     Ok(fingerprints)
 }
+struct StreamAdmission {
+    relay: Relay,
+    lease: Option<Value>,
+}
+impl StreamAdmission {
+    async fn release(mut self) {
+        if let Some(lease) = self.lease.take() {
+            let _ = self.relay.access_release(lease).await;
+        }
+    }
+}
+impl Drop for StreamAdmission {
+    fn drop(&mut self) {
+        if let Some(lease) = self.lease.take() {
+            let relay = self.relay.clone();
+            tokio::spawn(async move {
+                let _ = relay.access_release(lease).await;
+            });
+        }
+    }
+}
 async fn stream(s: App, secret: String, cursor: Option<String>) -> Result<Response> {
     let page = s.relay.events(secret.clone(), cursor.clone()).await?;
     let relay = s.relay.clone();
@@ -1054,26 +1095,19 @@ async fn stream(s: App, secret: String, cursor: Option<String>) -> Result<Respon
         )
         .await?;
     let remaining = (num(&lease, "deadline") - s.relay.now()).max(0) as u64;
-    if remaining == 0 {
-        s.relay.access_release(lease).await?;
-        return Ok(Response::new(Body::empty()));
-    }
+    let admission = StreamAdmission {
+        relay: s.relay.clone(),
+        lease: Some(lease),
+    };
     let end = tokio::time::Instant::now() + Duration::from_millis(remaining);
-    let relay = s.relay.clone();
-    let release_relay = s.relay;
-    let body = event_body(
-        page,
-        cursor,
-        end,
-        Duration::from_secs(1),
-        move |next| {
-            let (relay, secret) = (relay.clone(), secret.clone());
-            async move { relay.events(secret, next).await }
+    let feed = tokio::select! {
+        feed = s.streams.subscribe(secret.clone()) => match feed {
+            Ok(feed) => feed,
+            Err(_) => { admission.release().await; return Ok(Response::new(Body::empty())); }
         },
-        move || async move {
-            let _ = release_relay.access_release(lease).await;
-        },
-    );
+        _ = tokio::time::sleep_until(end) => { admission.release().await; return Ok(Response::new(Body::empty())); },
+    };
+    let body = shared_event_body(s.relay, secret, page, cursor, end, feed, admission);
     Ok((
         [
             ("Content-Type", "text/event-stream"),
@@ -1084,8 +1118,102 @@ async fn stream(s: App, secret: String, cursor: Option<String>) -> Result<Respon
     )
         .into_response())
 }
+async fn feed_page(
+    feed: &crate::event_streams::FeedSubscription,
+    relay: &Relay,
+    secret: &str,
+    next: &Option<String>,
+) -> Result<Value> {
+    let sequence = next
+        .as_ref()
+        .and_then(|cursor| cursor.get(cursor.len().saturating_sub(16)..))
+        .and_then(|sequence| sequence.parse::<i64>().ok())
+        .unwrap_or(0);
+    let events = feed.tail(sequence, relay.now());
+    if !events.is_empty() && feed.oldest().is_some_and(|oldest| sequence < oldest - 1) {
+        relay.events(secret.into(), next.clone()).await
+    } else {
+        Ok(json!({"events": events, "cursor": next}))
+    }
+}
+fn shared_event_body(
+    relay: Relay,
+    secret: String,
+    mut page: Value,
+    mut next: Option<String>,
+    end: tokio::time::Instant,
+    mut feed: crate::event_streams::FeedSubscription,
+    admission: StreamAdmission,
+) -> Body {
+    use futures::StreamExt;
+    let (tx, rx) = tokio::sync::mpsc::channel::<std::result::Result<String, Infallible>>(128);
+    let failed = feed.closed();
+    tokio::spawn(async move {
+        let pump = async {
+            if feed.failed() {
+                return;
+            }
+            if tx.try_send(Ok("retry: 1000\n\n".into())).is_err() {
+                return;
+            }
+            loop {
+                if feed.failed() {
+                    return;
+                }
+                let revision = feed.revision();
+                for event in arr(&page, "events") {
+                    if feed.failed() {
+                        return;
+                    }
+                    let frame = format!(
+                        "id: {}\nevent: {}\ndata: {}\n\n",
+                        text(&event, "id"),
+                        text(&event, "type"),
+                        js_json(&event, false)
+                    );
+                    if tx.try_send(Ok(frame)).is_err() {
+                        return;
+                    }
+                    next = Some(text(&event, "id").into());
+                }
+                if arr(&page, "events").len() == 100 {
+                    match relay.events(secret.clone(), next.clone()).await {
+                        Ok(value) => page = value,
+                        Err(_) => return,
+                    }
+                    continue;
+                }
+                match feed_page(&feed, &relay, &secret, &next).await {
+                    Ok(value) => page = value,
+                    Err(_) => return,
+                }
+                if !arr(&page, "events").is_empty() {
+                    continue;
+                }
+                if tx.try_send(Ok(": heartbeat\n\n".into())).is_err() {
+                    return;
+                }
+                if feed.revision() == revision {
+                    tokio::select! { result=feed.changed()=>{ if result.is_err(){return;} }, _=tokio::time::sleep(Duration::from_secs(1))=>{} }
+                }
+                match feed_page(&feed, &relay, &secret, &next).await {
+                    Ok(value) => page = value,
+                    Err(_) => return,
+                }
+            }
+        };
+        tokio::select! { _=pump=>{}, _=failed=>{}, _=tokio::time::sleep_until(end)=>{}, _=tx.closed()=>{} }
+        drop(tx);
+        drop(feed);
+        admission.release().await;
+    });
+    Body::from_stream(
+        tokio_stream::wrappers::ReceiverStream::new(rx).take_until(tokio::time::sleep_until(end)),
+    )
+}
 // The supervisor owns both admission release and the response channel. A pending
 // database read cannot suppress the independent deadline or disconnect signal.
+#[cfg(test)]
 fn event_body<Read, ReadFuture, Release, ReleaseFuture>(
     mut page: Value,
     mut next: Option<String>,

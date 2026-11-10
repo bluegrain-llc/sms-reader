@@ -140,7 +140,7 @@ for (const direction of ['typescript-to-rust', 'rust-to-typescript']) {
 }
 const options: HttpOptions = {
   publicUrl: 'https://relay.example.test', androidCertSha256: Array(32).fill('AA').join(':'), origins: ['https://allowed.example'],
-  verifyOwner: async token => { if (token !== 'owner-session') throw Error('bad identity'); return { uid, authTime: Date.now() / 1000 }; },
+  verifyOwner: async token => { if (token !== 'owner-session') throw Error('bad identity'); return { uid, authTime: time / 1000 }; },
   verifyScheduler: async () => { throw Error('not scheduler'); }, deleteIdentity: async () => {}, sseDurationMs: 25,
 };
 test('HTTP errors, body bounds, auth ordering, headers and protocol negotiation match both runtimes', { timeout: 60_000 }, async () => {
@@ -273,7 +273,13 @@ test('HTTP errors, body bounds, auth ordering, headers and protocol negotiation 
       const response = await fetch(base + '/v1/account', { method: 'DELETE', headers: { authorization: 'Bearer owner-session' }, signal: AbortSignal.timeout(15_000) });
       return { status: response.status, body: await response.json() };
     }));
-    assert.deepEqual(deletes[1], deletes[0]); assert.equal(deletes[0]!.status, 200);
+    assert.deepEqual(deletes.map(result => result.status), [202, 202]);
+    for (const result of deletes) {
+      assert.equal(result.body.ok, true); assert.equal(result.body.status, 'pending');
+      assert.match(result.body.receipt, /^smsd_[A-Za-z0-9_-]{43}$/);
+      assert.equal(result.body.receiptExpiresAt, time + 24 * 60 * MINUTE);
+    }
+    assert.notEqual(deletes[0]!.body.receipt, deletes[1]!.body.receipt);
   } finally { await Promise.all(servers.map(server => new Promise<void>(resolve => server.close(() => resolve())))); }
 });
 

@@ -154,8 +154,9 @@ pub struct Tx {
 #[derive(Clone)]
 pub struct Query {
     pub col: String,
-    pub filters: Vec<(&'static str, &'static str, Value)>,
-    pub order: Vec<(&'static str, bool)>,
+    pub filters: Vec<(String, &'static str, Value)>,
+    pub order: Vec<(String, bool)>,
+    pub cursor: Option<FirestoreQueryCursor>,
     pub limit: Option<u32>,
 }
 impl Query {
@@ -164,19 +165,24 @@ impl Query {
             col: c.into(),
             filters: vec![],
             order: vec![],
+            cursor: None,
             limit: None,
         }
     }
-    pub fn eq(mut self, k: &'static str, v: impl Into<Value>) -> Self {
-        self.filters.push((k, "==", v.into()));
+    pub fn eq(mut self, k: &str, v: impl Into<Value>) -> Self {
+        self.filters.push((k.into(), "==", v.into()));
         self
     }
-    pub fn cmp(mut self, k: &'static str, op: &'static str, v: impl Into<Value>) -> Self {
-        self.filters.push((k, op, v.into()));
+    pub fn cmp(mut self, k: &str, op: &'static str, v: impl Into<Value>) -> Self {
+        self.filters.push((k.into(), op, v.into()));
         self
     }
-    pub fn order(mut self, k: &'static str, desc: bool) -> Self {
-        self.order.push((k, desc));
+    pub fn order(mut self, k: &str, desc: bool) -> Self {
+        self.order.push((k.into(), desc));
+        self
+    }
+    pub fn start_after(mut self, values: Vec<FirestoreValue>) -> Self {
+        self.cursor = Some(FirestoreQueryCursor::AfterValue(values));
         self
     }
     pub fn limit(mut self, n: u32) -> Self {
@@ -184,9 +190,10 @@ impl Query {
         self
     }
 }
-fn query_params(q: &Query) -> FirestoreQueryParams {
+pub(crate) fn query_params(q: &Query) -> FirestoreQueryParams {
     let mut params = FirestoreQueryParams::new(q.col.as_str().into());
     params.limit = q.limit;
+    params.start_at = q.cursor.clone();
     if !q.filters.is_empty() {
         let filters = q
             .filters
@@ -194,14 +201,14 @@ fn query_params(q: &Query) -> FirestoreQueryParams {
             .into_iter()
             .map(|(k, op, v)| {
                 let mut fields =
-                    FirestoreDb::serialize_to_doc("", &Document::from_value(json!({k:v})))
+                    FirestoreDb::serialize_to_doc("", &Document::from_value(json!({k.clone():v})))
                         .expect("query value is serializable")
                         .fields;
-                let fv = FirestoreValue::from(fields.remove(k).unwrap());
+                let fv = FirestoreValue::from(fields.remove(&k).unwrap());
                 FirestoreQueryFilter::Compare(Some(match op {
-                    "==" => FirestoreQueryFilterCompare::Equal(k.into(), fv),
-                    "<=" => FirestoreQueryFilterCompare::LessThanOrEqual(k.into(), fv),
-                    ">" => FirestoreQueryFilterCompare::GreaterThan(k.into(), fv),
+                    "==" => FirestoreQueryFilterCompare::Equal(k, fv),
+                    "<=" => FirestoreQueryFilterCompare::LessThanOrEqual(k, fv),
+                    ">" => FirestoreQueryFilterCompare::GreaterThan(k, fv),
                     _ => unreachable!(),
                 }))
             })
@@ -217,7 +224,7 @@ fn query_params(q: &Query) -> FirestoreQueryParams {
                 .into_iter()
                 .map(|(k, d)| {
                     FirestoreQueryOrder::new(
-                        k.into(),
+                        k,
                         if d {
                             FirestoreQueryDirection::Descending
                         } else {
@@ -230,26 +237,39 @@ fn query_params(q: &Query) -> FirestoreQueryParams {
     }
     params
 }
-async fn query(db: &FirestoreDb, q: Query) -> Result<Vec<Value>> {
+pub(crate) fn decode_document(
+    d: &firestore::gcloud_sdk::google::firestore::v1::Document,
+) -> Result<Value> {
+    let mut v = FirestoreDb::deserialize_doc_to::<Document>(d)?.value();
+    v["__id"] = json!(crate::js_string::encode(d.name.rsplit('/').next().unwrap()));
+    Ok(v)
+}
+async fn query_documents(
+    db: &FirestoreDb,
+    q: Query,
+) -> Result<Vec<firestore::gcloud_sdk::google::firestore::v1::Document>> {
     let params = query_params(&q);
     let mut query = db
         .fluent()
         .select()
         .from(q.col.as_str())
         .filter(|_| params.filter.clone());
+    if let Some(cursor) = params.start_at {
+        query = query.start_at(cursor);
+    }
     if let Some(limit) = params.limit {
         query = query.limit(limit);
     }
     if let Some(order) = params.order_by {
         query = query.order(|_| order.clone());
     }
-    let docs = query.query().await?;
-    docs.into_iter()
-        .map(|d| {
-            let mut v = FirestoreDb::deserialize_doc_to::<Document>(&d)?.value();
-            v["__id"] = json!(crate::js_string::encode(d.name.rsplit('/').next().unwrap()));
-            Ok(v)
-        })
+    Ok(query.query().await?)
+}
+async fn query(db: &FirestoreDb, q: Query) -> Result<Vec<Value>> {
+    query_documents(db, q)
+        .await?
+        .iter()
+        .map(decode_document)
         .collect()
 }
 async fn get(db: &FirestoreDb, c: &str, id: &str) -> Result<Value> {
@@ -262,6 +282,23 @@ async fn get(db: &FirestoreDb, c: &str, id: &str) -> Result<Value> {
         .await?
         .map(Document::value)
         .unwrap_or(Value::Null))
+}
+fn conditional_delete_writes(
+    docs: &[firestore::gcloud_sdk::google::firestore::v1::Document],
+) -> Result<Vec<firestore::gcloud_sdk::google::firestore::v1::Write>> {
+    use firestore::gcloud_sdk::google::firestore::v1::{Precondition, Write, precondition, write};
+    docs.iter()
+        .map(|doc| {
+            let update = doc.update_time.ok_or(Error::External)?;
+            Ok(Write {
+                operation: Some(write::Operation::Delete(doc.name.clone())),
+                current_document: Some(Precondition {
+                    condition_type: Some(precondition::ConditionType::UpdateTime(update)),
+                }),
+                ..Default::default()
+            })
+        })
+        .collect::<Result<Vec<_>>>()
 }
 impl Store {
     pub async fn new(project: &str) -> Result<Self> {
@@ -276,6 +313,50 @@ impl Store {
                 FirestoreDb::new(&self.project).await.map_err(Error::from)
             })
             .await
+    }
+    pub(crate) async fn native_db(&self) -> Result<&FirestoreDb> {
+        self.db().await
+    }
+    pub(crate) async fn get_document(
+        &self,
+        c: &str,
+        id: &str,
+    ) -> Result<Option<firestore::gcloud_sdk::google::firestore::v1::Document>> {
+        Ok(self
+            .db()
+            .await?
+            .fluent()
+            .select()
+            .by_id_in(c)
+            .one(&crate::js_string::utf8(id))
+            .await?)
+    }
+    pub(crate) async fn query_documents(
+        &self,
+        q: Query,
+    ) -> Result<Vec<firestore::gcloud_sdk::google::firestore::v1::Document>> {
+        query_documents(self.db().await?, q).await
+    }
+    pub(crate) async fn delete_documents_if_unchanged(
+        &self,
+        docs: &[firestore::gcloud_sdk::google::firestore::v1::Document],
+    ) -> Result<()> {
+        use firestore::gcloud_sdk::google::firestore::v1::CommitRequest;
+        let db = self.db().await?;
+        let writes = conditional_delete_writes(docs)?;
+        let request = CommitRequest {
+            database: db.get_database_path().clone(),
+            writes,
+            ..Default::default()
+        };
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            db.client().get().commit(request),
+        )
+        .await
+        .map_err(|_| Error::Provider("timeout"))?
+        .map_err(firestore::errors::FirestoreError::from)?;
+        Ok(())
     }
     pub async fn get(&self, c: &str, id: &str) -> Result<Value> {
         get(self.db().await?, c, id).await
@@ -295,6 +376,9 @@ impl Store {
             .select()
             .from(q.col.as_str())
             .filter(|_| params.filter.clone());
+        if let Some(cursor) = params.start_at {
+            query = query.start_at(cursor);
+        }
         if let Some(limit) = params.limit {
             query = query.limit(limit);
         }
@@ -367,7 +451,40 @@ impl Store {
 fn retry(e: &firestore::errors::FirestoreError) -> bool {
     matches!(e,firestore::errors::FirestoreError::DatabaseError(d) if d.retry_possible)
 }
+struct NativeWrite(firestore::gcloud_sdk::google::firestore::v1::Write);
+impl TryInto<firestore::gcloud_sdk::google::firestore::v1::Write> for NativeWrite {
+    type Error = firestore::errors::FirestoreError;
+    fn try_into(
+        self,
+    ) -> std::result::Result<firestore::gcloud_sdk::google::firestore::v1::Write, Self::Error> {
+        Ok(self.0)
+    }
+}
 impl Tx {
+    pub(crate) fn set_cursor(
+        &mut self,
+        name: &str,
+        version: i64,
+        last: Option<&firestore::gcloud_sdk::google::firestore::v1::Document>,
+        field: Option<&str>,
+    ) -> Result<()> {
+        use firestore::gcloud_sdk::google::firestore::v1::{Write, write};
+        let id = last.map(|doc| doc.name.rsplit('/').next().unwrap());
+        let mut doc = FirestoreDb::serialize_to_doc(
+            format!("{}/maintenancePages/{name}", self.db.get_documents_path()),
+            &Document::from_value(json!({"version":version,"id":id})),
+        )?;
+        if let (Some(last), Some(field)) = (last, field)
+            && let Some(value) = last.fields.get(field)
+        {
+            doc.fields.insert("value".into(), value.clone());
+        }
+        self.writes.add(NativeWrite(Write {
+            operation: Some(write::Operation::Update(doc)),
+            ..Default::default()
+        }))?;
+        Ok(())
+    }
     pub async fn get(&self, c: &str, id: &str) -> Result<Value> {
         get(&self.db, c, id).await
     }
@@ -426,6 +543,57 @@ impl Tx {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn conditional_deletes_retain_exact_update_time_and_refuse_missing_versions() {
+        use firestore::gcloud_sdk::{
+            google::firestore::v1::{Document as NativeDocument, precondition, write},
+            prost_types::Timestamp,
+        };
+        let update = Timestamp {
+            seconds: 1_800_000_000,
+            nanos: 123_456_000,
+        };
+        let doc = NativeDocument {
+            name: "projects/test/databases/(default)/documents/results/result".into(),
+            update_time: Some(update),
+            ..Default::default()
+        };
+        let writes = conditional_delete_writes(std::slice::from_ref(&doc)).unwrap();
+        assert_eq!(writes.len(), 1);
+        assert_eq!(
+            writes[0].operation,
+            Some(write::Operation::Delete(doc.name.clone()))
+        );
+        assert_eq!(
+            writes[0].current_document.as_ref().unwrap().condition_type,
+            Some(precondition::ConditionType::UpdateTime(update))
+        );
+        let unversioned = NativeDocument {
+            update_time: None,
+            ..doc
+        };
+        assert!(conditional_delete_writes(&[unversioned]).is_err());
+    }
+
+    #[test]
+    fn native_metadata_is_separate_from_domain_values() {
+        let value = json!({"status":"completed","purgeAt":1_800_000_000_000i64});
+        let mut doc = FirestoreDb::serialize_to_doc(
+            "documents/results/result",
+            &Document::from_value(value.clone()),
+        )
+        .unwrap();
+        doc.update_time = Some(firestore::gcloud_sdk::prost_types::Timestamp {
+            seconds: 123,
+            nanos: 456_000,
+        });
+        let decoded = decode_document(&doc).unwrap();
+        assert_eq!(
+            decoded,
+            json!({"status":"completed","purgeAt":value["purgeAt"],"__id":"result"})
+        );
+        assert_eq!(doc.update_time.unwrap().nanos, 456_000);
+    }
     #[test]
     fn document_distinguishes_null_missing_and_timestamp_retention() {
         for value in [

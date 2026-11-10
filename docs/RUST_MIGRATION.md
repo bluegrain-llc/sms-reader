@@ -15,11 +15,11 @@ The current TypeScript source is the behavioral baseline. The Rust application l
 | Caller v2 | Forms and conditional wizards, results, cancellation, webhooks, event polling and SSE |
 | MCP | Stateless POST `/mcp`, eight tools; negotiation for 2025-11-25, 2025-06-18, 2025-03-26, 2024-11-05 and 2024-10-07; unknown versions select 2025-11-25 |
 | Maintenance | Verified worker audience/email; SMS leases, form outbox leases, durable deletion jobs, callback retry and expiry cleanup, advisory Tasks wakeups plus Scheduler recovery |
-| Access and monitoring | Shared owner/caller read budgets, distributed SSE leases, safe structured route/delivery/error logs and aggregated backlog metrics |
+| Access and monitoring | Shared owner/caller read budgets, distributed SSE leases, shared event watches, fair maintenance cursors, the independent denial ledger and recovery traffic guard, safe structured route/delivery/error logs and aggregated backlog metrics |
 
 MCP tools: `request_sms_code`, `get_sms_code_request`, `cancel_sms_code_request`, `create_request`, `inspect_request`, `cancel_request`, `get_request_result`, `poll_request_events`.
 
-Collections: `accounts`, `devices`, `grants`, legacy `managers` and `managerCallers`, `connections`, `connectionCodes`, `connectionRates`, `requests`, `results`, `audit`, `formRequests`, `formResults`, `requestEvents`, `deliveryOutbox`, `accessRates`, `streamLimits`, `deletionJobs`, `deletionReceipts`, legacy `deletionAttempts`. Numeric lifecycle times remain Unix milliseconds; `purgeAt` remains a Firestore timestamp. Account deletion retains its deleting tombstone and removes owner documents. Legacy manager credentials remain invalid.
+Collections: `accounts`, `devices`, `grants`, legacy `managers` and `managerCallers`, `connections`, `connectionCodes`, `connectionRates`, `requests`, `results`, `audit`, `formRequests`, `formResults`, `requestEvents`, `deliveryOutbox`, `accessRates`, `streamLimits`, `deletionJobs`, `deletionReceipts`, legacy `deletionAttempts`, `maintenancePages` and `recoveryControl`. Numeric lifecycle times remain Unix milliseconds; `purgeAt` remains a Firestore timestamp. Account deletion retains its deleting tombstone and removes owner documents. Legacy manager credentials remain invalid.
 
 Captured fixtures live in `server-rust/compat`. Unit tests cover normalized defaults, omitted/null values, Unicode, numeric object keys and floating-point formatting. The shared emulator suite exercises both implementations with injectable clocks and delivery adapters. Migration contracts pass active requests, pending connections, credentials, event cursors and claimed jobs between implementations. These tests do not substitute for real Google-signed tokens, IAM, FCM, Cloud Tasks or public TLS acceptance.
 
@@ -29,10 +29,10 @@ Local verification on 2026-11-10:
 
 | Check | Result |
 | --- | --- |
-| TypeScript compilation and unit tests | Passed; 19 unit tests |
-| Rust formatting, Clippy with warnings denied, unit tests | Passed; 28 tests |
-| Shared emulator scenarios | The integration suite runs with both backend selections; TypeScript-specific method-injection tests are named explicitly |
-| Migration contracts | Both document directions, HTTP/MCP parity, durable deletion/read-limit/stream-lease handoff, raw JSON/clock lifecycle cases, UTF-16 edge cases, native worker telemetry and Firebase emulator checks |
+| TypeScript compilation and unit tests | Passed; 32 unit tests |
+| Rust formatting, Clippy with warnings denied, unit tests | Passed; 35 tests |
+| Shared emulator scenarios | Passed; 59 scenarios per backend selection; TypeScript-specific method-injection tests are named explicitly |
+| Migration contracts | Both document directions, HTTP/MCP parity, durable deletion/read-limit/stream-lease handoff, raw JSON/clock lifecycle cases, UTF-16 edge cases, native worker telemetry and Firebase emulator checks; six additional native watch/denial-ledger/maintenance contracts passed |
 | Dependency audits | npm production audit and Cargo audit passed |
 | Rust production container | CI builds the current image and runs the HTTP/auth smoke; runtime UID 10001 |
 | Deployment script | Shell syntax passed; cloud deployment not performed |
@@ -49,6 +49,6 @@ Before promoting a Rust revision:
 6. Deploy Rust with `BACKEND=rust TRAFFIC_MODE=stage` to the existing production service. Use its tagged URL for health and authenticated contracts while preserving canonical `SERVICE_URL` as worker audience.
 7. Record the old and candidate revision names, then move 100% of traffic to the accepted exact Rust revision using `gcloud run services update-traffic --to-revisions REVISION=100` with explicit project, service and region.
 8. Monitor errors, maintenance completion, delivery backlog and expired-result cleanup. Roll back to the recorded TypeScript revision for a confirmed compatibility, authorization or delivery regression.
-9. After seven successful days, remove the TypeScript runtime and change the default build. Keep Node emulator and contract tooling.
+9. After seven successful days, remove the TypeScript runtime and change the default build. Keep Node emulator, contract and metadata-recovery tooling.
 
 No database migration, credential rotation, Android release or retention change is required.

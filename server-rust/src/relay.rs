@@ -13,6 +13,9 @@ pub struct Relay {
     pub delivery: Arc<dyn Delivery>,
 }
 pub trait Delivery: Send + Sync {
+    fn security(&self, _action: Value) -> futures::future::BoxFuture<'_, Result<()>> {
+        Box::pin(async { Ok(()) })
+    }
     fn record(&self, event: Value) -> futures::future::BoxFuture<'_, ()> {
         Box::pin(async move {
             use std::io::Write;
@@ -273,7 +276,28 @@ impl Relay {
         }
         Ok(json!(self.store.query(Query::new("grants").eq("ownerId",uid)).await?.iter().map(|g|json!({"grantId":g["id"],"callerName":g["callerName"],"callerId":g["callerId"],"formsApproved":flag(g,"formsApproved"),"revoked":flag(g,"revoked")||!text(g,"managerId").is_empty(),"expiresAt":g["expiresAt"]})).collect::<Vec<_>>()))
     }
+    pub(crate) async fn validate_owner_grant(&self, uid: String, id: String) -> Result<()> {
+        let relay = self.clone();
+        self.store
+            .tx(move |tx| {
+                let (relay, uid, id) = (relay.clone(), uid.clone(), id.clone());
+                Box::pin(async move {
+                    relay.account(tx, &uid).await?;
+                    let grant = tx.get("grants", &id).await?;
+                    ensure(
+                        !grant.is_null() && text(&grant, "ownerId") == uid,
+                        404,
+                        "grant_not_found",
+                    )
+                })
+            })
+            .await
+    }
     pub async fn revoke(&self, uid: String, id: String) -> Result<()> {
+        self.validate_owner_grant(uid.clone(), id.clone()).await?;
+        self.delivery
+            .security(json!({"ownerId":uid,"kind":"grant.revoke","target":id}))
+            .await?;
         let s = self.clone();
         let u = uid.clone();
         let gid = id.clone();
@@ -315,6 +339,21 @@ impl Relay {
         paused: bool,
         deleted: bool,
     ) -> Result<()> {
+        if paused || deleted {
+            let relay = self.clone();
+            let (owner, device) = (uid.clone(), id.clone());
+            self.store
+                .tx(move |tx| {
+                    let (relay, owner, device) = (relay.clone(), owner.clone(), device.clone());
+                    Box::pin(async move {
+                        relay.account(tx, &owner).await?;
+                        relay.device(tx, &owner, &device).await?;
+                        Ok(())
+                    })
+                })
+                .await?;
+            self.delivery.security(json!({"ownerId":uid,"kind":if deleted {"device.delete"} else {"device.pause"},"target":id})).await?;
+        }
         let s = self.clone();
         let u = uid.clone();
         self.store

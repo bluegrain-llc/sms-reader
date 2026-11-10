@@ -1,6 +1,8 @@
 import { dueSmsQueries } from './delivery-queries.js';
 import { telemetry } from './telemetry.js';
 import { randomUUID } from 'node:crypto';
+import { MaintenancePages } from './maintenance-pages.js';
+import type { RecordSecurity } from './security-ledger.js';
 import { Deletions } from './deletions.js';
 import { Access } from './access.js';
 import { Forms } from './forms.js';
@@ -14,9 +16,13 @@ const phonePending = (): PhoneState => ({ status: 'pending_phone', reason: null,
 export class Relay {
   readonly connections: Connections;
   readonly forms: Forms;
+  readonly pages: MaintenancePages;
   readonly deletions: Deletions;
   readonly access: Access;
-  constructor(readonly db: Firestore, readonly notify: Notify, readonly now = Date.now, wake?: () => Promise<void>) { this.connections = new Connections(this); this.forms = new Forms(this, wake); this.deletions = new Deletions(db, now, wake ?? (async () => {})); this.access = new Access(db, now); }
+  constructor(readonly db: Firestore, readonly notify: Notify, readonly now = Date.now, wake?: () => Promise<void>, readonly recordSecurity: RecordSecurity = async () => {}) {
+    this.pages = new MaintenancePages(db); this.connections = new Connections(this); this.forms = new Forms(this, wake);
+    this.deletions = new Deletions(db, now, wake ?? (async () => {}), recordSecurity); this.access = new Access(db, now);
+  }
   ref(collection: string, id: string) { return this.db.collection(collection).doc(id); }
   async account(tx: Transaction, uid: string): Promise<Account> {
     const a = (await tx.get(this.ref('accounts', uid))).data() as Account | undefined;
@@ -115,6 +121,12 @@ export class Relay {
 
   async revoke(uid: string, id: string) {
     await this.db.runTransaction(async tx => {
+      await this.account(tx, uid);
+      const g = (await tx.get(this.ref('grants', id))).data();
+      ensure(g?.ownerId === uid, 404, 'grant_not_found');
+    });
+    await this.recordSecurity({ ownerId: uid, kind: 'grant.revoke', target: id });
+    await this.db.runTransaction(async tx => {
       const a = await this.account(tx, uid);
       const g = (await tx.get(this.ref('grants', id))).data() as Grant | undefined;
       ensure(g && g.ownerId === uid, 404, 'grant_not_found');
@@ -126,6 +138,10 @@ export class Relay {
     await this.forms.cancelGrant(id);
   }
   async changeDevice(uid: string, id: string, paused: boolean, deleted = false) {
+    if (paused || deleted) {
+      await this.db.runTransaction(async tx => { await this.account(tx, uid); await this.device(tx, uid, id); });
+      await this.recordSecurity({ ownerId: uid, kind: deleted ? 'device.delete' : 'device.pause', target: id });
+    }
     await this.db.runTransaction(async tx => {
       const a = await this.account(tx, uid);
       await this.device(tx, uid, id);
@@ -327,16 +343,13 @@ export class Relay {
     r.nextNotificationAt = unsent.length ? Math.min(...unsent.map(p => Math.max(p.nextAt, p.lease))) : r.expiresAt;
   }
   async maintenance() {
-    const work = await this.db.collection('accounts').where('hasWork', '==', true).limit(250).get();
-    for (const doc of work.docs) { if (!doc.data().deleting) await this.advance(doc.id); }
-    for (const query of dueSmsQueries(this.db, this.now())) {
-      const pending = await query.limit(250).get();
-      for (let i = 0; i < pending.docs.length; i += 10) await Promise.all(pending.docs.slice(i, i + 10).map(doc => this.deliver(doc.id)));
+    await this.pages.run('active-owners', this.db.collection('accounts').where('hasWork', '==', true), null, 250, async id => {
+      if (!(await this.ref('accounts', id).get()).data()?.deleting) await this.advance(id);
+    });
+    for (const [index, query] of dueSmsQueries(this.db, this.now(), false).entries()) {
+      await this.pages.run(`sms-${index}`, query, 'nextNotificationAt', 250, id => this.deliver(id), 10);
     }
-    for (const collection of ['results', 'requests', 'audit', 'connections', 'connectionCodes', 'connectionRates']) {
-      const expired = await this.db.collection(collection).where('purgeAt', '<=', new Date(this.now())).limit(400).get();
-      const batch = this.db.batch(); expired.docs.forEach(d => batch.delete(d.ref)); await batch.commit();
-    }
+    for (const collection of ['results', 'requests', 'audit', 'connections', 'connectionCodes', 'connectionRates']) await this.pages.purge(collection, this.now());
     await this.forms.maintenance();
     await this.access.cleanup();
   }

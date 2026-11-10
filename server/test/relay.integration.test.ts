@@ -14,13 +14,15 @@ const rust = process.env.RELAY_BACKEND === 'rust' ? await import('./rust-adapter
 const Relay: typeof TypeScriptRelay = rust ? rust.RustRelay as unknown as typeof TypeScriptRelay : TypeScriptRelay;
 import { app as typescriptApp } from '../src/http.js';
 const app: typeof typescriptApp = rust ? rust.rustApp as unknown as typeof typescriptApp : typescriptApp;
+import { snapshotMetadata, applyDenials, type Snapshot } from '../src/recovery.js';
+import type { RecoveryObjects } from '../src/security-ledger.js';
 import { hash, MINUTE, RelayError } from '../src/model.js';
 import type { Server } from 'node:http';
 
 const enabled = !!process.env.FIRESTORE_EMULATOR_HOST && !!process.env.FIREBASE_AUTH_EMULATOR_HOST;
 if (!enabled) throw new Error('Integration tests require Firestore and Auth emulators. Run npm run test:integration from the repository root.');
 const integration = test;
-const collections = ['deletionAttempts', 'deletionJobs', 'deletionReceipts', 'accessRates', 'streamLimits', 'devices', 'grants', 'managers', 'managerCallers', 'connections', 'connectionCodes', 'connectionRates', 'requests', 'results', 'audit', 'accounts', 'formRequests', 'formResults', 'requestEvents', 'deliveryOutbox'];
+const collections = ['maintenancePages', 'deletionAttempts', 'deletionJobs', 'deletionReceipts', 'accessRates', 'streamLimits', 'devices', 'grants', 'managers', 'managerCallers', 'connections', 'connectionCodes', 'connectionRates', 'requests', 'results', 'audit', 'accounts', 'formRequests', 'formResults', 'requestEvents', 'deliveryOutbox'];
 let firebase: ReturnType<typeof initializeApp>, db: ReturnType<typeof getFirestore>, relay: Relay;
 let time: number, sends: string[], token: string, grantId: string;
 const uid = 'owner', did = 'installation', second = 'second-phone';
@@ -685,6 +687,166 @@ integration('wizard cancellation, expiry and connection isolation preserve one t
   assert.equal((await db.collection('formResults').get()).size, 0);
 });
 
+integration('TypeScript shared grant watches deliver event tails and close on account deletion', async () => {
+  const relay = new TypeScriptRelay(db, async () => {}, () => time);
+  const { EventStreams } = await import('../src/event-streams.js');
+  await relay.forms.approve(uid, grantId, true);
+  const streams = new EventStreams(relay.forms), changed: number[] = [], closed: number[] = [];
+  let a: Awaited<ReturnType<InstanceType<typeof EventStreams>['subscribe']>> | undefined, b: typeof a;
+  try {
+    a = await streams.subscribe(token, { changed: () => changed.push(1), closed: () => closed.push(1) });
+    b = await streams.subscribe(token, { changed: () => changed.push(2), closed: () => closed.push(2) });
+    assert.equal(streams.activeFeeds, 1);
+    const form = await relay.forms.create(token, { title:'Watch test',body:'Synthetic',fields:[],actions:[{id:'ack',label:'Acknowledge',type:'acknowledge'}],idempotencyKey:'shared-watch-test' });
+    const deadline = Date.now()+5000;
+    while (!a.tail(0).some(e=>e.requestId===form.requestId)) { assert.ok(Date.now()<deadline,'watch update bound'); await new Promise(r=>setTimeout(r,20)); }
+    assert.ok(changed.includes(2));
+    await relay.ref('accounts',uid).set({deleting:true},{merge:true});
+    while (closed.length<2) { assert.ok(Date.now()<deadline,'revocation close bound'); await new Promise(r=>setTimeout(r,20)); }
+    assert.equal(a.failed(),true); assert.equal(b.failed(),true);
+    a.stop();assert.equal(streams.activeFeeds,1);b.stop();assert.equal(streams.activeFeeds,0);
+  } finally { a?.stop();b?.stop(); }
+});
+integration('maintenance cursors move past poison records beyond page limits and wrap for retry', async () => {
+  const { MaintenancePages } = await import('../src/maintenance-pages.js');
+  const collection='capacityMaintenanceFixture', pages=new MaintenancePages(db), processed=new Set<string>();
+  try {
+    for(let offset=0;offset<501;offset+=200){const batch=db.batch();for(let i=offset;i<Math.min(501,offset+200);i++)batch.set(db.collection(collection).doc(String(i).padStart(4,'0')),{due:i});await batch.commit();}
+    const handle=async(id:string)=>{ if(id==='0000')throw Error('poison');processed.add(id); };
+    await pages.run('capacity-fixture',db.collection(collection),'due',250,handle);
+    await pages.run('capacity-fixture',db.collection(collection),'due',250,handle);
+    await pages.run('capacity-fixture',db.collection(collection),'due',250,handle);
+    assert.equal(processed.size,500);
+    await pages.run('capacity-fixture',db.collection(collection),'due',250,async id=>{processed.add(id);});
+    assert.equal(processed.size,501);
+  } finally { await db.recursiveDelete(db.collection(collection));await db.collection('maintenancePages').doc('capacity-fixture').delete(); }
+});
+integration('expired cleanup batches 400 unchanged records without per-document read transactions', { timeout: 30000 }, async () => {
+  const { MaintenancePages } = await import('../src/maintenance-pages.js');
+  const collection = 'capacityPurgeFixture', seed = db.batch();
+  for (let i = 0; i < 400; i++) seed.set(db.collection(collection).doc(String(i)), { purgeAt: new Date(time - 1) });
+  await seed.commit();
+  const originalBatch = db.batch.bind(db), originalTransaction = db.runTransaction.bind(db);
+  let commits = 0, transactions = 0;
+  db.batch = () => {
+    const batch = originalBatch(), commit = batch.commit.bind(batch);
+    batch.commit = async () => { commits++; return commit(); }; return batch;
+  };
+  db.runTransaction = ((...args: Parameters<typeof db.runTransaction>) => {
+    transactions++; return originalTransaction(...args);
+  }) as typeof db.runTransaction;
+  try {
+    assert.equal(await new MaintenancePages(db).purge(collection, time), 400);
+    assert.equal(commits, 1); assert.equal(transactions, 1, 'only the cursor transaction is needed');
+    assert.equal((await db.collection(collection).get()).size, 0);
+  } finally {
+    db.batch = originalBatch; db.runTransaction = originalTransaction;
+    await db.recursiveDelete(db.collection(collection)); await db.collection('maintenancePages').doc(`purge-${collection}`).delete();
+  }
+});
+integration('conditional purge preserves a concurrently renewed record and cleans unaffected records', { timeout: 15000 }, async () => {
+  const { MaintenancePages } = await import('../src/maintenance-pages.js');
+  const collection = 'capacityRenewalFixture', renewed = db.collection(collection).doc('renewed');
+  const seed = db.batch();
+  for (const id of ['renewed', 'expired-a', 'expired-b']) seed.set(db.collection(collection).doc(id), { purgeAt: new Date(time - 1) });
+  await seed.commit();
+  const originalBatch = db.batch.bind(db); let raced = false;
+  db.batch = () => {
+    const batch = originalBatch(), commit = batch.commit.bind(batch);
+    batch.commit = async () => {
+      if (!raced) {
+        raced = true;
+        await db.runTransaction(async tx => { tx.update(renewed, { purgeAt: new Date(time + MINUTE), retained: true }); });
+      }
+      return commit();
+    }; return batch;
+  };
+  try {
+    assert.equal(await new MaintenancePages(db).purge(collection, time), 3);
+    const remaining = await db.collection(collection).get();
+    assert.equal(raced, true); assert.deepEqual(remaining.docs.map(doc => doc.id), ['renewed']);
+    assert.equal(remaining.docs[0].data().retained, true);
+    assert.equal(await new MaintenancePages(db).purge(collection, time), 0);
+  } finally {
+    db.batch = originalBatch;
+    await db.recursiveDelete(db.collection(collection)); await db.collection('maintenancePages').doc(`purge-${collection}`).delete();
+  }
+});
+integration('independent ledger failure prevents acknowledging grant revocation', async () => {
+  let attempted=false;
+  const guarded=new Relay(db,async()=>{},()=>time,undefined,async action=>{attempted=true;assert.equal(action.kind,'grant.revoke');throw Error('ledger unavailable');});
+  await assert.rejects(guarded.revoke(uid,grantId));assert.equal(attempted,true);
+  assert.equal((await db.collection('grants').doc(grantId).get()).data()!.revoked,false);
+});
+integration('legacy deletion migration records its independent denial before committing recovery work', { timeout: 30000 }, async () => {
+  const attempt = db.collection('deletionAttempts').doc(hash(uid));
+  await attempt.set({ ownerId: uid, nextAt: time - MINUTE });
+  let writes = 0, unavailable = true;
+  const worker = new Relay(db, async fcm => { sends.push(fcm); }, () => time, undefined, async action => {
+    assert.deepEqual(action, { ownerId: uid, kind: 'account.delete', target: uid });
+    writes++; if (unavailable) throw Error('synthetic ledger unavailable');
+  });
+  await worker.deletions.migrateLegacy();
+  assert.equal((await attempt.get()).exists, true);
+  assert.equal((await db.collection('accounts').doc(uid).get()).data()?.deleting, undefined);
+  assert.equal((await db.collection('deletionJobs').doc(hash(uid)).get()).exists, false);
+  await relay.deletions.request('accepted-other');
+  await relay.register('notification-owner', 'notification-phone', 'Synthetic phone', 'notification-fcm');
+  const caller = await relay.createGrant('notification-owner', 'notification-phone', 'Synthetic caller', 30);
+  await relay.forms.approve('notification-owner', caller.grantId, true);
+  await relay.forms.create(caller.token, formInput('unrelated-delivery'));
+  await worker.deletions.dispatch(async owner => { assert.equal(owner, 'accepted-other'); });
+  await worker.forms.dispatch();
+  assert.equal((await db.collection('deletionJobs').doc(hash('accepted-other')).get()).data()?.status, 'completed');
+  assert.ok(sends.includes('notification-fcm'));
+  assert.equal((await attempt.get()).exists, true);
+  unavailable = false; await worker.deletions.migrateLegacy();
+  assert.equal(writes, 3); assert.equal((await attempt.get()).exists, false);
+  assert.equal((await db.collection('accounts').doc(uid).get()).data()?.deleting, true);
+  assert.equal((await db.collection('deletionJobs').doc(hash(uid)).get()).exists, true);
+});
+integration('stalled legacy ledger is aborted without blocking another accepted deletion', { timeout: 15000 }, async () => {
+  await db.collection('deletionAttempts').doc(hash(uid)).set({ ownerId: uid, nextAt: time - MINUTE });
+  await relay.deletions.request('accepted-other');
+  let aborted = false;
+  const worker = new Relay(db, async () => {}, () => time, undefined, async (_action, signal) => new Promise((_resolve, reject) => {
+    signal!.addEventListener('abort', () => { aborted = true; reject(Error('synthetic aborted ledger')); }, { once: true });
+  }));
+  await worker.deletions.dispatch(async owner => { assert.equal(owner, 'accepted-other'); });
+  assert.equal(aborted, true);
+  assert.equal((await db.collection('deletionJobs').doc(hash('accepted-other')).get()).data()?.status, 'completed');
+  assert.equal((await db.collection('deletionAttempts').doc(hash(uid)).get()).exists, true);
+});
+integration('snapshot of a normally registered owner restores its implicit account without transient data', { timeout: 15000 }, async () => {
+  assert.equal((await db.collection('accounts').doc(uid).get()).exists, false);
+  let saved: Snapshot | undefined;
+  const backup = { put: async (_name: string, data: unknown) => { saved = data as Snapshot; } } as unknown as RecoveryObjects;
+  const ledger = { bucket: 'synthetic-ledger', get: async () => ({ version: 1, project: 'demo-sms-relay', createdAt: Date.now() - MINUTE }),
+    info: async () => ({ retentionPolicy: { isLocked: true, retentionPeriod: '604800' },
+      iamConfiguration: { uniformBucketLevelAccess: { enabled: true }, publicAccessPrevention: 'enforced' } }) } as unknown as RecoveryObjects;
+  await snapshotMetadata(db, 'demo-sms-relay', backup, ledger); assert.ok(saved);
+  const restored = applyDenials(saved, [], time);
+  assert.deepEqual(restored.rows.find(row => row.collection === 'accounts' && row.id === uid)?.value, {});
+  assert.equal(restored.rows.filter(row => row.collection === 'devices').length, 2);
+  assert.ok(restored.rows.every(row => ['accounts', 'devices', 'grants'].includes(row.collection)));
+});
+integration('recovery gate blocks public pairing route aliases and authenticated traffic', { timeout: 15000 }, async t => {
+  const server = app(relay, { assertServing: () => { throw new RelayError(503, 'recovery_in_progress'); },
+    verifyOwner: async () => { assert.fail('identity verification must not run while recovery is blocked'); },
+    verifyScheduler: async () => {}, deleteIdentity: async () => {} }).listen(0, '127.0.0.1');
+  try {
+    await new Promise<void>(resolve => server.once('listening', resolve));
+    const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+    const request = (path: string, init: RequestInit = {}) => fetch(base + path, { ...init, signal: AbortSignal.any([t.signal, AbortSignal.timeout(5000)]) });
+    for (const path of ['/v1/connections', '/V1/CONNECTIONS/']) {
+      const response = await request(path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+      assert.equal(response.status, 503); await response.text();
+    }
+    assert.equal((await request('/v1/devices', { headers: { authorization: 'Bearer synthetic' } })).status, 503);
+    assert.equal((await request('/v1/devices')).status, 401);
+    assert.equal((await request('/health')).status, 200);
+  } finally { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); }
+});
 integration('durable deletion tombstones before acknowledgement and resumes expired leases without retaining receipts', { timeout: 60000 }, async () => {
   const request = await relay.deletions.request(uid);
   const duplicate = await relay.deletions.request(uid);
@@ -900,6 +1062,14 @@ integration('TypeScript stream admission keeps its committed deadline and slow e
   await release();
   relay = new TypeScriptRelay(db, async () => {}, () => time);
   await relay.forms.approve(uid, grantId, true);
+  // A full retained page forces a durable replay read even with shared watches.
+  const replay = db.batch();
+  for (let sequence = 1; sequence <= 100; sequence++) {
+    const id = `${grantId}_${String(sequence).padStart(16, '0')}`;
+    replay.set(db.collection('requestEvents').doc(id), { id, ownerId: uid, grantId, requestId: 'synthetic-replay',
+      type: 'request.created', sequence, requestSequence: sequence, at: time, purgeAt: new Date(time + MINUTE) });
+  }
+  replay.update(db.collection('grants').doc(grantId), { eventSequence: 100 }); await replay.commit();
   const stream = relay.access.stream.bind(relay.access); let released: (() => void) | undefined;
   const releaseCompleted = new Promise<void>(resolve => { released = resolve; });
   relay.access.stream = async (...args) => {
@@ -914,7 +1084,7 @@ integration('TypeScript stream admission keeps its committed deadline and slow e
     await new Promise<void>(resolve => server.once('listening', resolve));
     const response = await fetch(`http://127.0.0.1:${(server.address() as { port: number }).port}/v2/events/stream`, { headers: { authorization: `Bearer ${token}` }, signal: AbortSignal.any([t.signal, AbortSignal.timeout(5000)]) });
     assert.equal(response.status, 200);
-    const text = await response.text(); assert.ok(text.includes('heartbeat')); assert.equal(reads, 2);
+    const text = await response.text(); assert.ok(text.includes('request.created')); assert.equal(reads, 2);
     // The second database read is still pending when the response ends.
     t.signal.throwIfAborted();
     await Promise.race([releaseCompleted, new Promise<never>((_, reject) => {

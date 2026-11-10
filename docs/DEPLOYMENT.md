@@ -10,6 +10,8 @@ Run `npm ci`, then set `PROJECT_ID`, `REGION` and `SERVICE_URL` explicitly and r
 
 The server identity receives Firestore, Firebase Auth administration, FCM and task-enqueue access and can act as the Scheduler identity for task OIDC. Firestore direct-client rules remain deny-all. Keep all emulator environment variables absent in cloud revisions.
 
+Provision the independent locked security ledger using [the recovery runbook](recovery/README.md) before deploying this revision. Set the production environment variable `SECURITY_LEDGER_BUCKET`; deployment validates the bucket's actual seven-day locked retention, private access policy, and source-project manifest before creating a candidate. Give the release identity read access to bucket metadata and `manifest.json`, and the server identity the runbook's create/read role. A failed ledger preflight blocks deployment; no production denials are appended by the check. The deployment explicitly carries the configured bucket into the tested revision.
+
 Initial staging bootstrap is separate from production rollout: create a fully configured baseline service in a disposable project, with no production data or clients. Record its canonical URL, configure Scheduler and pair a dedicated smoke caller there. The guarded rollout deliberately refuses a service without an existing named 100% traffic allocation. Never use bootstrap commands to replace an existing production service.
 
 ## Protected GitHub release configuration

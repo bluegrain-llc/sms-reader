@@ -42,59 +42,76 @@ fn initial_job(uid: &str, legacy_at: &Value, now: i64) -> Value {
 impl Relay {
     /// A legacy attempt predates the durable worker. Adopt it before queue work.
     pub async fn deletion_migrate_legacy(&self) -> Result<()> {
-        let attempts = self
-            .store
-            .query(
-                Query::new("deletionAttempts")
-                    .order("nextAt", false)
-                    .limit(100),
-            )
-            .await?;
-        for attempt in attempts {
-            let s = self.clone();
-            let id = text(&attempt, "__id").to_owned();
-            self.store
-                .tx(move |tx| {
-                    let (s, id) = (s.clone(), id.clone());
-                    Box::pin(async move {
-                        let current = tx.get("deletionAttempts", &id).await?;
-                        if current.is_null() {
-                            return Ok(());
-                        }
-                        let uid = text(&current, "ownerId");
-                        ensure(
-                            !uid.is_empty() && hash(uid) == id,
-                            500,
-                            "invalid_legacy_deletion",
-                        )?;
-                        let owner = tx.get("accounts", uid).await?;
-                        let existing = tx.get("deletionJobs", &id).await?;
-                        if !flag(&owner, "deletionTelemetryComplete") {
-                            let adopted = initial_job(uid, &current["nextAt"], s.now());
-                            if existing.is_null() {
-                                tx.create("deletionJobs", &id, adopted)?;
-                            } else if text(&existing, "status") != "completed" {
-                                tx.merge(
-                                    "deletionJobs",
-                                    &id,
-                                    json!({
-                                        "createdAt":num(&existing,"createdAt").min(num(&adopted,"createdAt")),
-                                        "backlogAt":num(&existing,"backlogAt").min(num(&adopted,"backlogAt")),
-                                    }),
-                                )?;
-                            }
-                        }
-                        tx.set("accounts", uid, json!({"deleting":true}))?;
-                        tx.delete("deletionAttempts", &id)
-                    })
-                })
-                .await?;
-        }
+        self.maintenance_page(
+            "legacy-deletion",
+            Query::new("deletionAttempts").cmp("nextAt", "<=", self.now()),
+            Some("nextAt"),
+            8,
+            8,
+            |id| self.deletion_adopt(id),
+        )
+        .await?;
         Ok(())
+    }
+
+    async fn deletion_adopt(&self, id: String) -> Result<()> {
+        let attempt = self.store.get("deletionAttempts", &id).await?;
+        if attempt.is_null() {
+            return Ok(());
+        }
+        let uid = text(&attempt, "ownerId").to_owned();
+        ensure(
+            !uid.is_empty() && hash(&uid) == id,
+            500,
+            "invalid_legacy_deletion",
+        )?;
+        // A stalled independent ledger must not hold unrelated accepted work.
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            self.delivery
+                .security(json!({"ownerId":uid,"kind":"account.delete","target":uid})),
+        )
+        .await
+        .map_err(|_| Error::Provider("timeout"))??;
+        let s = self.clone();
+        self.store
+            .tx(move |tx| {
+                let (s, id, uid) = (s.clone(), id.clone(), uid.clone());
+                Box::pin(async move {
+                    let current = tx.get("deletionAttempts", &id).await?;
+                    if current.is_null() {
+                        return Ok(());
+                    }
+                    ensure(
+                        text(&current, "ownerId") == uid,
+                        500,
+                        "invalid_legacy_deletion",
+                    )?;
+                    let owner = tx.get("accounts", &uid).await?;
+                    let existing = tx.get("deletionJobs", &id).await?;
+                    if !flag(&owner, "deletionTelemetryComplete") {
+                        let adopted = initial_job(&uid, &current["nextAt"], s.now());
+                        if existing.is_null() {
+                            tx.create("deletionJobs", &id, adopted)?;
+                        } else if text(&existing, "status") != "completed" {
+                            tx.merge("deletionJobs",&id,json!({
+                            "createdAt":num(&existing,"createdAt").min(num(&adopted,"createdAt")),
+                            "backlogAt":num(&existing,"backlogAt").min(num(&adopted,"backlogAt")),
+                        }))?;
+                        }
+                    }
+                    tx.set("accounts", &uid, json!({"deleting":true}))?;
+                    tx.delete("deletionAttempts", &id)
+                })
+            })
+            .await
     }
 
     /// Commit the tombstone and status-only credential before acknowledgement.
     pub async fn deletion_request(&self, uid: String) -> Result<Value> {
+        self.delivery
+            .security(json!({"ownerId":uid,"kind":"account.delete","target":uid}))
+            .await?;
         let receipt = secret().replacen("smsr_", "smsd_", 1);
         let receipt_id = hash(&receipt);
         let job_id = hash(&uid);
@@ -305,8 +322,8 @@ impl Relay {
     }
 
     pub async fn deletion_dispatch(&self, auth: Arc<dyn Authentication>) -> Result<()> {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(40);
         self.deletion_migrate_legacy().await?;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(40);
         for _ in 0..40 {
             if tokio::time::Instant::now() >= deadline {
                 break;

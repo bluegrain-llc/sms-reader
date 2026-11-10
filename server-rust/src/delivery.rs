@@ -117,55 +117,52 @@ if flag(p,"sent")||num(p,"lease")>s.now()||num(p,"nextAt")>s.now(){continue;}p["
         Ok(())
     }
     pub async fn dispatch(&self) -> Result<()> {
-        let jobs = self
-            .store
-            .query(
-                Query::new("deliveryOutbox")
-                    .cmp("nextAt", "<=", self.now())
-                    .limit(50),
+        let count = self
+            .maintenance_page(
+                "form-delivery",
+                Query::new("deliveryOutbox").cmp("nextAt", "<=", self.now()),
+                Some("nextAt"),
+                50,
+                10,
+                |id| self.deliver_form(id),
             )
             .await?;
-        for batch in jobs.chunks(10) {
-            for r in futures::future::join_all(
-                batch
-                    .iter()
-                    .map(|d| self.deliver_form(text(d, "id").to_owned())),
-            )
-            .await
-            {
-                r?;
-            }
-        }
-        if jobs.len() == 50 {
+        if count == 50 {
             self.kick().await;
         }
         Ok(())
     }
     pub async fn maintenance(&self) -> Result<()> {
-        let accounts = self
-            .store
-            .query(Query::new("accounts").eq("hasWork", true).limit(250))
-            .await?;
-        for a in accounts {
-            if !flag(&a, "deleting") {
-                self.advance(text(&a, "__id")).await?;
-            }
-        }
-        for query in crate::telemetry::due_sms_queries(self.now()) {
-            let docs = self.store.query(query.limit(250)).await?;
-            for batch in docs.chunks(10) {
-                for r in futures::future::join_all(
-                    batch
-                        .iter()
-                        .map(|r| self.deliver_sms(text(r, "id").to_owned())),
-                )
-                .await
-                {
-                    r?;
+        self.maintenance_page(
+            "active-owners",
+            Query::new("accounts").eq("hasWork", true),
+            None,
+            250,
+            8,
+            |id| async move {
+                let account = self.store.get("accounts", &id).await?;
+                if !flag(&account, "deleting") {
+                    self.advance(&id).await?;
                 }
-            }
+                Ok(())
+            },
+        )
+        .await?;
+        for (index, query) in crate::telemetry::due_sms_queries(self.now())
+            .into_iter()
+            .enumerate()
+        {
+            self.maintenance_page(
+                &format!("sms-{index}"),
+                query,
+                Some("nextNotificationAt"),
+                250,
+                10,
+                |id| self.deliver_sms(id),
+            )
+            .await?;
         }
-        for c in [
+        for collection in [
             "results",
             "requests",
             "audit",
@@ -173,128 +170,120 @@ if flag(p,"sent")||num(p,"lease")>s.now()||num(p,"nextAt")>s.now(){continue;}p["
             "connectionCodes",
             "connectionRates",
         ] {
-            self.cleanup(c).await?;
+            self.maintenance_purge(collection, self.now()).await?;
         }
         self.form_maintenance().await?;
         self.access_cleanup().await
     }
-    async fn cleanup(&self, c: &str) -> Result<()> {
-        let docs = self
-            .store
-            .query(Query::new(c).cmp("purgeAt", "<=", self.now()).limit(400))
-            .await?;
-        let c = c.to_owned();
-        self.store
-            .tx(move |tx| {
-                let (docs, c) = (docs.clone(), c.clone());
-                Box::pin(async move {
-                    for d in docs {
-                        tx.delete(&c, text(&d, "__id"))?;
-                    }
-                    Ok(())
-                })
-            })
-            .await
-    }
     pub async fn form_maintenance(&self) -> Result<()> {
-        let revoked = self
-            .store
-            .query(
-                Query::new("grants")
-                    .eq("formsCancellationPending", true)
-                    .limit(250),
-            )
-            .await?;
-        for g in revoked {
-            self.cancel_grant(text(&g, "id")).await?;
-        }
-        let helpers = self
-            .store
-            .query(
-                Query::new("formRequests")
-                    .eq("status", "pending")
-                    .cmp("helperNextAt", "<=", self.now())
-                    .limit(250),
-            )
-            .await?;
-        for doc in helpers {
-            let s = self.clone();
-            let id = text(&doc, "id").to_owned();
-            self.store
-                .tx(move |tx| {
-                    let (s, id) = (s.clone(), id.clone());
-                    Box::pin(async move {
-                        let mut r = tx.get("formRequests", &id).await?;
-                        let mut g = tx.get("grants", text(&r, "grantId")).await?;
-                        if g.is_null() || text(&r, "status") != "pending" {
-                            return Ok(());
-                        }
-                        let due = r["helpers"]
-                            .as_object()
-                            .unwrap()
-                            .iter()
-                            .filter(|(_, h)| num(h, "until") <= s.now() && !flag(h, "timedOut"))
-                            .map(|(id, h)| (id.clone(), h["fieldId"].clone()))
-                            .collect::<Vec<_>>();
-                        for (device, field) in due {
-                            r["helpers"][&device]["timedOut"] = json!(true);
-                            s.form_event(
-                                tx,
-                                &mut r,
-                                &mut g,
-                                "input.timeout",
-                                json!({"deviceId":device,"fieldId":field}),
-                            )?;
-                        }
-                        let next = r["helpers"]
-                            .as_object()
-                            .unwrap()
-                            .values()
-                            .filter(|h| !flag(h, "timedOut"))
-                            .map(|h| num(h, "until"))
-                            .min()
-                            .unwrap_or(9_007_199_254_740_991);
-                        tx.merge("formRequests", &id, json!({"helperNextAt":next}))
-                    })
-                })
-                .await?;
-        }
-        let expired = self
-            .store
-            .query(
-                Query::new("formRequests")
-                    .eq("status", "pending")
-                    .cmp("nextCheckAt", "<=", self.now())
-                    .limit(250),
-            )
-            .await?;
-        for doc in expired {
-            let s = self.clone();
-            let id = text(&doc, "id").to_owned();
-            self.store
-                .tx(move |tx| {
-                    let (s, id) = (s.clone(), id.clone());
-                    Box::pin(async move {
-                        let mut r = tx.get("formRequests", &id).await?;
-                        let mut g = tx.get("grants", text(&r, "grantId")).await?;
-                        if text(&r, "status") == "pending" && !g.is_null() {
-                            let valid = flag(&g, "formsApproved") && s.valid_grant(&g);
-                            s.form_expire(tx, &mut r, &mut g, valid).await?;
-                        }
-                        Ok(())
-                    })
-                })
-                .await?;
-        }
+        self.maintenance_page(
+            "revoked-forms",
+            Query::new("grants").eq("formsCancellationPending", true),
+            None,
+            250,
+            8,
+            |id| async move { self.cancel_grant(&id).await },
+        )
+        .await?;
+        self.maintenance_page(
+            "helper-timeouts",
+            Query::new("formRequests").eq("status", "pending").cmp(
+                "helperNextAt",
+                "<=",
+                self.now(),
+            ),
+            Some("helperNextAt"),
+            250,
+            8,
+            |id| self.maintenance_helper(id),
+        )
+        .await?;
+        self.maintenance_page(
+            "form-expiry",
+            Query::new("formRequests")
+                .eq("status", "pending")
+                .cmp("nextCheckAt", "<=", self.now()),
+            Some("nextCheckAt"),
+            250,
+            8,
+            |id| self.maintenance_form_expire(id),
+        )
+        .await?;
         self.dispatch().await?;
-        for c in [
+        for collection in [
             "formResults",
             "formRequests",
             "requestEvents",
             "deliveryOutbox",
         ] {
-            self.cleanup(c).await?;
+            self.maintenance_purge(collection, self.now()).await?;
         }
         Ok(())
+    }
+    async fn maintenance_helper(&self, id: String) -> Result<()> {
+        let s = self.clone();
+        self.store
+            .tx(move |tx| {
+                let (s, id) = (s.clone(), id.clone());
+                Box::pin(async move {
+                    let mut r = tx.get("formRequests", &id).await?;
+                    if r.is_null() {
+                        return Ok(());
+                    }
+                    let mut g = tx.get("grants", text(&r, "grantId")).await?;
+                    if g.is_null() || text(&r, "status") != "pending" {
+                        return Ok(());
+                    }
+                    let due = r["helpers"]
+                        .as_object()
+                        .ok_or(crate::error::Error::External)?
+                        .iter()
+                        .filter(|(_, helper)| {
+                            num(helper, "until") <= s.now() && !flag(helper, "timedOut")
+                        })
+                        .map(|(id, helper)| (id.clone(), helper["fieldId"].clone()))
+                        .collect::<Vec<_>>();
+                    for (device, field) in due {
+                        r["helpers"][&device]["timedOut"] = json!(true);
+                        s.form_event(
+                            tx,
+                            &mut r,
+                            &mut g,
+                            "input.timeout",
+                            json!({"deviceId":device,"fieldId":field}),
+                        )?;
+                    }
+                    let next = r["helpers"]
+                        .as_object()
+                        .ok_or(crate::error::Error::External)?
+                        .values()
+                        .filter(|helper| !flag(helper, "timedOut"))
+                        .map(|helper| num(helper, "until"))
+                        .min()
+                        .unwrap_or(9_007_199_254_740_991);
+                    tx.merge("formRequests", &id, json!({"helperNextAt":next}))
+                })
+            })
+            .await
+    }
+    async fn maintenance_form_expire(&self, id: String) -> Result<()> {
+        let s = self.clone();
+        self.store
+            .tx(move |tx| {
+                let (s, id) = (s.clone(), id.clone());
+                Box::pin(async move {
+                    let mut r = tx.get("formRequests", &id).await?;
+                    if r.is_null() {
+                        return Ok(());
+                    }
+                    let mut g = tx.get("grants", text(&r, "grantId")).await?;
+                    if text(&r, "status") == "pending" && !g.is_null() {
+                        let valid = flag(&g, "formsApproved") && s.valid_grant(&g);
+                        s.form_expire(tx, &mut r, &mut g, valid).await?;
+                    }
+                    Ok(())
+                })
+            })
+            .await
     }
 }

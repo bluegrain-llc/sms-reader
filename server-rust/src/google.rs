@@ -14,7 +14,7 @@ use tokio::sync::{Mutex, OnceCell};
 #[derive(Clone)]
 pub struct Google {
     pub project: String,
-    client: reqwest::Client,
+    pub(crate) client: reqwest::Client,
     provider: Arc<OnceCell<Arc<dyn gcp_auth::TokenProvider>>>,
     firebase: Arc<Mutex<Keys>>,
     worker: Arc<Mutex<Keys>>,
@@ -22,6 +22,7 @@ pub struct Google {
     pub service_url: Option<String>,
     pub scheduler: Option<String>,
     pub queue: Option<String>,
+    pub security_bucket: Option<String>,
 }
 #[derive(Default)]
 struct Keys {
@@ -67,6 +68,7 @@ impl Google {
                 .tls_backend_rustls()
                 .timeout(Duration::from_secs(10))
                 .redirect(reqwest::redirect::Policy::none())
+                .retry(reqwest::retry::never())
                 .build()
                 .unwrap(),
             provider: Arc::new(OnceCell::new()),
@@ -76,9 +78,10 @@ impl Google {
             service_url: std::env::var("SERVICE_URL").ok(),
             scheduler: std::env::var("SCHEDULER_EMAIL").ok(),
             queue: std::env::var("DELIVERY_QUEUE").ok(),
+            security_bucket: std::env::var("SECURITY_LEDGER_BUCKET").ok(),
         }
     }
-    async fn access(&self) -> Result<String> {
+    pub(crate) async fn access(&self) -> Result<String> {
         let p = self
             .provider
             .get_or_try_init(|| async { gcp_auth::provider().await.map_err(|_| Error::External) })
@@ -268,6 +271,9 @@ impl Google {
     }
 }
 impl Delivery for Google {
+    fn security(&self, action: Value) -> futures::future::BoxFuture<'_, Result<()>> {
+        Box::pin(crate::security::record(self, action))
+    }
     fn notify<'a>(
         &'a self,
         token: &'a str,

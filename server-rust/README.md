@@ -7,7 +7,7 @@ cd server-rust
 cargo run --locked
 ```
 
-Set `GOOGLE_CLOUD_PROJECT` and use Google Application Default Credentials, or explicitly set both emulator hosts for local work. Configuration names match `server/src/index.ts`: `PORT`, `SERVICE_URL`, `SCHEDULER_EMAIL`, `DELIVERY_QUEUE`, `ANDROID_SIGNING_SHA256`, `ANDROID_SIGNING_SHA256S`, `FIREBASE_WEB_CONFIG`, `PRIVACY_CONTACT`, and `ALLOWED_ORIGINS`. Cloud Run rejects emulator configuration. Health checks initialize without credentials; authenticated operations initialize the Google clients on demand.
+Set `GOOGLE_CLOUD_PROJECT` and use Google Application Default Credentials, or explicitly set both emulator hosts for local work. Configuration names match `server/src/index.ts`: `PORT`, `SERVICE_URL`, `SCHEDULER_EMAIL`, `DELIVERY_QUEUE`, `ANDROID_SIGNING_SHA256`, `ANDROID_SIGNING_SHA256S`, `FIREBASE_WEB_CONFIG`, `SECURITY_LEDGER_BUCKET`, `PRIVACY_CONTACT`, and `ALLOWED_ORIGINS`. Cloud Run rejects emulator configuration. Health checks initialize without credentials; authenticated operations initialize the Google clients on demand.
 
 ```sh
 cargo fmt --manifest-path server-rust/Cargo.toml --check

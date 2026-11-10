@@ -11,6 +11,7 @@ use futures::StreamExt;
 use serde_json::{Value, json};
 use sms_code_relay::{
     error::{Error, Result},
+    event_streams::{EventStreams, FeedSubscription},
     google::Identity,
     http::{self, Authentication, Options},
     model::*,
@@ -45,6 +46,12 @@ impl Callback {
     }
 }
 impl Delivery for Callback {
+    fn security(&self, action: Value) -> futures::future::BoxFuture<'_, Result<()>> {
+        Box::pin(async move {
+            self.send("security", json!([action])).await?;
+            Ok(())
+        })
+    }
     fn record(&self, event: Value) -> futures::future::BoxFuture<'_, ()> {
         Box::pin(async move {
             let _ = self.send("telemetry", json!([event])).await;
@@ -101,6 +108,16 @@ impl Delivery for Callback {
         })
     }
 }
+impl http::Serving for Callback {
+    fn assert_serving(&self) -> futures::future::BoxFuture<'_, Result<()>> {
+        Box::pin(async move {
+            self.send("serving", json!([]))
+                .await
+                .map_err(|_| Error::Api(503, "recovery_in_progress"))?;
+            Ok(())
+        })
+    }
+}
 impl Authentication for Callback {
     fn owner<'a>(&'a self, t: &'a str) -> futures::future::BoxFuture<'a, Result<Identity>> {
         Box::pin(async move {
@@ -128,6 +145,8 @@ impl Authentication for Callback {
 struct Host {
     store: Store,
     stops: Arc<Mutex<HashMap<String, TestServer>>>,
+    feeds: Arc<Mutex<HashMap<String, EventStreams>>>,
+    subscriptions: Arc<Mutex<HashMap<String, FeedSubscription>>>,
 }
 struct TestServer {
     stop: watch::Sender<bool>,
@@ -275,6 +294,50 @@ async fn call(State(h): State<Host>, Json(v): Json<Value>) -> impl IntoResponse 
                 r.maintenance().await?;
                 Ok(Value::Null)
             }
+            "maintenance.scan" => {
+                let processed = Arc::new(Mutex::new(Vec::<String>::new()));
+                let output = processed.clone();
+                let poison = Arc::new(a(5).as_array().cloned().unwrap_or_default().into_iter().filter_map(|id|id.as_str().map(str::to_owned)).collect::<std::collections::HashSet<_>>());
+                let cursor_override = a(6); let cursor_store=r.store.clone(); let cursor_name=t(0);
+                let overwritten=Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let count = r.maintenance_page(&t(0),sms_code_relay::store::Query::new(&t(1)),a(2).as_str(),
+                    a(3).as_u64().unwrap_or(100) as u32,a(4).as_u64().unwrap_or(1) as usize,
+                    move |id| { let (processed,poison,cursor_store,cursor_name,cursor_override,overwritten)=(processed.clone(),poison.clone(),cursor_store.clone(),cursor_name.clone(),cursor_override.clone(),overwritten.clone()); async move {
+                        if cursor_override.is_object() && !overwritten.swap(true,std::sync::atomic::Ordering::AcqRel) {
+                            cursor_store.tx(move |tx| { let (name,value)=(cursor_name.clone(),cursor_override.clone()); Box::pin(async move { tx.set("maintenancePages",&name,value) }) }).await?;
+                        }
+                        if poison.contains(&id) { return Err(Error::Api(500,"synthetic_page_failure")); }
+                        processed.lock().await.push(id); Ok(())
+                    }}).await?;
+                let ids=output.lock().await.clone();
+                Ok(json!({"count":count,"processed":ids}))
+            }
+            "maintenance.purge" => Ok(json!(r.maintenance_purge(&t(0),a(1).as_i64().unwrap_or(r.now())).await?)),
+            "streamSubscribe" => {
+                let key = text(&v,"callback").to_owned();
+                let streams = {
+                    let mut feeds = h.feeds.lock().await;
+                    feeds.entry(key.clone()).or_insert_with(|| {
+                        let mut relay = r.clone(); relay.clock = live_clock(key);
+                        EventStreams::new(relay)
+                    }).clone()
+                };
+                let subscription = streams.subscribe(t(0)).await?;
+                let id = uuid::Uuid::new_v4().to_string();
+                h.subscriptions.lock().await.insert(id.clone(),subscription);
+                Ok(json!({"subscriptionId":id,"activeFeeds":streams.active_feeds()}))
+            }
+            "streamSnapshot" => {
+                let subscriptions = h.subscriptions.lock().await;
+                let subscription = subscriptions.get(&t(0)).ok_or(Error::Api(404,"unknown_subscription"))?;
+                let active = h.feeds.lock().await.get(text(&v,"callback")).map(EventStreams::active_feeds).unwrap_or(0);
+                Ok(json!({"failed":subscription.failed(),"revision":subscription.revision(),"oldest":subscription.oldest(),"events":subscription.tail(0,r.now()),"activeFeeds":active}))
+            }
+            "streamStop" => {
+                h.subscriptions.lock().await.remove(&t(0));
+                let active = h.feeds.lock().await.get(text(&v,"callback")).map(EventStreams::active_feeds).unwrap_or(0);
+                Ok(json!({"activeFeeds":active}))
+            }
             "telemetryBacklogs" => {
                 r.telemetry_backlogs().await?;
                 Ok(Value::Null)
@@ -326,9 +389,7 @@ async fn call(State(h): State<Host>, Json(v): Json<Value>) -> impl IntoResponse 
         }
     }
 }
-async fn start(State(h): State<Host>, Json(v): Json<Value>) -> Json<Value> {
-    let mut r = relay(&h, &v);
-    let clock_url = text(&v, "callback").to_owned();
+fn live_clock(clock_url: String) -> Arc<dyn Fn() -> i64 + Send + Sync> {
     // Every read observes the live injected clock, including SSE background work.
     // Reuse one blocking client and its connection on a dedicated thread; neither
     // client creation nor its blocking runtime may run on Tokio worker threads.
@@ -352,14 +413,23 @@ async fn start(State(h): State<Host>, Json(v): Json<Value>) -> Json<Value> {
             let _ = reply.send(now);
         }
     });
-    r.clock = Arc::new(move || {
+    Arc::new(move || {
         let (reply, response) = std::sync::mpsc::sync_channel(1);
         clock.send(reply).expect("test clock thread stopped");
         response.recv().expect("test clock request failed")
-    });
+    })
+}
+async fn start(State(h): State<Host>, Json(v): Json<Value>) -> Json<Value> {
+    let mut r = relay(&h, &v);
+    let clock_url = text(&v, "callback").to_owned();
+    r.clock = live_clock(clock_url);
     let o = &v["options"];
     let options = Options {
         auth: callback(&v),
+        serving: v["hasServing"]
+            .as_bool()
+            .unwrap_or(false)
+            .then(|| callback(&v) as Arc<dyn http::Serving>),
         public_url: o["publicUrl"].as_str().map(str::to_owned),
         android_cert: o["androidCertSha256"].as_str().map(str::to_owned),
         android_certs: o.get("androidCertSha256s").cloned(),
@@ -416,6 +486,8 @@ async fn main() {
     let h = Host {
         store,
         stops: Arc::new(Mutex::new(HashMap::new())),
+        feeds: Arc::new(Mutex::new(HashMap::new())),
+        subscriptions: Arc::new(Mutex::new(HashMap::new())),
     };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     println!("{}", listener.local_addr().unwrap().port());
