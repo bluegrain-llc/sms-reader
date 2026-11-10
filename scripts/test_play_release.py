@@ -99,6 +99,32 @@ class GateTest(unittest.TestCase):
         (self.base / "aab").write_bytes(b"replacement")
         self.assertIn("aab: missing file or hash mismatch", self.check()["blockers"])
 
+    def test_encrypted_and_unsupported_native_entries_produce_artifact_blockers(self):
+        originals = {kind: ((self.base / kind).read_bytes(), dict(self.record["artifacts"][kind]))
+                     for kind in ("aab", "playApk")}
+        for kind in ("aab", "playApk"):
+            for mode in ("encrypted", "unsupported-compression"):
+                with self.subTest(artifact=kind, mode=mode):
+                    for name, (original, reference) in originals.items():
+                        (self.base / name).write_bytes(original)
+                        self.record["artifacts"][name] = dict(reference)
+                    path = self.base / kind
+                    with zipfile.ZipFile(path, "w") as archive:
+                        archive.writestr("lib/arm64-v8a/fixture.so", b"synthetic native entry")
+                    data = bytearray(path.read_bytes())
+                    central = data.index(b"PK\x01\x02")
+                    if mode == "encrypted":
+                        struct.pack_into("<H", data, 6, 1)
+                        struct.pack_into("<H", data, central + 8, 1)
+                    else:
+                        struct.pack_into("<H", data, 8, 99)
+                        struct.pack_into("<H", data, central + 10, 99)
+                    path.write_bytes(data)
+                    self.record["artifacts"][kind]["sha256"] = gate.sha256(path)
+                    result = self.check()
+                    self.assertFalse(result["ready"])
+                    self.assertIn(kind + ": required artifact tool or structural verification failed", result["blockers"])
+
     def test_evidence_for_other_candidate_rejected(self):
         self.record["commit"] = "d" * 40
         self.assertTrue(any("exact candidate" in blocker for blocker in self.check()["blockers"]))

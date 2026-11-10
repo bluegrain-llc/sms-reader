@@ -237,7 +237,7 @@ def check_record(record, base, offline=False, run=command, now=None):
                     require(target is not None and type(minimum) is int and int(target[1]) >= minimum, "APK target API below requirement")
                 require("application-debuggable" not in manifest, "APK is debuggable")
                 require(not re.search(r"android.permission.(READ_SMS|RECEIVE_SMS|READ_CONTACTS|WRITE_CONTACTS|BIND_ACCESSIBILITY_SERVICE|BIND_NOTIFICATION_LISTENER_SERVICE)", manifest), "APK requests forbidden broad permissions")
-        except (OSError, subprocess.SubprocessError, ValueError, zipfile.BadZipFile, struct.error, ET.ParseError):
+        except (OSError, subprocess.SubprocessError, ValueError, RuntimeError, zipfile.BadZipFile, struct.error, ET.ParseError):
             blockers.append(kind + ": required artifact tool or structural verification failed")
 
     for label in EVIDENCE:
