@@ -20,7 +20,7 @@ The runner refuses physical devices. The instrumentation test requires explicit 
 
 ## Feasibility gate — do this first on the configured signed APK
 
-1. Sign in with Google and grant notifications; verify automatic registration. Have the test bot request a connection. Open its HTTPS link on the phone, compare its code, and approve it in Admin → Access; verify the bot can then authenticate. For the single-phone denial gate, pause any other registered phones.
+1. Sign in with Google and grant notifications; verify automatic registration. Have the test bot request a connection. Open its HTTPS link on the phone, compare its code, and approve it in Settings → Access; verify the bot can then authenticate. For the single-phone denial gate, pause any other registered phones.
 2. Create a request with that token. Verify FCM presents a generic notification without purpose or code.
 3. Tap it. Confirm the app shows the configured caller name and request purpose. Verify the caller observes `ready` only after Android's listener starts.
 4. Trigger a real eligible SMS from a separate workflow. Neither this app nor the relay service has an SMS-trigger endpoint.
@@ -73,7 +73,7 @@ These cases are covered by backend emulators but still need a physical two-phone
 - Sign in with the same account on two phones. One request must produce a generic notification on both. Starting a listener on one phone must not mark the other phone ready.
 - Trigger SMS only after ready. Approve on one phone; the other must show Handled on another phone without receiving the winning code. With two eligible messages and two approvals racing, only one result may be stored/retrieved.
 - Stop/decline on one phone; the other must remain available. Global denied/failed/cancelled follows only when all phone participation ends (or the caller cancels).
-- Pause/remove one phone in Admin; only the remaining available phones receive subsequent notifications. Removing one phone must preserve caller credentials and other phones. Removing the current phone must not reconnect it on relaunch without an explicit action.
+- Pause/remove one phone in Settings; only the remaining available phones receive subsequent notifications. Removing one phone must preserve caller credentials and other phones. Removing the current phone must not reconnect it on relaunch without an explicit action.
 - Create two caller requests concurrently. One activates, the other queues without a notification until activation. A credential must never read the other caller’s result.
 - Revoke one paired app during queued work and after an approved result. It loses access immediately; unrelated callers continue.
 

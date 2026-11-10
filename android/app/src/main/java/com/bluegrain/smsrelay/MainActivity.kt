@@ -14,6 +14,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.credentials.CredentialManager
 import androidx.credentials.GetCredentialRequest
@@ -30,13 +31,15 @@ import kotlinx.coroutines.launch
 class MainActivity : ComponentActivity() {
     private val inbox: InboxViewModel by viewModels()
     private val vm: RelayViewModel by viewModels()
-    private var notificationKind: String? = null
     private var formConsentId: String? = null
     private val formConsent = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         inbox.consentResult(formConsentId, result.resultCode == Activity.RESULT_OK, result.data?.getStringExtra(SmsRetriever.EXTRA_SMS_MESSAGE))
         formConsentId = null
     }
-    private var notificationRequest: String? = null
+    private var destination by mutableStateOf<RelayDestination>(RelayDestination.Inbox)
+    private var loadedTarget by mutableStateOf<RequestTarget?>(null)
+    private var responseLoading by mutableStateOf(false)
+    private var responseAttempt by mutableIntStateOf(0)
     private var pendingConnectionCode by mutableStateOf<String?>(null)
     private var launchedConsentRequestId by mutableStateOf<String?>(null)
     private val consent = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
@@ -50,8 +53,8 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
-        notificationKind = savedInstanceState?.getString("notificationKind") ?: intent.getStringExtra("kind")
-        notificationRequest = savedInstanceState?.getString("notificationRequest") ?: requestId(intent)
+        destination = if (savedInstanceState != null) restoreDestination(savedInstanceState.getStringArrayList("destination"))
+            else intentDestination(intent)
         launchedConsentRequestId = savedInstanceState?.getString("launchedConsentRequestId")
         formConsentId = savedInstanceState?.getString("formConsentId")
         pendingConnectionCode = if (savedInstanceState == null) connectionCode(intent) else savedInstanceState.getString("connectionCode")
@@ -71,44 +74,81 @@ class MainActivity : ComponentActivity() {
                     vm.reviewConnection(it)
                 }
             }
-            LaunchedEffect(state.signedIn, notificationRequest) {
-                if (state.signedIn) notificationRequest?.let { notificationRequest = null; openRequest(it) }
+            val response = destination as? RelayDestination.Response
+            LaunchedEffect(response, responseAttempt, state.signedIn, state.registered) {
+                loadedTarget = null
+                responseLoading = false
+                if (response != null && state.configured) {
+                    responseLoading = true
+                    val loaded = loadResponseWhenReady(response.target, vm.state, inbox.state,
+                        openSms = { vm.open(it).await() }, openForm = { inbox.open(it).await() }, onFormEntry = {
+                            if (response.origin == RequestOrigin.Notification) recordTap(intent)
+                        })
+                    if (loaded) loadedTarget = response.target
+                    responseLoading = false
+                }
             }
-            LaunchedEffect(state.consentAvailable, state.foreground, launchedConsentRequestId) {
-                if (launchedConsentRequestId == null) vm.takeConsent()?.let { (id, next) ->
+            LaunchedEffect(state.consentAvailable, state.foreground, launchedConsentRequestId, response, loadedTarget) {
+                if (response?.target?.kind == RequestKind.Sms && loadedTarget == response.target && launchedConsentRequestId == null) vm.takeConsent()?.let { (id, next) ->
                     launchedConsentRequestId = id
                     try { consent.launch(next) } catch (_: Exception) { launchedConsentRequestId = null; vm.consentUnavailable() }
                 }
             }
             LaunchedEffect(state.registered, state.signedIn) { inbox.sessionChanged() }
-            LaunchedEffect(inboxState.consent, inboxState.foreground) {
-                inbox.takeConsent()?.let { (id, next) ->
+            LaunchedEffect(inboxState.consent, inboxState.foreground, response, loadedTarget) {
+                if (response?.target?.kind == RequestKind.Form && loadedTarget == response.target && formConsentId == null) inbox.takeConsent()?.let { (id, next) ->
                     formConsentId = id
                     try { formConsent.launch(next) } catch (_: Exception) { inbox.consentResult(id, false, null); formConsentId = null }
                 }
             }
             RelayTheme {
-                if (inboxState.form != null) RequestFormScreen(inboxState, (application as RelayApplication).repository.deviceId,
-                    inbox::close, inbox::change, inbox::submit, inbox::rendered, inbox::listen, inbox::candidate, inbox::next, inbox::previous)
-                else RelayScreen(state.copy(error = inboxState.error ?: state.error, busy = state.busy || inboxState.busy), onSignIn = ::signIn, onRegister = ::register,
-                    onRefresh = { vm.refresh(); inbox.refresh() }, onPause = { vm.pause() }, onCancel = { vm.cancel() },
-                    onRevoke = { vm.revoke(it) }, onSubmitCode = { vm.upload(it) }, onCodeChange = { id, value -> vm.changeCode(id, value) },
-                    onSelectCandidate = { id, value -> vm.selectCandidate(id, value) }, onDismissRequest = vm::dismissRequest, onRequestSent = ::finishAndRemoveTask, onDelete = { vm.deleteAccount() },
+                RelayScreen(state.copy(busy = state.busy || inboxState.busy, error = if (destination == RelayDestination.Inbox) inboxState.error ?: state.error else state.error),
+                    destination = destination, formState = inboxState, deviceId = (application as RelayApplication).repository.deviceId,
+                    responseReady = response != null && loadedTarget == response.target, responseLoading = responseLoading,
+                    onSettings = { destination = RelayDestination.Settings() },
+                    onSection = { destination = RelayDestination.Settings(it) }, onBack = ::closeDestination,
+                    onRetry = { responseAttempt++ }, onSignIn = ::signIn, onRegister = ::register,
+                    onRefresh = { vm.refresh(); inbox.refresh() }, onCancel = { vm.cancel() },
+                    onRevoke = { vm.revoke(it) }, onSubmitCode = { vm.upload(it) }, onCodeChange = vm::changeCode,
+                    onSelectCandidate = vm::selectCandidate,
+                    onRequestSent = { if (response != null && destination == response) closeDestination() }, onDelete = { vm.deleteAccount() },
                     onReviewConnection = { vm.reviewConnection(it) }, onConnectionDecision = { code, approved -> vm.decideConnection(code, approved) },
                     onDismissConnection = vm::dismissConnection,
-                    inbox = inboxState.requests, onOpenForm = { inbox.open(it) }, onOpenSms = vm::open, onApproveForms = { id, approved -> vm.approveForms(id, approved) },
-                    onPauseDevice = { vm.pauseDevice(it) }, onRemoveDevice = { vm.removeDevice(it) })
+                    onOpenForm = { openFromInbox(it, RequestKind.Form) }, onOpenSms = { openFromInbox(it, RequestKind.Sms) },
+                    onApproveForms = { id, approved -> vm.approveForms(id, approved) },
+                    onPauseDevice = { vm.pauseDevice(it) }, onRemoveDevice = { vm.removeDevice(it) },
+                    onFormChange = inbox::change, onFormSubmit = { inbox.submit(it) }, onFormRendered = inbox::rendered,
+                    onFormListen = { inbox.listen(it) }, onFormCandidate = inbox::candidate, onFormNext = inbox::next, onFormPrevious = inbox::previous)
             }
         }
     }
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent); setIntent(intent)
-        notificationKind = intent.getStringExtra("kind")
-        notificationRequest = requestId(intent)
+        destination = intentDestination(intent)
+        // Repeated taps retry a failed load without creating another activity/session.
+        responseAttempt++
         pendingConnectionCode = connectionCode(intent)
-        if (vm.state.value.signedIn) notificationRequest?.let { notificationRequest = null; openRequest(it) }
     }
-    private fun openRequest(id: String) { if (notificationKind == "form") { recordTap(intent); inbox.open(id) } else vm.open(id) }
+    private fun intentDestination(intent: Intent): RelayDestination {
+        requestId(intent)?.let { id ->
+            val kind = if (intent.getStringExtra("kind") == "form") RequestKind.Form else RequestKind.Sms
+            return RelayDestination.Response(RequestTarget(id, kind), RequestOrigin.Notification)
+        }
+        return if (connectionCode(intent) != null) RelayDestination.Settings(SettingsSection.Access) else RelayDestination.Inbox
+    }
+    private fun openFromInbox(id: String, kind: RequestKind) {
+        destination = RelayDestination.Response(RequestTarget(id, kind), RequestOrigin.Inbox)
+    }
+    private fun closeDestination() {
+        if ((destination as? RelayDestination.Response)?.target?.kind == RequestKind.Form) inbox.close()
+        if (destination.backgroundOnClose()) {
+            // Keep the task and ViewModels alive, including drafts and Android listening windows.
+            moveTaskToBack(true)
+            destination = RelayDestination.Inbox
+        } else {
+            destination = RelayDestination.Inbox
+        }
+    }
     private fun recordTap(intent: Intent) {
         if (intent.getBooleanExtra("notificationTap", false) && intent.getStringExtra("kind") == "form") requestId(intent)?.let { reportObservation(this, it, "notification.tapped") }
     }
@@ -122,8 +162,7 @@ class MainActivity : ComponentActivity() {
     override fun onStop() { vm.foreground(false); inbox.foreground(false); super.onStop() }
     override fun onSaveInstanceState(outState: Bundle) {
         outState.putString("formConsentId", formConsentId)
-        outState.putString("notificationKind", notificationKind)
-        outState.putString("notificationRequest", notificationRequest)
+        outState.putStringArrayList("destination", ArrayList(destination.metadata()))
         outState.putString("connectionCode", pendingConnectionCode)
         outState.putString("launchedConsentRequestId", launchedConsentRequestId)
         super.onSaveInstanceState(outState)

@@ -22,6 +22,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.async
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -35,11 +36,12 @@ data class HistoryRow(val caller: String, val status: String, val reason: String
 data class RelayUiState(
     val configured: Boolean = false, val signedIn: Boolean = false, val email: String = "",
     val registered: Boolean = false, val paused: Boolean = false, val busy: Boolean = false, val cancelling: Boolean = false,
-    val showSmsRequest: Boolean = true, val request: PhoneRequest? = null, val grants: List<GrantRow> = emptyList(), val history: List<HistoryRow> = emptyList(),
+    val request: PhoneRequest? = null, val grants: List<GrantRow> = emptyList(), val history: List<HistoryRow> = emptyList(),
     val candidates: List<String> = emptyList(), val codeDraft: String = "", val autofillDeclined: Boolean = false, val error: String? = null,
     val devices: List<DeviceRow> = emptyList(), val connection: ConnectionReview? = null, val connectionCode: String? = null,
-    val autoConnect: Boolean = true,
+    val autoConnect: Boolean = true, val discoveredRequest: PhoneRequest? = null,
     val consentAvailable: Boolean = false, val now: Long = System.currentTimeMillis(), val foreground: Boolean = false,
+    val opening: Boolean = false,
 )
 class RelayViewModel(application: Application) : AndroidViewModel(application) {
     private val app = application as RelayApplication
@@ -54,7 +56,6 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
     private var consentLaunched = false
     private var boundId: String? = null
     private var poll: Job? = null
-    private var opening = false
     private var blocked = false
     private var recovered = false
     private val recoveryMutex = Mutex()
@@ -64,10 +65,6 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         if (app.configured && repo.signedIn) refresh()
     }
     fun error(message: String) { mutable.update { it.copy(error = message) } }
-    fun dismissRequest() {
-        if (state.value.request?.active == true) { mutable.update { it.copy(showSmsRequest = false) }; return }
-        clearLocal()
-    }
     fun changeCode(id: String, value: String) {
         if (state.value.request?.id != id || state.value.request?.active != true || state.value.busy || blocked) return
         mutable.update { it.copy(codeDraft = value.take(64)) }
@@ -116,8 +113,10 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         mutable.update { s -> s.copy(grants = (0 until grants.length()).map { grants.getJSONObject(it).let { g ->
             GrantRow(g.getString("grantId"), g.getString("callerName"), g.getBoolean("revoked"), g.getLong("expiresAt"), g.optBoolean("formsApproved")) } },
             history = (0 until history.length()).map { history.getJSONObject(it).let { h -> HistoryRow(h.optString("callerName"), h.getString("status"), h.nullString("reason")) } }) }
-        // Recover missed/offline notification by fetching the device's current request securely.
-        d?.nullString("activeRequestId")?.let { if (state.value.foreground && state.value.request?.active != true) open(it) }
+        // Discover missed requests for Inbox; only an explicit open starts SMS reception.
+        refreshSmsDiscovery(d?.nullString("activeRequestId"), { boundId != null }, repo::request) { request ->
+            mutable.update { it.withSmsDiscovery(request) }
+        }
     }
     private suspend fun recover() = recoveryMutex.withLock {
         if (recovered) return@withLock
@@ -177,34 +176,36 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         mutable.update { it.copy(foreground = value) }
         if (!value) {
             if (consent != null) state.value.request?.id?.let { RelayNotifications.show(app, it, true) }
-        } else if (app.configured && repo.signedIn && !opening) refresh()
+        } else if (app.configured && repo.signedIn && !state.value.opening) refresh()
     }
-    fun open(id: String) {
-        if (!RelayNotifications.validId.matches(id) || !app.configured || !repo.signedIn || opening) return
-        if (state.value.request?.active == true && state.value.request?.id != id) { error("Finish or cancel the current request first."); return }
-        opening = true
-        viewModelScope.launch {
-            try {
-                recover()
-                val r = repo.request(id)
-                if (boundId != id) clearSensitive()
-                mutable.update { it.copy(request = r, showSmsRequest = true, error = null) }
-                RelayNotifications.dismiss(app, id)
-                if (!r.active) return@launch
-                if (boundId == id) { startPoll(id); return@launch }
-                if (r.status != "pending_phone") {
-                    repo.event(id, "failed", reason = "process_restarted"); sync(id); return@launch
-                }
-                if (repo.listenerUntil > System.currentTimeMillis()) {
-                    error("The previous Android listening window is still open. Start a new request after it ends.")
-                    repo.event(id, "failed", reason = "listener_failed"); sync(id); return@launch
-                }
-                startListener(r)
-            } catch (e: CancellationException) { throw e }
-            catch (e: ApiFailure) { error(e.reason.replace('_', ' ')) }
-            catch (_: Exception) { error("Could not open this request. Check your network and retry.") }
-            finally { opening = false }
-        }
+    fun open(id: String) = viewModelScope.async {
+        while (state.value.busy || state.value.opening) delay(50)
+        if (!RelayNotifications.validId.matches(id) || !app.configured || !repo.signedIn) return@async false
+        if (state.value.request.blocksSmsOpen(boundId, id)) { error("Finish or cancel the current request first."); return@async false }
+        mutable.update { it.copy(busy = true, opening = true, error = null) }
+        var loaded = false
+        try {
+            recover()
+            val r = repo.request(id)
+            if (boundId != id) clearSensitive()
+            mutable.update { it.copy(request = r, error = null) }
+            loaded = true
+            RelayNotifications.dismiss(app, id)
+            if (!r.active) return@async true
+            if (boundId == id) { startPoll(id); return@async true }
+            if (r.status != "pending_phone") {
+                repo.event(id, "failed", reason = "process_restarted"); sync(id); return@async true
+            }
+            if (repo.listenerUntil > System.currentTimeMillis()) {
+                error("The previous Android listening window is still open. Start a new request after it ends.")
+                repo.event(id, "failed", reason = "listener_failed"); sync(id); return@async true
+            }
+            startListener(r)
+        } catch (e: CancellationException) { throw e }
+        catch (e: ApiFailure) { error(e.reason.replace('_', ' ')) }
+        catch (_: Exception) { error("Could not open this request. Check your network and retry.") }
+        finally { mutable.update { it.copy(busy = false, opening = false) } }
+        loaded
     }
     private suspend fun startListener(r: PhoneRequest) {
         val available = GoogleApiAvailability.getInstance().isGooglePlayServicesAvailable(app) == ConnectionResult.SUCCESS
@@ -279,7 +280,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
     private fun applyRequest(r: PhoneRequest) {
         val id = r.id
         mutable.update { it.copy(request = r) }
-        if (!r.active) { repo.inFlight = null; clearSensitive(); unregisterReceiver(); boundId = null; RelayNotifications.dismiss(app, id) }
+        if (!r.active) { poll?.cancel(); repo.inFlight = null; clearSensitive(); unregisterReceiver(); boundId = null; RelayNotifications.dismiss(app, id) }
     }
     fun takeConsent(): Pair<String, Intent>? {
         if (!state.value.foreground || blocked || consentLaunched) return null
@@ -339,6 +340,6 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         mutable.update { it.copy(candidates = emptyList(), codeDraft = "", autofillDeclined = false, consentAvailable = false) }
     }
     private fun unregisterReceiver() { receiver?.let { app.unregisterReceiver(it) }; receiver = null }
-    private fun clearLocal() { poll?.cancel(); blocked = true; clearSensitive(); unregisterReceiver(); boundId = null; mutable.update { it.copy(request = null) } }
+    private fun clearLocal() { poll?.cancel(); blocked = true; clearSensitive(); unregisterReceiver(); boundId = null; mutable.update { it.copy(request = null, discoveredRequest = null) } }
     override fun onCleared() { unregisterReceiver(); clearSensitive(); super.onCleared() }
 }

@@ -29,11 +29,11 @@ fun SmsRequestScreen(
     val active = request.active && seconds > 0
     val canSend = active && request.status in setOf("ready", "awaiting_consent") &&
         !state.busy && !state.cancelling && CodeExtractor.validCode(state.codeDraft.trim())
-    BackHandler { if (request.active) onCancel() else onClose() }
+    BackHandler(onBack = onClose)
     Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
         Column(Modifier.fillMaxSize().safeDrawingPadding().imePadding().verticalScroll(rememberScrollState())
-            .padding(20.dp), verticalArrangement = Arrangement.spacedBy(20.dp)) {
-            if (request.active) TextButton(onClick = onClose) { Text("Back to inbox") }
+            .padding(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+            if (!sentHere) TextButton(onClick = onClose, modifier = Modifier.heightIn(min = 48.dp)) { Text("Close") }
             Text("${request.caller} — ${request.title}", style = MaterialTheme.typography.headlineSmall,
                 fontWeight = FontWeight.SemiBold)
             MarkdownMessage(request.purpose)
@@ -76,7 +76,6 @@ fun SmsRequestScreen(
                     request.status == "expired" -> "Request expired"
                     else -> "Request could not finish"
                 }, style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.primary)
-                if (!sentHere) Button(onClick = onClose, modifier = Modifier.fillMaxWidth()) { Text("Close") }
             }
         }
     }

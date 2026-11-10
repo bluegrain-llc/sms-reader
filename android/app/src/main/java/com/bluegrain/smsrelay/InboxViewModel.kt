@@ -21,7 +21,8 @@ data class InboxState(val requests: List<RequestForm> = emptyList(), val form: R
     val values: Map<String, Any> = emptyMap(), val busy: Boolean = false, val error: String? = null,
     val helper: String? = null, val helperUntil: Long = 0, val consent: Intent? = null, val candidates: List<String> = emptyList(),
     val now: Long = System.currentTimeMillis(), val foreground: Boolean = false,
-    val stepId: String? = null, val reviewing: Boolean = false, val fieldErrors: Map<String, String> = emptyMap())
+    val stepId: String? = null, val reviewing: Boolean = false, val fieldErrors: Map<String, String> = emptyMap(),
+    val openingForms: Int = 0)
 class InboxViewModel(application: Application) : AndroidViewModel(application) {
     private val app = application as RelayApplication
     private val repo get() = app.repository
@@ -32,11 +33,11 @@ class InboxViewModel(application: Application) : AndroidViewModel(application) {
     private var helperField: String? = null
     private var submitBody: JSONObject? = null
     private var ready = CompletableDeferred<Boolean>()
-    private data class Draft(val values: Map<String, Any>, val stepId: String?, val reviewing: Boolean, val submission: JSONObject?)
+    private data class Draft(val values: Map<String, Any>, val stepId: String?, val reviewing: Boolean, val submission: JSONObject?, val expiresAt: Long)
     private val drafts = mutableMapOf<String, Draft>()
     private fun saveDraft() {
         val s = state.value
-        s.form?.takeIf { it.status == "pending" && s.now < it.expiresAt }?.let { drafts[it.id] = Draft(s.values, s.stepId, s.reviewing, submitBody) }
+        s.form?.takeIf { it.status == "pending" && s.now < it.expiresAt }?.let { drafts[it.id] = Draft(s.values, s.stepId, s.reviewing, submitBody, it.expiresAt) }
     }
     init {
         viewModelScope.launch {
@@ -44,6 +45,11 @@ class InboxViewModel(application: Application) : AndroidViewModel(application) {
             while (true) {
                 delay(1_000)
                 mutable.update { it.copy(now = System.currentTimeMillis()) }
+                drafts.entries.removeAll { it.value.expiresAt <= state.value.now }
+                state.value.let { s ->
+                    s.form?.takeIf { s.now >= it.expiresAt && (s.values.isNotEmpty() || s.stepId != null || s.reviewing ||
+                        s.fieldErrors.isNotEmpty() || submitBody != null || helperRequest == it.id) }?.let(::showLoaded)
+                }
                 if (state.value.helperUntil in 1..System.currentTimeMillis()) stopHelper("SMS listening ended. You can still enter the code manually.")
                 if (++tick % 5 == 0 && state.value.foreground && app.configured && repo.signedIn && repo.registered && !state.value.busy) refresh()
             }
@@ -55,7 +61,7 @@ class InboxViewModel(application: Application) : AndroidViewModel(application) {
         if (!app.configured) return
         if (sessionOwner != repo.ownerId) {
             stopHelper(null); submitBody = null; drafts.clear(); sessionOwner = repo.ownerId
-            mutable.update { InboxState(foreground = it.foreground) }
+            mutable.update { InboxState(foreground = it.foreground, openingForms = it.openingForms) }
         }
         refresh()
     }
@@ -64,20 +70,31 @@ class InboxViewModel(application: Application) : AndroidViewModel(application) {
         val owner = repo.ownerId
         try {
             val requests = repo.inbox()
-            val form = state.value.form?.let { current -> repo.form(current.id) }
             if (owner != repo.ownerId) return@launch
             drafts.keys.retainAll(requests.map { it.id }.toSet())
-            mutable.update { it.copy(requests = requests, form = if (it.form?.id == form?.id) form else it.form,
+            // A retained request may have disappeared; that must not prevent Inbox updates.
+            mutable.update { it.copy(requests = requests) }
+            val form = state.value.form?.takeIf { it.status == "pending" }?.let { current -> repo.form(current.id) }
+            if (owner != repo.ownerId) return@launch
+            mutable.update { it.copy(form = if (it.form?.id == form?.id && it.form?.status == "pending") form else it.form,
                 values = if (form != null && it.form?.id == form.id && form.status != "pending") emptyMap() else it.values) }
             if (form != null && state.value.form?.id == form.id && form.status != "pending") { stopHelper(null); submitBody = null }
         } catch (e: CancellationException) { throw e }
         catch (_: Exception) { /* explicit actions present errors; background refresh preserves drafts */ }
     }
-    fun open(id: String) = action {
-        val owner = repo.ownerId
-        val form = repo.form(id)
-        if (owner != repo.ownerId) return@action
-        showLoaded(form)
+    fun open(id: String) = viewModelScope.async {
+        mutable.update { it.copy(openingForms = it.openingForms + 1) }
+        try {
+            var loaded = false
+            performAction(waitForIdle = true) {
+                val owner = repo.ownerId
+                val form = repo.form(id)
+                if (owner != repo.ownerId) return@performAction
+                showLoaded(form)
+                loaded = true
+            }
+            loaded
+        } finally { mutable.update { it.copy(openingForms = it.openingForms - 1) } }
     }
     internal fun showLoaded(form: RequestForm) {
         saveDraft()
@@ -90,8 +107,11 @@ class InboxViewModel(application: Application) : AndroidViewModel(application) {
         mutable.update { it.copy(form = form, values = draft?.values.orEmpty(), stepId = draft?.stepId,
             reviewing = draft?.reviewing ?: false, fieldErrors = emptyMap(), error = null) }
     }
-    fun close() { if (state.value.busy) return; saveDraft(); stopHelper(null); submitBody = null
-        mutable.update { it.copy(form = null, values = emptyMap(), stepId = null, reviewing = false, fieldErrors = emptyMap(), error = null) }; refresh() }
+    fun close() {
+        val form = state.value.form
+        if (form != null && state.value.now >= form.expiresAt) showLoaded(form) else saveDraft()
+        refresh()
+    }
     fun rendered(id: String) { if (state.value.foreground && state.value.form?.id == id) reportObservation(app, id, "request.opened") }
     fun change(id: String, value: Any) {
         if (state.value.busy || state.value.form?.status != "pending") return
@@ -124,8 +144,10 @@ class InboxViewModel(application: Application) : AndroidViewModel(application) {
         val previous = if (s.reviewing) steps.lastOrNull() else steps.getOrNull(steps.indexOf(FormWizard.current(form, s.values, s.stepId)) - 1)
         if (previous == null) close() else mutable.update { it.copy(stepId = previous.id, reviewing = false, fieldErrors = emptyMap(), error = null) }
     }
-    private fun action(block: suspend () -> Unit) = viewModelScope.launch {
-        if (state.value.busy) return@launch
+    private fun action(waitForIdle: Boolean = false, block: suspend () -> Unit) = viewModelScope.launch { performAction(waitForIdle, block) }
+    private suspend fun performAction(waitForIdle: Boolean = false, block: suspend () -> Unit) {
+        if (waitForIdle) while (state.value.busy) delay(50)
+        if (state.value.busy) return
         mutable.update { it.copy(busy = true, error = null) }
         try { block() } catch (e: CancellationException) { throw e }
         catch (e: ApiFailure) { mutable.update { it.copy(error = e.reason.replace('_', ' ')) } }

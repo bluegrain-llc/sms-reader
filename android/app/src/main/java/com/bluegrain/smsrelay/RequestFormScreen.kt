@@ -34,18 +34,18 @@ fun RequestFormScreen(state: InboxState, deviceId: String, onBack: () -> Unit,
     val keyboard = LocalSoftwareKeyboardController.current
     LaunchedEffect(form.id, state.stepId, state.reviewing) { focus.clearFocus(); keyboard?.hide(); scroll.scrollTo(0) }
     LaunchedEffect(state.fieldErrors) { if (state.fieldErrors.isNotEmpty()) scroll.animateScrollTo(0) }
-    BackHandler { if (!state.busy) { if (wizard) onPrevious() else onBack() } }
+    BackHandler(onBack = onBack)
     LaunchedEffect(form.id, state.foreground) {
         if (state.foreground) { withFrameNanos { }; onRendered(form.id) }
     }
     val active = form.status == "pending" && state.now < form.expiresAt
     Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-        Column(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing).imePadding().verticalScroll(scroll).padding(20.dp),
-            verticalArrangement = Arrangement.spacedBy(20.dp)) {
-            TextButton(onClick = onBack, enabled = !state.busy) { Text("Back to inbox") }
+        Column(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing).imePadding().verticalScroll(scroll).padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp)) {
+            TextButton(onClick = onBack, modifier = Modifier.heightIn(min = 48.dp)) { Text("Close") }
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(form.caller, style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
-                Text(form.title, style = MaterialTheme.typography.headlineMedium)
+                Text(form.title, style = MaterialTheme.typography.headlineSmall)
                 Text("Expires ${DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT).format(Date(form.expiresAt))}",
                     style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
@@ -83,10 +83,10 @@ fun RequestFormScreen(state: InboxState, deviceId: String, onBack: () -> Unit,
                     }
                 }
                 state.helper?.let { Text(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) }
-                state.candidates.forEach { code -> OutlinedButton(onClick = { onCandidate(code) }, enabled = !state.busy) { Text("Use $code") } }
+                state.candidates.forEach { code -> OutlinedButton(onClick = { onCandidate(code) }, enabled = !state.busy, modifier = Modifier.fillMaxWidth()) { Text("Use $code") } }
                 if (wizard) {
                     Text(if (state.reviewing) "Review your answers, then choose an action to send one response."
-                        else "Your answers stay on this phone until you submit. Back to inbox keeps your draft while the app is running.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        else "Your answers stay on this phone until you submit. Close keeps your draft while the app is running.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     if (state.reviewing || steps.indexOf(current) > 0) OutlinedButton(onClick = onPrevious, enabled = !state.busy, modifier = Modifier.fillMaxWidth()) { Text("Previous step") }
                     if (!state.reviewing) Button(onClick = onNext, enabled = !state.busy, modifier = Modifier.fillMaxWidth()) {
                         Text(if (current == steps.lastOrNull()) "Review response" else "Next")
@@ -110,7 +110,7 @@ private fun FormFieldControl(field: FormField, value: Any?, enabled: Boolean, ch
     val label = field.label + if (field.required) " *" else ""
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         when (field.type) {
-            "checkbox" -> Row(Modifier.fillMaxWidth().clickable(enabled = enabled) { change(value != true) }, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            "checkbox" -> Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).clickable(enabled = enabled) { change(value != true) }, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Checkbox(checked = value == true, onCheckedChange = { change(it) }, enabled = enabled)
                 Text(label, Modifier.padding(top = 12.dp))
             }
@@ -122,7 +122,7 @@ private fun FormFieldControl(field: FormField, value: Any?, enabled: Boolean, ch
                         val current = (value as? Set<*>)?.filterIsInstance<String>()?.toSet().orEmpty()
                         change(if (selected) current - id else current + id)
                     } }
-                    Row(Modifier.fillMaxWidth().clickable(enabled = enabled) { select() }, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).clickable(enabled = enabled) { select() }, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         if (field.type == "single_choice") RadioButton(selected = selected, onClick = { select() }, enabled = enabled)
                         else Checkbox(checked = selected, onCheckedChange = { select() }, enabled = enabled)
                         Text(text, Modifier.padding(top = 12.dp))
@@ -136,7 +136,7 @@ private fun FormFieldControl(field: FormField, value: Any?, enabled: Boolean, ch
                     val c = Calendar.getInstance()
                     DatePickerDialog(context, { _, year, month, day -> change(String.format(Locale.ROOT, "%04d-%02d-%02d", year, month + 1, day)) },
                         c.get(Calendar.YEAR), c.get(Calendar.MONTH), c.get(Calendar.DAY_OF_MONTH)).show()
-                }, enabled = enabled) { Text(value as? String ?: "Choose a date") }
+                }, enabled = enabled, modifier = Modifier.fillMaxWidth()) { Text(value as? String ?: "Choose a date") }
             }
             else -> {
                 OutlinedTextField(value = value as? String ?: "", onValueChange = { change(it.take(field.maxLength)) },
@@ -144,7 +144,7 @@ private fun FormFieldControl(field: FormField, value: Any?, enabled: Boolean, ch
                     minLines = if (field.type == "multiline") 3 else 1, modifier = Modifier.fillMaxWidth(),
                     keyboardOptions = KeyboardOptions(keyboardType = if (field.type == "number") KeyboardType.Decimal else KeyboardType.Text),
                     supportingText = if (field.type == "number" && (field.min != null || field.max != null)) { { Text("Range: ${field.min ?: "any"} to ${field.max ?: "any"}") } } else null)
-                if (field.sms) OutlinedButton(onClick = listen, enabled = enabled) { Text("Autofill from an upcoming SMS") }
+                if (field.sms) OutlinedButton(onClick = listen, enabled = enabled, modifier = Modifier.fillMaxWidth()) { Text("Autofill from an upcoming SMS") }
             }
         }
     }
