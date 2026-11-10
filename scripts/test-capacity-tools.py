@@ -9,8 +9,9 @@ class CapacityTools(unittest.TestCase):
     def measured(self):
         return dict(environment='staging',request_count=10000,duration_seconds=86400,average_streams=20,peak_streams=200,peak_seconds=1800,pricing_date='2026-11-10',pricing_sources=['https://cloud.google.com/run/pricing'],usage_evidence=['synthetic-fixture'],usage={k:1 for k in cost.UNITS},unit_prices={k:.01 for k in cost.UNITS})
     def test_cost_requires_full_measurement(self):
-        m=self.measured();m['duration_seconds']=600
-        with self.assertRaises(ValueError):cost.project_cost(m)
+        for duration in [600, 86401, 172800]:
+            m=self.measured();m['duration_seconds']=duration
+            with self.subTest(duration=duration), self.assertRaises(ValueError):cost.project_cost(m)
     def test_cost_extrapolates_metered_usage_but_not_monthly_storage(self):
         r=cost.project_cost(self.measured());self.assertEqual(r['components']['compute_vcpu_seconds'],.3);self.assertEqual(r['components']['storage_gib_month'],.01);self.assertEqual(r['gate'],'PASS')
     def test_cost_blocks_budget_or_nonfinite(self):

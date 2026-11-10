@@ -4,7 +4,7 @@ import argparse,json,math
 from pathlib import Path
 UNITS=('compute_vcpu_seconds','compute_gib_seconds','http_requests','firestore_reads','firestore_writes','firestore_deletes','storage_gib_month','storage_operations','egress_gib','monitoring_usd','backup_usd')
 def project_cost(m):
-    if m.get('environment')!='staging' or m.get('request_count',0)!=10000 or m.get('duration_seconds',0)<86400 or m.get('average_streams')!=20 or m.get('peak_streams')!=200 or m.get('peak_seconds',0)<1800: raise ValueError('full measured workload required')
+    if m.get('environment')!='staging' or m.get('request_count',0)!=10000 or m.get('duration_seconds')!=86400 or m.get('average_streams')!=20 or m.get('peak_streams')!=200 or m.get('peak_seconds',0)<1800: raise ValueError('one exact measured workload day required')
     if not m.get('pricing_date') or not m.get('pricing_sources') or not m.get('usage_evidence'): raise ValueError('dated primary prices and measured evidence required')
     usage=m['usage'];prices=m['unit_prices'];out={}
     for unit in UNITS:

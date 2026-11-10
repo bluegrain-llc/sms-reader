@@ -30,9 +30,11 @@ test('aborting watch startup detaches every listener and removes its shared feed
   const f = fixture(), controller = new AbortController();
   const pending = f.streams.subscribe('synthetic', subscriber(), controller.signal);
   const rejected = assert.rejects(pending, /stream_closed/);
-  await setImmediate(); assert.equal(f.starts(), 3);
-  controller.abort(); await rejected;
-  assert.equal(f.stops(), 3); assert.equal(f.streams.activeFeeds, 0);
+  try {
+    await setImmediate(); assert.equal(f.starts(), 3);
+    controller.abort(); await rejected;
+    assert.equal(f.stops(), 3); assert.equal(f.streams.activeFeeds, 0);
+  } finally { controller.abort(); await rejected; }
 });
 test('an abort during authorization cannot start listeners after the deadline', async () => {
   let authorize: (value: unknown) => void = () => {};
@@ -46,8 +48,10 @@ test('one stream deadline preserves another subscriber and the final abort detac
   const f = fixture(), first = new AbortController(), second = new AbortController();
   const a = f.streams.subscribe('synthetic', subscriber(), first.signal);
   const b = f.streams.subscribe('synthetic', subscriber(), second.signal);
-  await setImmediate(); f.ready(); await Promise.all([a, b]);
-  assert.equal(f.starts(), 3); assert.equal(f.streams.activeFeeds, 1);
-  first.abort(); assert.equal(f.stops(), 0); assert.equal(f.streams.activeFeeds, 1);
-  second.abort(); assert.equal(f.stops(), 3); assert.equal(f.streams.activeFeeds, 0);
+  try {
+    await setImmediate(); f.ready(); await Promise.all([a, b]);
+    assert.equal(f.starts(), 3); assert.equal(f.streams.activeFeeds, 1);
+    first.abort(); assert.equal(f.stops(), 0); assert.equal(f.streams.activeFeeds, 1);
+    second.abort(); assert.equal(f.stops(), 3); assert.equal(f.streams.activeFeeds, 0);
+  } finally { first.abort(); second.abort(); await Promise.allSettled([a, b]); }
 });

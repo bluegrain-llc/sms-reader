@@ -10,6 +10,8 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { Relay } from '../src/relay.js';
 import { app } from '../src/http.js';
+import { snapshotMetadata, applyDenials, type Snapshot } from '../src/recovery.js';
+import type { RecoveryObjects } from '../src/security-ledger.js';
 import { hash, MINUTE, RelayError } from '../src/model.js';
 import type { Server } from 'node:http';
 
@@ -715,18 +717,53 @@ integration('legacy deletion migration records its independent denial before com
   const attempt = db.collection('deletionAttempts').doc(hash(uid));
   await attempt.set({ ownerId: uid, nextAt: time - MINUTE });
   let writes = 0, unavailable = true;
-  const worker = new Relay(db, async () => {}, () => time, undefined, async action => {
+  const worker = new Relay(db, async fcm => { sends.push(fcm); }, () => time, undefined, async action => {
     assert.deepEqual(action, { ownerId: uid, kind: 'account.delete', target: uid });
     writes++; if (unavailable) throw Error('synthetic ledger unavailable');
   });
-  await assert.rejects(worker.deletions.migrateLegacy(), /synthetic ledger unavailable/);
+  await worker.deletions.migrateLegacy();
   assert.equal((await attempt.get()).exists, true);
   assert.equal((await db.collection('accounts').doc(uid).get()).data()?.deleting, undefined);
   assert.equal((await db.collection('deletionJobs').doc(hash(uid)).get()).exists, false);
+  await relay.deletions.request('accepted-other');
+  await relay.register('notification-owner', 'notification-phone', 'Synthetic phone', 'notification-fcm');
+  const caller = await relay.createGrant('notification-owner', 'notification-phone', 'Synthetic caller', 30);
+  await relay.forms.approve('notification-owner', caller.grantId, true);
+  await relay.forms.create(caller.token, formInput('unrelated-delivery'));
+  await worker.deletions.dispatch(async owner => { assert.equal(owner, 'accepted-other'); });
+  await worker.forms.dispatch();
+  assert.equal((await db.collection('deletionJobs').doc(hash('accepted-other')).get()).data()?.status, 'completed');
+  assert.ok(sends.includes('notification-fcm'));
+  assert.equal((await attempt.get()).exists, true);
   unavailable = false; await worker.deletions.migrateLegacy();
-  assert.equal(writes, 2); assert.equal((await attempt.get()).exists, false);
+  assert.equal(writes, 3); assert.equal((await attempt.get()).exists, false);
   assert.equal((await db.collection('accounts').doc(uid).get()).data()?.deleting, true);
   assert.equal((await db.collection('deletionJobs').doc(hash(uid)).get()).exists, true);
+});
+integration('stalled legacy ledger is aborted without blocking another accepted deletion', { timeout: 15000 }, async () => {
+  await db.collection('deletionAttempts').doc(hash(uid)).set({ ownerId: uid, nextAt: time - MINUTE });
+  await relay.deletions.request('accepted-other');
+  let aborted = false;
+  const worker = new Relay(db, async () => {}, () => time, undefined, async (_action, signal) => new Promise((_resolve, reject) => {
+    signal!.addEventListener('abort', () => { aborted = true; reject(Error('synthetic aborted ledger')); }, { once: true });
+  }));
+  await worker.deletions.dispatch(async owner => { assert.equal(owner, 'accepted-other'); });
+  assert.equal(aborted, true);
+  assert.equal((await db.collection('deletionJobs').doc(hash('accepted-other')).get()).data()?.status, 'completed');
+  assert.equal((await db.collection('deletionAttempts').doc(hash(uid)).get()).exists, true);
+});
+integration('snapshot of a normally registered owner restores its implicit account without transient data', { timeout: 15000 }, async () => {
+  assert.equal((await db.collection('accounts').doc(uid).get()).exists, false);
+  let saved: Snapshot | undefined;
+  const backup = { put: async (_name: string, data: unknown) => { saved = data as Snapshot; } } as unknown as RecoveryObjects;
+  const ledger = { bucket: 'synthetic-ledger', get: async () => ({ version: 1, project: 'demo-sms-relay', createdAt: Date.now() - MINUTE }),
+    info: async () => ({ retentionPolicy: { isLocked: true, retentionPeriod: '604800' },
+      iamConfiguration: { uniformBucketLevelAccess: { enabled: true }, publicAccessPrevention: 'enforced' } }) } as unknown as RecoveryObjects;
+  await snapshotMetadata(db, 'demo-sms-relay', backup, ledger); assert.ok(saved);
+  const restored = applyDenials(saved, [], time);
+  assert.deepEqual(restored.rows.find(row => row.collection === 'accounts' && row.id === uid)?.value, {});
+  assert.equal(restored.rows.filter(row => row.collection === 'devices').length, 2);
+  assert.ok(restored.rows.every(row => ['accounts', 'devices', 'grants'].includes(row.collection)));
 });
 integration('recovery gate blocks public pairing route aliases and authenticated traffic', { timeout: 15000 }, async t => {
   const server = app(relay, { assertServing: () => { throw new RelayError(503, 'recovery_in_progress'); },

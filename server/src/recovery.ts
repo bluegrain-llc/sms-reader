@@ -15,6 +15,17 @@ export const snapshotSchema = z.object({ version: z.literal(1), project: z.strin
   completedAt: z.number().int(), ledgerBucket: z.string().min(1), rows: z.array(row), sha256: z.string().regex(/^[a-f0-9]{64}$/) }).strict();
 export type Snapshot = z.infer<typeof snapshotSchema>;
 export const digestRows = (rows: Snapshot['rows']) => createHash('sha256').update(JSON.stringify(rows)).digest('hex');
+function materializeAccounts(rows: Snapshot['rows']) {
+  const owners = new Set(rows.filter(item => item.collection === 'accounts').map(item => item.id));
+  for (const item of rows) {
+    if (item.collection === 'accounts') continue;
+    const owner = item.value.ownerId;
+    ensure(typeof owner === 'string' && owner.length > 0 && owner.length <= 128 && !owner.includes('/'), 400, 'invalid_owner_metadata');
+    // Live registration permits an absent account document, which means {}.
+    // Materialize that same state; ledger replay still supplies every denial.
+    if (!owners.has(owner)) { owners.add(owner); rows.push({ collection: 'accounts', id: owner, value: {} }); }
+  }
+}
 export function selectMetadata(collection: typeof collections[number], value: Record<string, unknown>) {
   const selected = Object.fromEntries(keys[collection].filter(key => value[key] !== undefined).map(key => [key, value[key]]));
   if (collection === 'grants' && selected.webhooks) {
@@ -38,6 +49,7 @@ export async function snapshotMetadata(db: Firestore, project: string, backup: R
       last = page.docs.at(-1)!.id;
     }
   }
+  materializeAccounts(rows);
   const snapshot = snapshotSchema.parse({ version: 1, project, ledgerBucket: ledger.bucket, startedAt,
     completedAt: Date.now(), rows, sha256: digestRows(rows) });
   const name = `snapshots/${startedAt}-${randomUUID()}.json`;
@@ -68,14 +80,13 @@ export function applyDenials(snapshot: Snapshot, raw: unknown[], now: number) {
   }
   for (const item of rows) if (item.collection === 'accounts' && item.value.deleting) deleted.add(item.id);
   const clean = rows.filter(item => item.collection === 'accounts' || !deleted.has(String(item.value.ownerId)));
-  const owners = new Set(clean.filter(r => r.collection === 'accounts').map(r => r.id));
   for (const owner of deleted) {
     const account = clean.find(r => r.collection === 'accounts' && r.id === owner);
     if (account) account.value = { deleting: true };
     else clean.push({ collection: 'accounts', id: owner, value: { deleting: true } });
   }
+  materializeAccounts(clean);
   for (const item of clean) {
-    if (item.collection !== 'accounts') ensure(owners.has(String(item.value.ownerId)), 400, 'snapshot_orphan_metadata');
     if (item.collection === 'grants') {
       ensure(item.value.id === item.id && typeof item.value.expiresAt === 'number', 400, 'invalid_grant_metadata');
       if (item.value.expiresAt <= now || item.value.managerId) item.value.revoked = true;

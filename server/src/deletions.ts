@@ -1,5 +1,6 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import type { RecordSecurity } from './security-ledger.js';
+import { MaintenancePages } from './maintenance-pages.js';
 import { telemetry, category } from './telemetry.js';
 import { Access } from './access.js';
 import { Firestore } from 'firebase-admin/firestore';
@@ -21,11 +22,20 @@ export class Deletions {
   }
   /** Adopt interrupted pre-worker deletions before sampling or executing the durable queue. */
   async migrateLegacy() {
-    const attempts = await this.db.collection('deletionAttempts').orderBy('nextAt').limit(100).get();
-    for (const attempt of attempts.docs) {
-      const uid: unknown = attempt.data().ownerId;
+    return new MaintenancePages(this.db).run('legacy-deletion', this.db.collection('deletionAttempts').where('nextAt', '<=', this.now()),
+      'nextAt', 8, async id => {
+      const attempt = await this.db.collection('deletionAttempts').doc(id).get();
+      if (!attempt.exists) return;
+      const uid: unknown = attempt.data()?.ownerId;
       ensure(typeof uid === 'string' && uid.length > 0 && hash(uid) === attempt.id, 500, 'invalid_legacy_deletion');
-      await this.recordSecurity({ ownerId: uid, kind: 'account.delete', target: uid });
+      const abort = new AbortController(); let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        // A ledger outage cannot consume the unrelated worker's whole budget.
+        await Promise.race([this.recordSecurity({ ownerId: uid, kind: 'account.delete', target: uid }, abort.signal),
+          new Promise<never>((_resolve, reject) => { timer = setTimeout(() => {
+            abort.abort(); reject(Object.assign(Error('legacy_ledger_timeout'), { code: 'ETIMEDOUT' }));
+          }, 5000); })]);
+      } finally { clearTimeout(timer); }
       await this.db.runTransaction(async tx => {
         const current = await tx.get(attempt.ref);
         if (!current.exists) return;
@@ -43,7 +53,7 @@ export class Deletions {
         tx.set(account, { deleting: true });
         tx.delete(attempt.ref);
       });
-    }
+    }, 8);
   }
   async request(uid: string) {
     await this.recordSecurity({ ownerId: uid, kind: 'account.delete', target: uid });
@@ -119,8 +129,8 @@ export class Deletions {
     }
   }
   async dispatch(deleteIdentity: (uid: string) => Promise<void>) {
-    const deadline = Date.now() + 40_000;
     await this.migrateLegacy();
+    const deadline = Date.now() + 40_000;
     // Fair rounds let multiple owners make progress; wall-clock budget fits the HTTP deadline.
     for (let round = 0; round < 40 && Date.now() < deadline; round++) {
       const jobs = await this.db.collection('deletionJobs').where('nextAt', '<=', this.now()).orderBy('nextAt').limit(10).get();

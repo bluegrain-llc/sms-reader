@@ -27,10 +27,15 @@ test('deletion wins regardless of intent order and produces identity cleanup lis
  const output=applyDenials(snapshot(),[intent('account.delete','owner'),intent('grant.revoke','caller')],now);
  assert.deepEqual(output.rows,[{collection:'accounts',id:'owner',value:{deleting:true}}]);assert.deepEqual(output.deleted,['owner']);
 });
-test('restore rejects malformed ledger, corrupt snapshots and orphan owner metadata', () => {
+test('restore rejects malformed ledger, corrupt snapshots and invalid owner references', () => {
  assert.throws(()=>applyDenials(snapshot(),[{}],now));
  assert.throws(()=>applyDenials({...snapshot(),sha256:'0'.repeat(64)},[],now));
- const s=snapshot();s.rows=s.rows.filter(r=>r.collection!=='accounts');s.sha256=digestRows(s.rows);assert.throws(()=>applyDenials(s,[],now));
+ const s=snapshot();s.rows.find(r=>r.collection==='devices')!.value.ownerId='invalid/owner';s.sha256=digestRows(s.rows);assert.throws(()=>applyDenials(s,[],now));
+});
+test('registration-only owners restore with implicit account state and still honor deletion', () => {
+ const s=snapshot();s.rows=s.rows.filter(r=>r.collection!=='accounts');s.sha256=digestRows(s.rows);
+ const restored=applyDenials(s,[],now);assert.deepEqual(restored.rows.find(r=>r.collection==='accounts'),{collection:'accounts',id:'owner',value:{}});
+ assert.deepEqual(applyDenials(s,[intent('account.delete','owner')],now).rows,[{collection:'accounts',id:'owner',value:{deleting:true}}]);
 });
 test('missing independent ledger configuration fails closed', async () => {
  await assert.rejects(securityLedger(undefined)({ownerId:'owner',kind:'account.delete',target:'owner'}), /security_ledger_not_configured/);
