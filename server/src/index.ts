@@ -27,6 +27,8 @@ const server = app(relay, {
     ensure(payload?.email_verified && payload.email === process.env.SCHEDULER_EMAIL, 401, 'scheduler_not_authorized');
   },
   publicUrl: process.env.SERVICE_URL,
+  firebaseWebConfig: process.env.FIREBASE_WEB_CONFIG ? JSON.parse(process.env.FIREBASE_WEB_CONFIG) : undefined,
+  privacyContact: process.env.PRIVACY_CONTACT,
   androidCertSha256: process.env.ANDROID_SIGNING_SHA256,
   trustProxyHops: 1,
   origins: (process.env.ALLOWED_ORIGINS ?? '').split(',').filter(Boolean),

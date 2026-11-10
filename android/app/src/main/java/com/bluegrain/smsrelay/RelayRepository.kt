@@ -63,6 +63,7 @@ class RelayRepository(context: Context) {
         val current = auth.currentUser
         if (current == null) auth.signInWithCredential(credential).await()
         else current.reauthenticate(credential).await()
+        auth.currentUser?.getIdToken(true)?.await()
     }
     private suspend fun call(method: String, path: String, body: JSONObject? = null): String {
         val token = auth.currentUser?.getIdToken(false)?.await()?.token ?: throw ApiFailure("sign_in_required", 401)
