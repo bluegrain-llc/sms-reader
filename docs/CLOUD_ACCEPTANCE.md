@@ -33,12 +33,15 @@ identity with no personal records. No production project is accepted.
    UID as `disposableOwnerUid`. There must be no devices or grants on the account
    before a run. JWT decoding is only an accident guard; deployed Firebase Auth
    verifies the signature and Google provider.
-5. Supply two real staging-installation FCM tokens in separate mode-0600 files.
+5. Supply two distinct real staging-installation FCM tokens in separate mode-0600 files.
+   Their local bounds, whitespace and distinctness are checked before registration;
+   provider validity is established by the later delivery scenario.
    These prove FCM provider acceptance, not physical display, owner recognition,
    carrier delivery or system consent. The runner creates unique installation
    IDs and submits synthetic manual values through authenticated owner APIs.
-6. The selected cloud operator needs read/write access to the **disposable staging**
-   `results` collection. The expiry check changes only its fixture's `purgeAt` to
+6. The selected cloud operator needs read access to staging `deliveryOutbox` and
+   read/write access to the **disposable staging** `results` collection.
+   The expiry check changes only its fixture's `purgeAt` to
    20 minutes ahead, leaving `expiresAt` unchanged. After 121 seconds it requires
    the expired document still exists with future `purgeAt` before checking API
    denial. A missing document fails the scenario; TTL cleanup alone cannot pass.
@@ -74,7 +77,8 @@ receiver and its temporary secret when the acceptance campaign ends.
 The probe's `/admin/<run UUID>` routes require the admin secret in Authorization.
 Each run registers a `/hooks/<run UUID>` destination and provisions its signing
 secret over authenticated HTTPS before creating the synthetic request. Public
-callback routes verify HMAC over the exact raw body, timestamp tolerance, event
+callback routes verify HMAC over the received byte buffer before JSON decoding,
+timestamp tolerance, event
 ID, and an allowlist excluding answers and owner/grant fields. Receipt counters
 are transactional and survive receiver cold starts.
 
@@ -85,7 +89,10 @@ the response, and requires that observation plus a later same-event successful
 retry. A caller that waits for the delayed 204 cannot pass. If the hosting proxy
 does not propagate disconnects, this scenario fails rather than claiming timeout
 proof. Receipt `status` is the planned response; `clientClosedBeforeResponse`
-distinguishes an aborted timeout attempt. The probe does not proxy destinations.
+distinguishes an aborted timeout attempt. A retry additionally requires the
+receiver's completed response and deletion of its exact sender outbox job while
+the request, event and callback registration remain active. A planned 204 alone
+cannot pass recovery. The probe does not proxy destinations.
 
 ## Running the baseline
 
@@ -106,11 +113,15 @@ synthetic manual SMS API submission and two-minute expiry with a retained result
 document, hidden wizard branch rejection, consistent winner identity across both
 competing responses, losing/winning retries without overwrites, exactly one
 terminal submission event, two FCM provider acceptances,
-cross-revision Last-Event-ID replay, callback retries, and receipt-based account
+cross-revision Last-Event-ID replay with the exact ordered expected suffix,
+callback retries, and receipt-based account
 deletion. It never stores response values or callback secrets in evidence.
 
-Cleanup runs on success and failure. It removes callback registrations/probe
-fixtures and requests durable owner deletion with a recent token, then waits for
+Cleanup runs on success and failure. It denies any known pending pairing before
+owner deletion so its ownerless records become owned cleanup fixtures. An expired
+pairing or uncertain creation response makes cleanup incomplete for operator
+repair. Cleanup removes callback registrations/probe fixtures and requests
+durable owner deletion with a recent token, then waits for
 the read-only receipt to report completion and verifies the old owner session is
 rejected. Failed cleanup is a failed run, requiring operator repair; do not discard
 that evidence or rerun with a different owner to hide leftover fixtures.

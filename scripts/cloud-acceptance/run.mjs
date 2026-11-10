@@ -4,7 +4,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-import { callbackReceipts, checkedScenario, cloud, config, fixtureCredentials, ownerClaims, preflight, preserveExpiryFixture, privateValue, report, request, requireThat, scenarios, winnerAgreement, writeReport } from './core.mjs';
+import { activeTtl, callbackJobId, callbackReceipts, checkedScenario, cloud, config, fixtureCredentials, ownerClaims, preflight, preserveExpiryFixture, privateValue, replayProgress, report, request, requireThat, scenarios, settlePairings, stagingDocumentReader, winnerAgreement, writeReport } from './core.mjs';
 
 const args = process.argv.slice(2);
 const option = name => { const i = args.indexOf(name); return i < 0 ? undefined : args[i + 1]; };
@@ -21,11 +21,19 @@ if (args.includes('--plan')) {
 }
 const results = [], startedAt = new Date().toISOString(), runId = randomUUID();
 let context = {}, caller, otherCaller, owner, credentials, hookIds = [], collectorIds = [], createdDevices = [], apiStarted = false;
+const pairingCodes = []; let pairingCreationUncertain = false;
 const call = (path, token, body, method, origin = cfg.serviceUrl) => request(origin, path, token, body, method);
 const ok = async (...params) => { const r = await call(...params); requireThat(r.status >= 200 && r.status < 300, 'unexpected_api_status'); return r.value; };
 const ownerToken = async () => { const value = await privateValue(cfg.ownerTokenFile); ownerClaims(value, cfg.disposableOwnerUid, cfg.projectId); return value; };
 const check = (scenario, fn) => checkedScenario(results, scenario, fn);
 const pending = (scenario, reason) => results.push({ scenario, status: 'pending', reason });
+async function startPairing(callerName, purpose) {
+  pairingCreationUncertain = true;
+  const connection = await ok('/v1/connections', undefined, { callerName, purpose, expiresInDays: 1 });
+  requireThat(typeof connection.userCode === 'string', 'pairing_code_missing');
+  pairingCodes.push(connection.userCode); pairingCreationUncertain = false;
+  return connection;
+}
 async function until(fn, timeoutMs = 150_000) {
   const end = Date.now() + timeoutMs;
   while (Date.now() < end) { const value = await fn(); if (value) return value; await delay(2_000); }
@@ -43,10 +51,15 @@ async function callbackProbe(mode) {
       const response = await request(cfg.callbackUrl, `/admin/${id}`, admin);
       requireThat(response.status === 200, 'receiver_unavailable');
       const values = response.value.receipts.filter(r => r.requestId === form.requestId);
-      return values.some(r => r.attempt >= 2 && r.status === 204) && (mode !== 'timeout-once' || values.some(r => r.attempt === 1 && r.clientClosedBeforeResponse !== undefined)) ? values : null;
+      return values.some(r => r.attempt >= 2 && r.status === 204 && r.responseFinished === true) && (mode !== 'timeout-once' || values.some(r => r.attempt === 1 && r.clientClosedBeforeResponse !== undefined)) ? values : null;
     });
     callbackReceipts(mode, receipts);
-    return { attempts: receipts.length, verifiedPublicTls: true, verifiedSignedEvent: true };
+    const read = await stagingDocumentReader(cfg), jobId = callbackJobId(receipts[0].id, hook.id);
+    await until(async () => (await read('deliveryOutbox', jobId)) === null);
+    requireThat((await ok(`/v2/requests/${form.requestId}`, caller)).status === 'pending', 'callback_fixture_not_active');
+    requireThat((await ok('/v2/webhooks', caller)).some(h => h.id === hook.id), 'callback_hook_removed');
+    requireThat((await ok('/v2/events', caller)).events.some(e => e.id === receipts[0].id), 'callback_event_removed');
+    return { attempts: receipts.length, verifiedPublicTls: true, verifiedSignedEvent: true, senderOutboxRetired: true };
   } finally { await ok(`/v2/requests/${form.requestId}/cancel`, caller, {}); }
 }
 
@@ -54,6 +67,7 @@ try {
   // Complete the cloud guard before reading credentials or sending any mutating request.
   context = await preflight(cfg);
   credentials = await fixtureCredentials(cfg); owner = credentials.owner;
+  if (cfg.callbackUrl) requireThat((await request(cfg.callbackUrl, `/admin/${randomUUID()}`, credentials.callbackAdmin)).status === 404, 'callback_admin_preflight_failed');
   requireThat((await ok('/v1/devices', owner)).length === 0 && (await ok('/v1/callers', owner)).length === 0, 'fresh_disposable_owner_required');
   await check('infrastructure', async () => {
     const health = await call('/health'); requireThat(health.status === 200 && health.value?.ok === true, 'health_failed');
@@ -64,7 +78,7 @@ try {
     requireThat(indexes.length > 0 && indexes.every(i => i.state === 'READY'), 'indexes_not_ready');
     const fields = await cloud(cfg, ['firestore', 'fields', 'ttls', 'list']);
     for (const collection of ['results', 'requests', 'audit', 'connections', 'connectionCodes', 'connectionRates', 'formResults', 'formRequests', 'requestEvents', 'deliveryOutbox']) {
-      requireThat(fields.some(f => f.name?.includes(`/collectionGroups/${collection}/`) && f.ttlConfig?.state === 'ACTIVE'), 'ttl_not_active');
+      requireThat(activeTtl(fields, collection), 'ttl_not_active');
     }
     const queue = await cloud(cfg, ['tasks', 'queues', 'describe', 'relay-delivery', `--location=${cfg.region}`]);
     const scheduler = await cloud(cfg, ['scheduler', 'jobs', 'describe', 'sms-relay-maintenance', `--location=${cfg.region}`]);
@@ -81,15 +95,19 @@ try {
     return { registeredDevices: createdDevices.length };
   });
   await check('pairing', async () => {
-    const connection = await ok('/v1/connections', undefined, { callerName: 'Staging acceptance', purpose: 'Disposable cloud verification fixture.', expiresInDays: 1 });
+    const connection = await startPairing('Staging acceptance', 'Disposable cloud verification fixture.');
     caller = connection.connectionToken;
     requireThat((await call('/mcp', caller, { jsonrpc: '2.0', id: 1, method: 'tools/list' })).status === 401, 'pending_credential_authorized');
     await ok('/v1/connections/decision', owner, { userCode: connection.userCode, decision: 'approved' });
     const state = await ok('/v1/connections/poll', caller, {}); requireThat(state.status === 'approved', 'pairing_not_approved');
-    const other = await ok('/v1/connections', undefined, { callerName: 'Staging isolation fixture', purpose: 'Independent disposable caller.', expiresInDays: 1 });
+    const other = await startPairing('Staging isolation fixture', 'Independent disposable caller.');
     await ok('/v1/connections/decision', owner, { userCode: other.userCode, decision: 'approved' }); otherCaller = other.connectionToken;
-    const grant = (await ok('/v1/callers', owner)).find(g => g.callerName === 'Staging acceptance'); requireThat(grant, 'grant_missing');
-    await ok(`/v2/grants/${grant.grantId}/forms`, owner, { approved: true }, 'PUT');
+    const grants = await ok('/v1/callers', owner);
+    for (const name of ['Staging acceptance', 'Staging isolation fixture']) {
+      const grant = grants.find(g => g.callerName === name); requireThat(grant, 'grant_missing');
+      await ok(`/v2/grants/${grant.grantId}/forms`, owner, { approved: true }, 'PUT');
+    }
+    await ok('/v2/events', otherCaller);
     const client = new Client({ name: 'cloud-acceptance', version: '1' });
     try {
       await client.connect(new StreamableHTTPClientTransport(new URL(`${cfg.serviceUrl}/mcp`), { requestInit: { headers: { authorization: `Bearer ${caller}` } } }));
@@ -113,6 +131,7 @@ try {
     const code = `T${randomBytes(4).readUInt32BE() % 10000000}`.padEnd(8, '0');
     await ok(`/v1/devices/${createdDevices[0]}/requests/${r.requestId}/events`, owner, { status: 'completed', source: 'manual', code });
     requireThat((await ok(`/v1/requests/${r.requestId}`, caller)).code === code, 'manual_result_mismatch');
+    requireThat((await call(`/v1/requests/${r.requestId}`, otherCaller)).status === 404, 'completed_sms_result_leaked');
     const other = await ok(`/v1/devices/${createdDevices[1]}/requests/${r.requestId}`, owner); requireThat(!('code' in other), 'code_leaked_to_phone');
     const proveRetained = await preserveExpiryFixture(cfg, r.requestId);
     await delay(121_000);
@@ -136,6 +155,7 @@ try {
     const result = await ok(`/v2/requests/${form.requestId}/result`, caller); requireThat(['synthetic-0', 'synthetic-1'].includes(result.result?.values?.note), 'wizard_winner_invalid');
     const winner = uploads.find(u => u.id === winningDevice), loser = uploads.find(u => u.id !== winningDevice);
     requireThat(result.result.values.note === winner.body.values.note, 'wizard_winner_value_mismatch');
+    requireThat((await call(`/v2/requests/${form.requestId}/result`, otherCaller)).status === 404, 'completed_wizard_result_leaked');
     winnerAgreement([await submit(loser), await submit(winner)], [winningDevice]);
     requireThat(JSON.stringify((await ok(`/v2/requests/${form.requestId}/result`, caller)).result) === JSON.stringify(result.result), 'wizard_result_overwritten');
     const terminalEvents = (await ok('/v2/events', caller)).events.filter(e => e.requestId === form.requestId && e.type === 'request.submitted');
@@ -150,9 +170,9 @@ try {
     const expected = await ok(`/v2/events?cursor=${encodeURIComponent(cursor)}`, caller);
     const response = await fetch(`${cfg.replayUrl}/v2/events/stream`, { headers: { authorization: `Bearer ${caller}`, 'Last-Event-ID': cursor }, signal: AbortSignal.timeout(15_000), redirect: 'error' });
     requireThat(response.ok && response.headers.get('content-type')?.startsWith('text/event-stream'), 'sse_unavailable');
-    const reader = response.body.getReader(); let text = '';
+    const reader = response.body.getReader(), decoder = new TextDecoder(); let text = '';
     try {
-      while (expected.events.some(e => !text.includes(`id: ${e.id}\n`))) { const next = await reader.read(); requireThat(!next.done, 'sse_replay_incomplete'); text += new TextDecoder().decode(next.value); requireThat(text.length < 262144, 'sse_too_large'); }
+      while (!replayProgress(text, expected.events, cursor)) { const next = await reader.read(); requireThat(!next.done, 'sse_replay_incomplete'); text += decoder.decode(next.value, { stream: true }); requireThat(text.length < 262144, 'sse_too_large'); }
     } finally { await reader.cancel(); }
     return { replayedEvents: expected.events.length, distinctRevisionOrigin: cfg.replayUrl !== cfg.serviceUrl };
   });
@@ -172,6 +192,7 @@ finally {
   if (!results.some(r => r.scenario === 'infrastructure')) results.push({ scenario: 'infrastructure', status: 'failed' });
   let cleaned = !apiStarted;
   let receiverCleaned = true;
+  let pairingsCleaned = !pairingCreationUncertain;
   if (apiStarted) {
     for (const id of hookIds) { try { await ok(`/v2/webhooks/${id}`, caller, undefined, 'DELETE'); } catch { /* owner deletion retries cleanup */ } }
     if (cfg.callbackUrl && cfg.callbackAdminTokenFile) {
@@ -180,11 +201,12 @@ finally {
     try {
       owner = await ownerToken(); const claims = ownerClaims(owner, cfg.disposableOwnerUid, cfg.projectId);
       requireThat(Date.now() - claims.auth_time * 1000 < 300_000, 'recent_sign_in_required');
+      pairingsCleaned = await settlePairings(pairingCodes, userCode => ok('/v1/connections/decision', owner, { userCode, decision: 'denied' })) && pairingsCleaned;
       const deletion = await call('/v1/account', owner, undefined, 'DELETE');
       requireThat(deletion.status === 202 && deletion.value?.receipt, 'resumable_deletion_required');
       await until(async () => (await call('/v1/account-deletion', deletion.value.receipt)).value?.status === 'completed');
       requireThat((await call('/v1/devices', owner)).status === 401, 'deleted_identity_still_authorized');
-      results.push({ scenario: 'deletion', status: 'passed' }); cleaned = receiverCleaned;
+      results.push({ scenario: 'deletion', status: 'passed' }); cleaned = receiverCleaned && pairingsCleaned;
     } catch { if (!results.some(r => r.scenario === 'deletion')) results.push({ scenario: 'deletion', status: 'failed' }); }
   }
   for (const name of scenarios) if (!results.some(r => r.scenario === name)) pending(name, 'prerequisite_not_completed');

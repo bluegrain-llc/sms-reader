@@ -25,7 +25,7 @@ const server = createServer(async (req, res) => {
     if (req.method !== 'POST') return json(res, 405, { error: 'method_not_allowed' });
     const chunks = []; let size = 0;
     for await (const chunk of req) { size += chunk.length; if (size > 32_768) { req.destroy(); return; } chunks.push(chunk); }
-    const body = Buffer.concat(chunks).toString('utf8');
+    const body = Buffer.concat(chunks);
     if (kind === 'admin') {
       const input = JSON.parse(body);
       if (typeof input.secret !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(input.secret) || !allowedModes.has(input.mode)) return json(res, 400, { error: 'invalid_input' });
@@ -46,7 +46,7 @@ const server = createServer(async (req, res) => {
       const mode = fresh.mode;
       const { status, timeout } = callbackOutcome(mode, attempt);
       tx.update(ref, { receipts: FieldValue.arrayUnion({ ...event, attempt, status, at: Date.now() }) });
-      return { status, timeout };
+      return { status, timeout, attempt };
     });
     if (!outcome) return json(res, 410, { error: 'fixture_expired_or_full' });
     if (outcome.timeout) {
@@ -57,7 +57,17 @@ const server = createServer(async (req, res) => {
       });
       if (clientClosedBeforeResponse) return;
     }
-    res.writeHead(outcome.status); res.end();
+    const responseFinished = await new Promise(resolve => {
+      const done = finished => { clearTimeout(timer); res.removeListener('finish', finish); res.removeListener('close', close); resolve(finished); };
+      const finish = () => done(true), close = () => done(res.writableFinished);
+      const timer = setTimeout(() => done(false), 1000);
+      res.once('finish', finish); res.once('close', close);
+      if (res.destroyed) close(); else { res.writeHead(outcome.status); res.end(); }
+    });
+    await db.runTransaction(async tx => {
+      const latest = (await tx.get(ref)).data();
+      if (latest) tx.update(ref, { receipts: latest.receipts.map(r => r.id === event.id && r.attempt === outcome.attempt ? { ...r, responseFinished } : r) });
+    });
   } catch { if (!res.headersSent) json(res, 500, { error: 'probe_failed' }); }
 });
 server.requestTimeout = 20_000;

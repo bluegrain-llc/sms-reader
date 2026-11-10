@@ -1,4 +1,4 @@
-import { createHmac, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import { readFile, stat, writeFile } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -17,7 +17,7 @@ export function config(raw) {
   requireThat(raw.projectId.includes('staging') || raw.projectId.includes('-stg'), 'staging_project_name_required');
   requireThat(typeof raw.region === 'string' && typeof raw.service === 'string' && /^[a-z][a-z0-9-]+$/.test(raw.region) && /^[a-z][a-z0-9-]+$/.test(raw.service), 'invalid_resource_name');
   requireThat(typeof raw.account === 'string' && /^[^\s@]+@[^\s@]+$/.test(raw.account), 'explicit_cloud_account_required');
-  requireThat(raw.disposableOwnerUid && raw.ownerTokenFile && raw.fcmTokenFiles?.length === 2, 'disposable_owner_and_two_phones_required');
+  requireThat(raw.disposableOwnerUid && raw.ownerTokenFile && Array.isArray(raw.fcmTokenFiles) && raw.fcmTokenFiles.length === 2, 'disposable_owner_and_two_phones_required');
   requireThat(raw.budgetUsd > 0 && raw.budgetUsd <= 100, 'explicit_test_budget_required');
   const serviceUrl = httpsOrigin(raw.serviceUrl);
   const replayUrl = raw.replayUrl ? httpsOrigin(raw.replayUrl) : undefined;
@@ -35,7 +35,10 @@ export async function fixtureCredentials(cfg) {
   const owner = await privateValue(cfg.ownerTokenFile);
   ownerClaims(owner, cfg.disposableOwnerUid, cfg.projectId);
   const phones = await Promise.all(cfg.fcmTokenFiles.map(privateValue));
+  requireThat(phones.every(token => token.length <= 4096 && !/\s/.test(token)), 'invalid_fcm_token');
+  requireThat(new Set(phones).size === 2, 'distinct_fcm_tokens_required');
   const callbackAdmin = cfg.callbackUrl ? await privateValue(cfg.callbackAdminTokenFile) : undefined;
+  if (cfg.callbackUrl) requireThat(/^[A-Za-z0-9_-]{43}$/.test(callbackAdmin), 'invalid_callback_admin_secret');
   return { owner, phones, callbackAdmin };
 }
 export function callbackOutcome(mode, attempt) {
@@ -52,11 +55,43 @@ export async function clientDisconnectedBeforeResponse(response, deadlineMs = 11
 }
 export function callbackReceipts(mode, receipts) {
   const first = receipts.find(r => r.attempt === 1);
-  const retry = receipts.find(r => r.attempt >= 2 && r.status === 204);
+  const retry = receipts.find(r => r.attempt >= 2 && r.status === 204 && r.responseFinished === true);
   requireThat(first && retry && new Set(receipts.map(r => r.id)).size === 1, 'callback_retry_contract');
   if (mode === 'timeout-once') requireThat(first.status === 204 && first.clientClosedBeforeResponse === true, 'callback_timeout_not_observed');
   else requireThat(first.status === 503, 'callback_rejection_not_observed');
 }
+export function activeTtl(fields, collection) {
+  return fields.some(field => field.name?.endsWith(`/collectionGroups/${collection}/fields/purgeAt`) && field.ttlConfig?.state === 'ACTIVE');
+}
+export function replayProgress(text, expected, cursor) {
+  requireThat(expected.length > 0 && !expected.some(event => event.id === cursor), 'replay_suffix_required');
+  const frames = text.split(/\r?\n\r?\n/); frames.pop();
+  const ids = frames.flatMap(frame => frame.split(/\r?\n/).filter(line => line.startsWith('id: ')).map(line => line.slice(4)));
+  requireThat(ids.every((id, index) => index < expected.length ? id === expected[index].id : id !== cursor && id > ids[index - 1]), 'sse_replay_order_mismatch');
+  return ids.length >= expected.length;
+}
+export async function settlePairings(userCodes, decide) {
+  let complete = true;
+  for (const userCode of userCodes) {
+    try {
+      const connection = await decide(userCode);
+      requireThat(['approved', 'denied'].includes(connection.status), 'pairing_cleanup_not_owned');
+    } catch { complete = false; }
+  }
+  return complete;
+}
+export async function stagingDocumentReader(cfg) {
+  const { stdout } = await execute('gcloud', ['auth', 'print-access-token', `--account=${cfg.account}`, `--project=${cfg.projectId}`, '--quiet'], { timeout: 30_000, maxBuffer: 64 * 1024 });
+  const token = stdout.trim();
+  return async (collection, id) => {
+    requireThat(['results', 'deliveryOutbox'].includes(collection) && /^[a-f0-9]{64}$/.test(id), 'invalid_fixture_document');
+    const endpoint = `https://firestore.googleapis.com/v1/projects/${cfg.projectId}/databases/(default)/documents/${collection}/${id}`;
+    const response = await fetch(endpoint, { headers: { authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(20_000), redirect: 'error' });
+    if (response.status === 404) return null;
+    requireThat(response.ok, 'fixture_read_failed'); return response.json();
+  };
+}
+export function callbackJobId(eventId, hookId) { return createHash('sha256').update(`${eventId}:webhook:${hookId}`).digest('hex'); }
 export function winnerAgreement(responses, devices) {
   const winner = responses[0]?.completedByDeviceId;
   requireThat(devices.includes(winner) && responses.every(r => r.status === 'submitted' && r.completedByDeviceId === winner), 'inconsistent_submission_winners');
@@ -128,7 +163,7 @@ export async function preflight(cfg, inspect = cloud) {
 }
 export function verifySignature(secret, timestamp, rawBody, signature, now = Date.now()) {
   if (!/^\d+$/.test(timestamp ?? '') || Math.abs(now / 1000 - Number(timestamp)) > 300 || !/^v1=[a-f0-9]{64}$/.test(signature ?? '')) return false;
-  const expected = createHmac('sha256', secret).update(`${timestamp}.${rawBody}`).digest();
+  const expected = createHmac('sha256', secret).update(`${timestamp}.`).update(rawBody).digest();
   return timingSafeEqual(expected, Buffer.from(signature.slice(3), 'hex'));
 }
 const eventKeys = new Set(['id', 'type', 'requestId', 'sequence', 'requestSequence', 'at', 'deviceId', 'fieldId', 'observedAt']);

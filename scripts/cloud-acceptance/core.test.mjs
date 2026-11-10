@@ -5,7 +5,7 @@ import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EventEmitter } from 'node:events';
-import { callbackOutcome, callbackReceipts, checkedScenario, clientDisconnectedBeforeResponse, config, eventMetadata, expiryFixtureState, fixtureCredentials, httpsOrigin, ownerClaims, preflight, privateValue, report, scenarios, verifySignature, winnerAgreement, writeReport } from './core.mjs';
+import { activeTtl, callbackOutcome, callbackReceipts, checkedScenario, clientDisconnectedBeforeResponse, config, eventMetadata, expiryFixtureState, fixtureCredentials, httpsOrigin, ownerClaims, preflight, privateValue, replayProgress, report, scenarios, settlePairings, verifySignature, winnerAgreement, writeReport } from './core.mjs';
 
 const base = { projectId: 'relay-staging-123', productionProjectId: 'relay-production-123', account: 'operator@example.com', region: 'us-central1', service: 'relay-service', serviceUrl: 'https://relay.run.app', ownerTokenFile: '/private/owner', disposableOwnerUid: 'disposable', fcmTokenFiles: ['/private/one', '/private/two'], budgetUsd: 10 };
 test('destructive staging guard rejects production, implicit account, unsafe URLs and missing budget', () => {
@@ -45,15 +45,23 @@ test('callback verification binds exact body and timestamp and refuses stale or 
   assert.equal(verifySignature(secret, timestamp, body, signature, now + 301000), false);
   assert.equal(verifySignature(secret, timestamp, body, 'v1=bad', now), false);
   assert.equal(verifySignature(secret, 'NaN', body, signature, now), false);
+  const bytes = Buffer.from('{"id":"event","fieldId":"�"}');
+  const signedBytes = `v1=${createHmac('sha256', secret).update(`${timestamp}.`).update(bytes).digest('hex')}`;
+  const altered = Buffer.concat([bytes.subarray(0, bytes.indexOf(Buffer.from('�'))), Buffer.from([0xff]), bytes.subarray(bytes.indexOf(Buffer.from('�')) + 3)]);
+  assert.equal(altered.toString('utf8'), bytes.toString('utf8'));
+  assert.equal(verifySignature(secret, timestamp, bytes, signedBytes, now), true);
+  assert.equal(verifySignature(secret, timestamp, altered, signedBytes, now), false);
 });
 test('timeout evidence requires an observed client abort, not delayed rejection or success', async () => {
   assert.deepEqual(callbackOutcome('timeout-once', 1), { status: 204, timeout: true });
   assert.deepEqual(callbackOutcome('fail-once', 1), { status: 503, timeout: false });
-  const first = { id: 'same-event', attempt: 1, status: 204, clientClosedBeforeResponse: true }, retry = { id: 'same-event', attempt: 2, status: 204 };
+  const first = { id: 'same-event', attempt: 1, status: 204, clientClosedBeforeResponse: true }, retry = { id: 'same-event', attempt: 2, status: 204, responseFinished: true };
   callbackReceipts('timeout-once', [first, retry]);
   assert.throws(() => callbackReceipts('timeout-once', [{ ...first, status: 503 }, retry]));
   assert.throws(() => callbackReceipts('timeout-once', [{ ...first, clientClosedBeforeResponse: false }, retry]));
   assert.throws(() => callbackReceipts('timeout-once', [first]));
+  assert.throws(() => callbackReceipts('timeout-once', [first, { ...retry, responseFinished: undefined }]));
+  assert.throws(() => callbackReceipts('timeout-once', [first, { ...retry, responseFinished: false }]));
   const closed = new EventEmitter(); closed.writableFinished = false;
   const observed = clientDisconnectedBeforeResponse(closed, 1000); closed.emit('close');
   assert.equal(await observed, true); assert.equal(closed.listenerCount('close'), 0);
@@ -127,7 +135,43 @@ test('all fixture credentials fail validation before callers can begin setup mut
     const withCallback = { ...cfg, callbackUrl: 'https://receiver.run.app', callbackAdminTokenFile: admin };
     await assert.rejects(fixtureCredentials(withCallback));
     await writeFile(admin, 'admin-secret', { mode: 0o600 });
+    await assert.rejects(fixtureCredentials(withCallback), /invalid_callback_admin_secret/);
+    await writeFile(admin, 'a'.repeat(43), { mode: 0o600 });
     const result = await fixtureCredentials(withCallback);
-    assert.deepEqual(result.phones, ['first-token', 'second-token']); assert.equal(result.callbackAdmin, 'admin-secret');
+    assert.deepEqual(result.phones, ['first-token', 'second-token']); assert.equal(result.callbackAdmin, 'a'.repeat(43));
+    for (const invalid of ['x'.repeat(4097), 'bad token', 'first-token']) {
+      await writeFile(second, invalid, { mode: 0o600 });
+      await assert.rejects(fixtureCredentials(cfg));
+    }
+    await assert.rejects(fixtureCredentials({ ...cfg, fcmTokenFiles: [first, first] }), /distinct_fcm_tokens_required/);
   } finally { await rm(dir, { recursive: true, force: true }); }
+});
+test('replay evidence rejects ignored cursors, duplicates and reordered suffixes', () => {
+  const frame = id => `id: ${id}\nevent: request.created\ndata: {}\n\n`;
+  const expected = [{ id: 'grant_0002' }, { id: 'grant_0003' }], cursor = 'grant_0001';
+  assert.equal(replayProgress(frame(expected[0].id), expected, cursor), false);
+  assert.equal(replayProgress(expected.map(e => frame(e.id)).join(''), expected, cursor), true);
+  for (const ids of [[cursor, ...expected.map(e => e.id)], ['grant_0002', 'grant_0002', 'grant_0003'], ['grant_0003', 'grant_0002']]) {
+    assert.throws(() => replayProgress(ids.map(frame).join(''), expected, cursor), /sse_replay_order_mismatch/);
+  }
+  assert.throws(() => replayProgress('', [], cursor), /replay_suffix_required/);
+});
+test('TTL readiness requires the actual purgeAt field in the intended collection', () => {
+  const field = name => ({ name: `projects/p/databases/(default)/collectionGroups/requests/fields/${name}`, ttlConfig: { state: 'ACTIVE' } });
+  assert.equal(activeTtl([field('otherDeadline')], 'requests'), false);
+  assert.equal(activeTtl([field('purgeAt')], 'requests'), true);
+  assert.equal(activeTtl([field('purgeAt')], 'results'), false);
+  assert.equal(activeTtl([{ ...field('purgeAt'), ttlConfig: { state: 'CREATING' } }], 'requests'), false);
+});
+test('cleanup assigns known pending pairings to the disposable owner before deletion', async () => {
+  const seen = [], pending = new Map([['first', 'pending'], ['second', 'approved']]);
+  assert.equal(await settlePairings([...pending.keys()], async code => {
+    seen.push(code); if (pending.get(code) === 'pending') pending.set(code, 'denied');
+    return { status: pending.get(code) };
+  }), true);
+  assert.deepEqual(seen, ['first', 'second']); assert.equal(pending.get('first'), 'denied');
+  assert.equal(await settlePairings(['expired'], async () => ({ status: 'expired' })), false);
+  const attempted = [];
+  assert.equal(await settlePairings(['failed', 'later'], async code => { attempted.push(code); throw new Error('unavailable'); }), false);
+  assert.deepEqual(attempted, ['failed', 'later']);
 });
