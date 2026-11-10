@@ -3,6 +3,7 @@ package com.bluegrain.smsrelay
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.assertIsNotFocused
 import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.graphics.asAndroidBitmap
@@ -31,7 +32,10 @@ import org.junit.Assert.assertFalse
 
 class ApprovalScreenTest {
     @get:Rule val compose = createComposeRule()
-    private fun hideKeyboard(view: android.view.View) {
+    private fun hideKeyboard(view: android.view.View, focus: androidx.compose.ui.focus.FocusManager) {
+        // Text input may still have a queued IME show. End the focused input session
+        // before hiding, so that late request cannot reopen the keyboard.
+        compose.runOnIdle { focus.clearFocus(force = true) }
         compose.runOnIdle { androidx.core.view.ViewCompat.getWindowInsetsController(view)?.hide(androidx.core.view.WindowInsetsCompat.Type.ime()) }
         compose.waitUntil(5_000) {
             var visible = true
@@ -224,17 +228,28 @@ class ApprovalScreenTest {
         var submissions = 0
         var listened = false
         var ui by androidx.compose.runtime.mutableStateOf(InboxState(form = form(), now = 0, foreground = true))
-        compose.setContent { RelayTheme { RequestFormScreen(ui, "phone", {},
-            { id, value -> ui = ui.copy(values = ui.values + (id to value)) }, { submissions++ }, {}, { listened = true }, {}) } }
+        lateinit var view: android.view.View
+        lateinit var focus: androidx.compose.ui.focus.FocusManager
+        compose.setContent {
+            view = androidx.compose.ui.platform.LocalView.current
+            focus = androidx.compose.ui.platform.LocalFocusManager.current
+            RelayTheme { RequestFormScreen(ui, "phone", {},
+                { id, value -> ui = ui.copy(values = ui.values + (id to value)) }, { submissions++ }, {}, { listened = true }, {}) }
+        }
         compose.onNodeWithText("Invoice details").assertIsDisplayed()
         compose.onNodeWithText("Comment *").performScrollTo().performTextInput("Business lunch")
-        compose.onNodeWithText("Meals").performScrollTo().performClick()
+        hideKeyboard(view, focus)
+        compose.onNodeWithText("Comment *").assertIsNotFocused()
+        compose.onNodeWithText("Meals").performScrollTo().assertIsDisplayed().performClick()
+        compose.runOnIdle { assertEquals("food", ui.values["category"]); assertEquals(0, submissions) }
         compose.onNodeWithText("Autofill from an upcoming SMS").performScrollTo().performClick()
         compose.runOnIdle { assertEquals(true, listened); assertEquals(0, submissions); ui = ui.copy(values = ui.values + ("code" to "123456")) }
         compose.onNodeWithText("Approve invoice").performScrollTo().performClick()
-        assertEquals(1, submissions)
-        assertEquals("Business lunch", ui.values["note"])
-        assertEquals("food", ui.values["category"])
+        compose.runOnIdle {
+            assertEquals(1, submissions)
+            assertEquals("Business lunch", ui.values["note"])
+            assertEquals("food", ui.values["category"])
+        }
     }
     @Test fun formBackLeavesPendingAndOpeningRequiresForegroundRendering() {
         var backs = 0
@@ -288,12 +303,14 @@ class ApprovalScreenTest {
             FormField("date", "Invoice date", "date", false, 1000, null, null, emptyList(), false))
         var ui by androidx.compose.runtime.mutableStateOf(InboxState(form = form().copy(fields = fields), now = 0))
         lateinit var view: android.view.View
+        lateinit var focus: androidx.compose.ui.focus.FocusManager
         compose.setContent {
-            view = androidx.compose.ui.platform.LocalView.current
+            view = androidx.compose.ui.platform.LocalView.current; focus = androidx.compose.ui.platform.LocalFocusManager.current
             RelayTheme { RequestFormScreen(ui, "phone", {}, { id, value -> ui = ui.copy(values = ui.values + (id to value)) }, {}, {}, {}, {}) }
         }
         compose.onNodeWithText("Amount *").performScrollTo().performTextInput("42.50")
-        hideKeyboard(view)
+        hideKeyboard(view, focus)
+        compose.onNodeWithText("Amount *").assertIsNotFocused()
         compose.onNodeWithText("Confirmed *").performScrollTo().performClick()
         compose.runOnIdle { assertEquals(true, ui.values["confirmed"]) }
         compose.onNodeWithText("Tax").performScrollTo().performClick()
@@ -323,8 +340,9 @@ class ApprovalScreenTest {
         val vm = wizardVm()
         var submissions = 0
         lateinit var view: android.view.View
+        lateinit var focus: androidx.compose.ui.focus.FocusManager
         compose.runOnIdle { vm.showLoaded(wizardForm()) }
-        compose.setContent { val s by vm.state.collectAsState(); view = androidx.compose.ui.platform.LocalView.current; RelayTheme {
+        compose.setContent { val s by vm.state.collectAsState(); view = androidx.compose.ui.platform.LocalView.current; focus = androidx.compose.ui.platform.LocalFocusManager.current; RelayTheme {
             RequestFormScreen(s, "phone", vm::close, vm::change, { submissions++ }, {}, {}, {}, vm::next, vm::previous)
         } }
         compose.onNodeWithText("Step 1 of 2").performScrollTo().assertIsDisplayed()
@@ -336,7 +354,8 @@ class ApprovalScreenTest {
         compose.onNodeWithText("Next").performScrollTo().performClick()
         compose.onNodeWithText("Step 2 of 3").performScrollTo().assertIsDisplayed()
         compose.onNodeWithText("Comment *").performScrollTo().performTextInput("Flight to Santo Domingo")
-        hideKeyboard(view)
+        hideKeyboard(view, focus)
+        compose.onNodeWithText("Comment *").assertIsNotFocused()
         compose.onNodeWithText("Next").performScrollTo().performClick()
         compose.onNodeWithText("Confirmed *").performScrollTo().performClick()
         compose.onNodeWithText("Review response").performScrollTo().performClick()

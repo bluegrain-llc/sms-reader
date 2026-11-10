@@ -14,3 +14,7 @@
 !server-rust/src/**
 !server-rust/compat/
 !server-rust/compat/**
+!scripts/
+!scripts/cloud-acceptance/
+!scripts/cloud-acceptance/core.mjs
+!scripts/cloud-acceptance/receiver.mjs

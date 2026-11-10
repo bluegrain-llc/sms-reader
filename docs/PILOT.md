@@ -1,6 +1,72 @@
 # Physical-phone pilot acceptance
 
-**Release gate: unverified until an operator records physical results.** No phone was attached during initial implementation. Emulator/unit tests cannot validate carrier delivery or consent behavior on a physical phone. Record date, phone model, Android/Play-services versions, APK hash/signing certificate, project/region, and each outcome without recording SMS bodies or codes.
+**Release gate: current release requires dated physical acceptance.** Historical v0.3–v0.4.2 runs passed real SMS approval, retrieval, expiry and automatic submission; see [verification chronology](VERIFICATION.md). Those results do not establish acceptance of later inbox, navigation, form or wizard changes. Emulator/unit tests cannot validate carrier delivery or consent behavior on a physical phone. Record date, phone model, Android/Play-services versions, APK hash/signing certificate, project/region, and each outcome without recording SMS bodies or codes.
+
+
+## Current release acceptance records
+
+Build the configured signed release candidate using `scripts/build-pilot.sh`. The
+record tool verifies APK signing and rejects debuggable or non-relay APKs. It
+collects physical device model, Android/API and Google Play-services version using
+fixed ADB metadata commands. Device-reported hardware serials are replaced with
+SHA-256 hashes, so USB and network aliases of one phone share an identity. Phones
+without a usable hardware serial are refused. The tool never reads SMS, app files,
+screen contents, account identities or credentials.
+The artifact hash identifies the APK selected by the operator; the tool does not
+prove that this exact APK is installed. Install that candidate on both phones
+before testing. Bind the record to the explicitly selected project, region and
+backend revision from the private deployment record.
+
+```sh
+python3 scripts/phone-acceptance.py init \
+  --file artifacts/acceptance/current-release.json \
+  --apk artifacts/sms-code-relay-pilot.apk --commit "$(git rev-parse HEAD)" \
+  --project "$PROJECT_ID" --region "$REGION" --backend-revision "$REVISION" \
+  --apksigner "$ANDROID_HOME/build-tools/36.0.0/apksigner" \
+  --aapt "$ANDROID_HOME/build-tools/36.0.0/aapt" \
+  --adb "$ANDROID_HOME/platform-tools/adb" \
+  --serial PHONE_ONE --serial PHONE_TWO
+```
+
+The initial matrix is entirely pending. Use a new record for each new candidate;
+initialization refuses to overwrite records. Omitting serials can prepare a
+pending matrix, but passing observations then fail validation. Emulator devices
+are refused, and two-phone cases require two distinct physical device identities.
+
+After performing each case below, record the observed result explicitly:
+
+```sh
+python3 scripts/phone-acceptance.py record \
+  --file artifacts/acceptance/current-release.json \
+  --case consent_approval --outcome pass --reason observed_expected_behavior
+python3 scripts/phone-acceptance.py summary \
+  --file artifacts/acceptance/current-release.json --require-pass
+```
+
+The summary exits nonzero while any required case is pending, blocked or failed.
+Only enumerated case IDs, outcomes and reasons are accepted; there is no free-text
+notes field for accidentally recording a message, code or credential. Failed and
+blocked cases use `unexpected_behavior`, `device_unavailable`,
+`owner_action_required` or `service_unavailable`. Records are created with owner-only
+permissions under ignored `artifacts/`. They are operator attestations, not
+cryptographic proof or an automated replacement for the tests. Do not upload them
+or sensitive phone screenshots to public CI artifacts.
+
+| Recorder cases | Required exercise |
+| --- | --- |
+| `google_sign_in`, `pairing_approval_revocation`, `generic_notification`, `ready_before_sms` | Feasibility steps 1–4; verify isolation before approval |
+| `consent_approval`, `consent_denial_manual_entry`, `result_expiry_cleanup` | Feasibility steps 5–7; approval does not establish denial |
+| `multiple_candidates`, `leading_zero_numeric`, `alphanumeric_code`, `unsupported_format`, `sender_filter`, `contacts_exclusion`, `pre_ready_sms`, `no_inbox_access` | Eligibility table below; use a fresh request/window where needed |
+| `cancel_upload_race`, `revoke_completed_result` | One terminal winner; originator loses access immediately after revocation |
+| `background_locked`, `notification_permission`, `offline_before_after_deadline`, `rotation_during_consent`, `process_death`, `listener_cooldown` | Lifecycle matrix below; no late result or renewed deadline |
+| `two_phone_first_wins`, `two_phone_withdrawal`, `two_callers_isolation_queue` | Two physical phones and distinct callers; losing phones never receive answers |
+| `forms_wizards_with_sms` | Two pending forms plus serialized SMS; conditional wizard review, decline, first-submission wins, manual/SMS autofill, explicit form submission, cancellation and expiry |
+| `offline_observation_replay` | Tap/open offline, restart, recover observation upload; replay events and callback retries without answers in notifications/events |
+
+Use the exact candidate APK and backend revision for final acceptance after the
+cloud delivery, release pipeline and deletion changes are deployed and verified.
+API 26/33/36 UI CI proves only the synthetic regression suite. Physical carrier,
+FCM, system-consent denial/approval and two-phone tests remain separate gates.
 
 ## Optional injected-SMS check
 
