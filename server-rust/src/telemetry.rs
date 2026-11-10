@@ -162,8 +162,8 @@ pub fn category(error: &Error) -> &'static str {
         Error::Store(firestore::errors::FirestoreError::DatabaseError(error)) => {
             match error.public.code.as_str() {
                 "ResourceExhausted" => "quota",
-                "DeadlineExceeded" => "timeout",
-                "Unavailable" => "unavailable",
+                "DeadlineExceeded" | "CONNECTION_TIMEOUT" => "timeout",
+                "Unavailable" | "CONNECTION_CLOSED" | "CONNECTION_ERROR" => "unavailable",
                 _ => "internal",
             }
         }
@@ -324,5 +324,27 @@ mod tests {
             category(&Error::Api(400, "private_webhook_destination")),
             "destination"
         );
+    }
+    #[test]
+    fn firestore_transport_codes_keep_safe_failure_categories() {
+        use firestore::errors::{
+            FirestoreDatabaseError, FirestoreError, FirestoreErrorPublicGenericDetails,
+        };
+        for (code, expected) in [
+            ("CONNECTION_TIMEOUT", "timeout"),
+            ("CONNECTION_CLOSED", "unavailable"),
+            ("CONNECTION_ERROR", "unavailable"),
+            ("PermissionDenied", "internal"),
+        ] {
+            let error = Error::Store(FirestoreError::DatabaseError(FirestoreDatabaseError {
+                public: FirestoreErrorPublicGenericDetails { code: code.into() },
+                details: "private provider detail".into(),
+                retry_possible: true,
+            }));
+            assert_eq!(category(&error), expected);
+            let record =
+                entry(json!({"event":"request_failed","category":category(&error)})).unwrap();
+            assert!(!record.to_string().contains("private"));
+        }
     }
 }

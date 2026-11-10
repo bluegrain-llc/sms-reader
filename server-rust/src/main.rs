@@ -8,20 +8,39 @@ use sms_code_relay::{
     store::Store,
 };
 use std::{sync::Arc, time::Duration};
+#[derive(Debug)]
+struct StartupFailure {
+    phase: &'static str,
+    category: &'static str,
+}
+impl StartupFailure {
+    fn internal(phase: &'static str) -> Self {
+        Self {
+            phase,
+            category: "internal",
+        }
+    }
+}
 #[tokio::main]
 async fn main() {
-    if run().await.is_err() {
-        eprintln!("startup_failed");
+    if let Err(error) = run().await {
+        eprintln!(
+            "{}",
+            serde_json::json!({"event":"startup_failed","component":"relay","severity":"ERROR","phase":error.phase,"category":error.category})
+        );
         std::process::exit(1);
     }
 }
-async fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let project = std::env::var("GOOGLE_CLOUD_PROJECT")?;
+async fn run() -> Result<(), StartupFailure> {
+    let project = std::env::var("GOOGLE_CLOUD_PROJECT")
+        .map_err(|_| StartupFailure::internal("GOOGLE_CLOUD_PROJECT"))?;
     if std::env::var_os("K_SERVICE").is_some()
         && (std::env::var_os("FIRESTORE_EMULATOR_HOST").is_some()
             || std::env::var_os("FIREBASE_AUTH_EMULATOR_HOST").is_some())
     {
-        return Err("emulators_not_allowed_on_cloud_run".into());
+        return Err(StartupFailure::internal(
+            "emulators_not_allowed_on_cloud_run",
+        ));
     }
     let google = Arc::new(Google::new(project.clone()));
     if let Some(bucket) = google
@@ -29,9 +48,13 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         .as_deref()
         .filter(|bucket| !bucket.is_empty())
     {
-        sms_code_relay::security::validate_bucket(bucket)?;
+        sms_code_relay::security::validate_bucket(bucket)
+            .map_err(|_| StartupFailure::internal("SECURITY_LEDGER_BUCKET"))?;
     }
-    let store = Store::new(&project).await?;
+    let store = Store::new(&project).await.map_err(|error| StartupFailure {
+        phase: "firestore_initialization",
+        category: sms_code_relay::telemetry::category(&error),
+    })?;
     let gate = RecoveryGate::start(store.clone(), google.clone());
     let relay = Relay {
         store,
@@ -60,8 +83,11 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     );
     let port = std::env::var("PORT")
         .unwrap_or_else(|_| "8080".into())
-        .parse::<u16>()?;
-    let listener = tokio::net::TcpListener::bind(("0.0.0.0", port)).await?;
+        .parse::<u16>()
+        .map_err(|_| StartupFailure::internal("PORT"))?;
+    let listener = tokio::net::TcpListener::bind(("0.0.0.0", port))
+        .await
+        .map_err(|_| StartupFailure::internal("http_bind"))?;
     println!("sms_relay_listening");
     axum::serve(
         DeadlineListener(listener),
@@ -73,14 +99,15 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         shutdown().await;
         gate.close();
     })
-    .await?;
+    .await
+    .map_err(|_| StartupFailure::internal("http_serve"))?;
     Ok(())
 }
-fn json_option(name: &str) -> Result<Option<serde_json::Value>, Box<dyn std::error::Error>> {
+fn json_option(name: &'static str) -> Result<Option<serde_json::Value>, StartupFailure> {
     std::env::var(name)
         .ok()
         .filter(|value| !value.is_empty())
-        .map(|value| serde_json::from_str(&value).map_err(Into::into))
+        .map(|value| serde_json::from_str(&value).map_err(|_| StartupFailure::internal(name)))
         .transpose()
 }
 async fn shutdown() {

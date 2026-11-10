@@ -27,10 +27,8 @@ impl IntoResponse for Error {
     fn into_response(self) -> Response {
         let (status, reason) = match self {
             Self::Api(s, r) => (s, r),
-            _ => {
-                eprintln!("request_failed");
-                (500, "internal_error")
-            }
+            // The HTTP/MCP boundary records the fixed-schema failure event.
+            _ => (500, "internal_error"),
         };
         let mut response = (
             StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
