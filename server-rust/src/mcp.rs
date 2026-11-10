@@ -33,16 +33,10 @@ impl ServerHandler for Mcp {
     }
     fn supported_protocol_versions(&self) -> Cow<'static, [ProtocolVersion]> {
         Cow::Owned(
-            [
-                "2025-11-25",
-                "2025-06-18",
-                "2025-03-26",
-                "2024-11-05",
-                "2024-10-07",
-            ]
-            .iter()
-            .map(|v| serde_json::from_value(json!(v)).unwrap())
-            .collect(),
+            VERSIONS
+                .iter()
+                .map(|v| serde_json::from_value(json!(v)).unwrap())
+                .collect(),
         )
     }
     async fn list_tools(

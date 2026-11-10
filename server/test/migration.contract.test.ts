@@ -92,7 +92,7 @@ test('HTTP errors, body bounds, auth ordering, headers and protocol negotiation 
     await Promise.all(servers.map(server => once(server, 'listening')));
     const bases = servers.map(server => `http://127.0.0.1:${(server.address() as { port: number }).port}`);
     const cases: (RequestInit & { path: string })[] = [
-      { path: '/health' }, { path: '/HEALTH' }, { path: '/health/' }, { path: '/health//' }, { path: '//health' }, { path: '/health', method: 'HEAD' }, { path: '/healthz' }, { path: '/missing' }, { path: '/v1/devices' },
+      { path: '/health' }, { path: '/HEALTH' }, { path: '/health/' }, { path: '/health//' }, { path: '//health' }, { path: '/health', method: 'HEAD' }, { path: '/healthz' }, { path: '/missing' }, { path: '/v1/devices' }, { path: '/v2/events/STREAM' },
       { path: '/health', headers: { origin: 'https://denied.example' } },
       { path: '/health', headers: { origin: 'https://allowed.example' } },
       { path: '/health', headers: { origin: '' } },
@@ -112,6 +112,8 @@ test('HTTP errors, body bounds, auth ordering, headers and protocol negotiation 
       { path: '/v1/requests', method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer bad' }, body: '{"purpose":"\\ud800","idempotencyKey":"surrogate-invalid-token"}' },
       { path: `/v1/grants/${grantId}&ignored`, method: 'DELETE', headers: { authorization: 'Bearer owner-session' } },
       ...['POLL', 'REVIEW', 'DECISION'].map(operation => ({ path: `/v1/connections/${operation}`, method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })),
+      { path: '/v1/requests', method: 'POST', headers: { 'content-type': 'application/json', 'content-encoding': 'gzip', authorization: `Bearer ${token}` }, body: Buffer.concat([gzipSync(Buffer.from('{"purpose":"Compressed",')), gzipSync(Buffer.from('"idempotencyKey":"encoded-body"}'))]) },
+      ...['utf-7', 'utf-7-imap'].map(charset => ({ path: '/v1/requests', method: 'POST', headers: { 'content-type': `application/json; charset=${charset}`, authorization: `Bearer ${token}` }, body: '{"purpose":"Compressed","idempotencyKey":"encoded-body"}' })),
       ...[gzipSync, deflateSync, brotliCompressSync].map((compress, i) => ({ path: '/v1/requests', method: 'POST', headers: { 'content-type': 'application/json', 'content-encoding': ['gzip', 'deflate', 'br'][i]!, authorization: `Bearer ${token}` }, body: compress(Buffer.from('{"purpose":"Compressed","idempotencyKey":"encoded-body"}')) })),
       { path: '/v1/requests', method: 'POST', headers: { 'content-type': 'application/json; charset=utf-16le', authorization: `Bearer ${token}` }, body: Buffer.from('{"purpose":"Compressed","idempotencyKey":"encoded-body"}', 'utf16le') },
       { path: '/v1/requests', method: 'POST', headers: { 'content-type': 'application/json; charset=utf-16', authorization: `Bearer ${token}` }, body: Buffer.from('{"purpose":"Compressed","idempotencyKey":"encoded-body"}', 'utf16le').swap16() },
@@ -138,6 +140,7 @@ test('HTTP errors, body bounds, auth ordering, headers and protocol negotiation 
       const text = await response.text(); return { status: response.status, type: response.headers.get('content-type'), body: text ? JSON.parse(text) : null };
     };
     for (const [body, headers] of [
+      ...['resources/list', 'prompts/list', 'resources/templates/list', 'resources/read', 'tasks/list', 'unknown'].map(method => [JSON.stringify({ jsonrpc: '2.0', id: 1, method }), {}]),
       [JSON.stringify([list(1), list(2)]), {}], [JSON.stringify([list(1)]), {}], ['[]', {}],
       [JSON.stringify(list(-1)), {}], [JSON.stringify(list(1)), { 'mcp-protocol-version': '2024-10-07' }],
       [JSON.stringify(list(1)), { 'mcp-protocol-version': 'unsupported' }],
@@ -150,9 +153,13 @@ test('HTTP errors, body bounds, auth ordering, headers and protocol negotiation 
     ] as [string, Record<string, string>][]) {
       assert.deepEqual(await rpc(bases[1]!, body, headers), await rpc(bases[0]!, body, headers), body.slice(0,150));
     }
-    for (const capabilities of [{ elicitation: {} }, { sampling: { tools: {}, context: {} } }, { experimental: { feature: {} }, extensions: { feature: [] } }, { tasks: { list: {}, cancel: {} } }, { sampling: { tools: null } }, { elicitation: [] }]) {
+    for (const capabilities of [{ experimental: { '\ud800': 1 } }, { elicitation: {} }, { sampling: { tools: {}, context: {} } }, { experimental: { feature: {} }, extensions: { feature: [] } }, { tasks: { list: {}, cancel: {} } }, { sampling: { tools: null } }, { elicitation: [] }]) {
       const body = JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-11-25', capabilities, clientInfo: { name: 'capabilities', version: '1' } } });
       assert.deepEqual(await rpc(bases[1]!, body), await rpc(bases[0]!, body), JSON.stringify(capabilities));
+    }
+    for (const [charset, encoded] of [['utf-7', '+AOk-+-'], ['utf-7-imap', '&AOk-&-']]) {
+      const wire = `{"jsonrpc":"2.0","id":"${encoded}","method":"tools/list"}`;
+      assert.deepEqual(await rpc(bases[1]!, wire, { 'content-type': `application/json; charset=${charset}` }), await rpc(bases[0]!, wire, { 'content-type': `application/json; charset=${charset}` }));
     }
     const rawId = Buffer.from('{"jsonrpc":"2.0","id":"' + '\ud800' + '","method":"tools/list"}', 'utf16le');
     assert.deepEqual(await rpc(bases[1]!, rawId, { 'content-type': 'application/json; charset=utf-16le' }), await rpc(bases[0]!, rawId, { 'content-type': 'application/json; charset=utf-16le' }));

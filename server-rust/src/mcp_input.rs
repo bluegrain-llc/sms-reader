@@ -69,7 +69,12 @@ pub fn envelope(input: &Value) -> Option<(u16, Value)> {
         Some("tools/list") => "list",
         Some("initialize") => "initialize",
         Some("ping") => "ping",
-        _ => return None,
+        _ => {
+            return Some((
+                200,
+                json!({"jsonrpc":"2.0","id":input["id"],"error":{"code":-32601,"message":"Method not found"}}),
+            ));
+        }
     };
     let error = if schema == "call"
         && input["params"]["task"].is_object()
@@ -85,10 +90,16 @@ pub fn envelope(input: &Value) -> Option<(u16, Value)> {
         if issues.is_empty() {
             None
         } else {
-            Some(json!({"code":-32603,"message":serde_json::to_string_pretty(&issues).unwrap()}))
+            Some(json!({"code":-32603,"message":formatted_issues(&issues)}))
         }
     };
     error.map(|error| (200, json!({"jsonrpc":"2.0","id":input["id"],"error":error})))
+}
+fn formatted_issues(issues: &Vec<Value>) -> String {
+    // Zod embeds JSON.stringify output in another JSON message string.
+    let pretty = serde_json::to_string_pretty(issues).unwrap();
+    let wire = crate::js_string::utf16_json(&crate::js_string::units(&pretty)).unwrap();
+    crate::js_string::encode(&wire)
 }
 pub fn normalized_envelope(input: &Value) -> Value {
     let schema = match input["method"].as_str() {
@@ -440,10 +451,7 @@ mod tests {
                 case["input"]
             );
             if !issues.is_empty() {
-                assert_eq!(
-                    serde_json::to_string_pretty(&issues).unwrap(),
-                    case["error"].as_str().unwrap()
-                );
+                assert_eq!(formatted_issues(&issues), case["error"].as_str().unwrap());
             }
         }
         let cases: Value =

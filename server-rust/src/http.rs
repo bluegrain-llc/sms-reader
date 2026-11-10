@@ -131,7 +131,11 @@ async fn json_body(body: Body, headers: &HeaderMap) -> Result<Vec<u8>> {
         .as_str()
     {
         "identity" => Box::pin(reader),
-        "gzip" => Box::pin(GzipDecoder::new(reader)),
+        "gzip" => {
+            let mut decoder = GzipDecoder::new(reader);
+            decoder.multiple_members(true);
+            Box::pin(decoder)
+        }
         "deflate" => Box::pin(ZlibDecoder::new(reader)),
         "br" => Box::pin(BrotliDecoder::new(reader)),
         _ => return Err(Error::External),
@@ -164,6 +168,7 @@ async fn json_body(body: Body, headers: &HeaderMap) -> Result<Vec<u8>> {
     let (bytes, charset) = (bytes.as_slice(), charset.as_str());
     let text = match charset {
         "utf8" => String::from_utf8_lossy(bytes).into_owned(),
+        "utf7" | "utf7imap" => utf7_json(bytes, charset == "utf7imap")?,
         "utf16" | "utf16le" | "utf16be" => {
             let pairs = bytes.as_chunks::<2>().0;
             let be = charset == "utf16be"
@@ -256,6 +261,60 @@ async fn json_body(body: Body, headers: &HeaderMap) -> Result<Vec<u8>> {
         .as_bytes()
         .to_vec())
 }
+// iconv-lite's forgiving UTF-7 decoder accepts implicit shift termination.
+fn utf7_json(bytes: &[u8], imap: bool) -> Result<String> {
+    let mut units = Vec::new();
+    let shift = if imap { b'&' } else { b'+' };
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != shift {
+            units.push(if bytes[i] < 128 {
+                bytes[i] as u16
+            } else {
+                0xfffd
+            });
+            i += 1;
+            continue;
+        }
+        i += 1;
+        let start = i;
+        let (mut bits, mut count) = (0u32, 0u32);
+        let mut decoded = Vec::new();
+        while let Some(&byte) = bytes.get(i) {
+            let value = match byte {
+                b'A'..=b'Z' => byte - b'A',
+                b'a'..=b'z' => byte - b'a' + 26,
+                b'0'..=b'9' => byte - b'0' + 52,
+                b'+' => 62,
+                b'/' | b',' if byte == b'/' || imap => 63,
+                _ => break,
+            };
+            bits = (bits << 6) | u32::from(value);
+            count += 6;
+            if count >= 8 {
+                count -= 8;
+                decoded.push((bits >> count) as u8);
+                bits &= (1 << count) - 1;
+            }
+            i += 1;
+        }
+        if i == start && bytes.get(i) == Some(&b'-') {
+            units.push(shift as u16);
+        } else {
+            units.extend(
+                decoded
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|p| u16::from_be_bytes(*p)),
+            );
+        }
+        if bytes.get(i) == Some(&b'-') {
+            i += 1;
+        }
+    }
+    crate::js_string::utf16_json(&units)
+}
 fn validate_event(v: &Value) -> Result<()> {
     let target = string(v, "status", 1, 64, false)?;
     let allowed = match target.as_str() {
@@ -335,7 +394,10 @@ async fn route(s: App, request: Request) -> Result<Response> {
         .enumerate()
         .map(|(i, s)| {
             if [0, 1, 3, 5].contains(&i)
-                || (i == 2 && path.to_ascii_lowercase().starts_with("/v1/connections/"))
+                || (i == 2
+                    && ["/v1/connections/", "/v2/events/"]
+                        .iter()
+                        .any(|prefix| path.to_ascii_lowercase().starts_with(prefix)))
             {
                 s.to_ascii_lowercase()
             } else {
