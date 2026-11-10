@@ -4,6 +4,7 @@ import { z, ZodError } from 'zod';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { mountForms } from './forms-http.js';
+import { signingFingerprints } from './signing.js';
 import { formSchema } from './forms-model.js';
 import { Relay } from './relay.js';
 import { connectionSchema, userCodeSchema } from './connections.js';
@@ -17,6 +18,7 @@ export interface HttpOptions {
   origins?: string[];
   publicUrl?: string;
   androidCertSha256?: string;
+  androidCertSha256s?: string[];
   trustProxyHops?: number;
   sseDurationMs?: number;
 }
@@ -57,10 +59,9 @@ export function app(relay: Relay, options: HttpOptions) {
     await relay.changeDevice((await owner(req)).uid, device(req), true, true); res.json({ ok: true });
   });
   app.get('/.well-known/assetlinks.json', (_req, res) => {
-    const fingerprint = options.androidCertSha256;
-    ensure(fingerprint && /^(?:[A-Fa-f0-9]{2}:){31}[A-Fa-f0-9]{2}$/.test(fingerprint), 503, 'app_links_not_configured');
+    const fingerprints = signingFingerprints(options.androidCertSha256, options.androidCertSha256s);
     res.json([{ relation: ['delegate_permission/common.handle_all_urls'], target: {
-      namespace: 'android_app', package_name: 'com.bluegrain.smsrelay', sha256_cert_fingerprints: [fingerprint.toUpperCase()],
+      namespace: 'android_app', package_name: 'com.bluegrain.smsrelay', sha256_cert_fingerprints: fingerprints,
     } }]);
   });
   app.get('/connect', (req, res) => {

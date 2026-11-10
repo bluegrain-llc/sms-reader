@@ -277,7 +277,7 @@ integration('REST role separation and bearer-authenticated MCP, including queued
   let server: Server | undefined;
   const client = new Client({ name: 'test', version: '1' });
   try {
-    server = app(relay, { publicUrl: 'https://relay.example.test', androidCertSha256: Array(32).fill('AA').join(':'), verifyOwner: async token => { const u = await auth.verifyIdToken(token); return { uid: u.uid, authTime: u.auth_time }; },
+    server = app(relay, { publicUrl: 'https://relay.example.test', androidCertSha256: Array(32).fill('AA').join(':'), androidCertSha256s: [Array(32).fill('BB').join(':'), Array(32).fill('AA').join(':')], verifyOwner: async token => { const u = await auth.verifyIdToken(token); return { uid: u.uid, authTime: u.auth_time }; },
       verifyScheduler: async () => { throw Error('not scheduler'); }, deleteIdentity: uid => auth.deleteUser(uid) }).listen(0, '127.0.0.1');
     await new Promise<void>(resolve => server!.once('listening', resolve));
     const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
@@ -299,6 +299,7 @@ integration('REST role separation and bearer-authenticated MCP, including queued
     const page = await fetch(base + '/connect?code=' + c.userCode);
     assert.equal(page.status, 200); assert.ok((await page.text()).includes('smsrelay://connect?code='));
     const links = await fetch(base + '/.well-known/assetlinks.json'); assert.equal(links.status, 200);
+    assert.deepEqual((await links.json() as { target: { sha256_cert_fingerprints: string[] } }[])[0]!.target.sha256_cert_fingerprints, [Array(32).fill('BB').join(':'), Array(32).fill('AA').join(':')]);
     await client.connect(new StreamableHTTPClientTransport(new URL(base + '/mcp'), { requestInit: { headers: { authorization: `Bearer ${child.token}` } } }));
     assert.equal((await client.listTools()).tools.length, 8);
     const tool = async (name: string, args: Record<string, unknown>) => {
