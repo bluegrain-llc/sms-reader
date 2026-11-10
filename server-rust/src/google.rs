@@ -444,9 +444,16 @@ mod tests {
         // deletion_step has already crossed the internal JS representation
         // boundary before invoking Authentication::delete / this provider.
         let uid = "owner-\u{f0000}\u{e000}";
-        google.delete_identity(uid).await.unwrap();
-        assert_eq!(received.recv().await.unwrap(), json!({"localId":uid}));
+        let result = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            google.delete_identity(uid).await?;
+            received.recv().await.ok_or(Error::External)
+        })
+        .await;
         server.abort();
+        let body = result
+            .expect("identity deletion and callback must finish within three seconds")
+            .unwrap();
+        assert_eq!(body, json!({"localId":uid}));
     }
     #[tokio::test]
     async fn worker_requires_exact_audience_and_verified_service_identity() {
