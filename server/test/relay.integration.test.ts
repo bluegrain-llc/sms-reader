@@ -936,7 +936,7 @@ integration('deletion failures remain observable and retain backlog age across r
 integration('ordinary maintenance cancels tombstoned SMS while deletion remains incomplete', { timeout: 30000 }, async () => {
   const r = await relay.create(token, input('deleting-pending'));
   const other = 'other-owner'; await relay.register(other, 'other-installation', 'Other', 'other-fcm');
-  const g = await relay.createGrant(other, 'other-installation', 'Other caller');
+  const g = await relay.createGrant(other, 'other-installation', 'Other caller', 30);
   const otherRequest = await relay.create(g.token, input('other-pending'));
   await db.collection('requests').doc(otherRequest.requestId).update({ notificationSent: false, nextNotificationAt: time });
   await relay.deletions.request(uid);
@@ -977,8 +977,8 @@ integration('large valid form deletion shrinks failed transaction pages until cl
   const definition = { ...formInput('large-delete-first'), fields: Array.from({ length: 30 }, (_, i) => ({ id: `field${i}`, label: 'Choose', type: 'single_choice' as const,
     options: Array.from({ length: 40 }, (_, j) => ({ id: `option${j}`, label: 'x'.repeat(160) })) })) };
   assert.ok(Buffer.byteLength(JSON.stringify(definition)) < 256 * 1024);
-  const secondCaller = await relay.createGrant(uid, did, 'Second large-form caller');
-  await relay.forms.approve(uid, secondCaller.id, true);
+  const secondCaller = await relay.createGrant(uid, did, 'Second large-form caller', 30);
+  await relay.forms.approve(uid, secondCaller.grantId, true);
   for (let i = 0; i < 60; i++) await relay.forms.create(i < 30 ? token : secondCaller.token, { ...definition, idempotencyKey: `large-delete-${i}` });
   const records = await db.collection('formRequests').where('ownerId', '==', uid).get();
   assert.equal(records.size, 60);
