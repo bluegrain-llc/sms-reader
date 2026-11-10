@@ -29,13 +29,13 @@ Local verification on 2026-11-10:
 
 | Check | Result |
 | --- | --- |
-| TypeScript compilation and unit tests | Passed; 32 unit tests |
-| Rust formatting, Clippy with warnings denied, unit tests | Passed; 35 tests |
-| Shared emulator scenarios | Passed; 59 scenarios per backend selection; TypeScript-specific method-injection tests are named explicitly |
-| Migration contracts | Both document directions, HTTP/MCP parity, durable deletion/read-limit/stream-lease handoff, raw JSON/clock lifecycle cases, UTF-16 edge cases, native worker telemetry and Firebase emulator checks; six additional native watch/denial-ledger/maintenance contracts passed |
+| TypeScript compilation and unit tests | Passed; 33 unit tests |
+| Rust formatting, Clippy with warnings denied, unit tests | Passed; 46 tests |
+| Shared emulator scenarios | 59 scenarios per backend selection; TypeScript-specific method-injection tests are named explicitly |
+| Migration contracts | Both document directions, HTTP/MCP parity, durable deletion/read-limit/stream-lease handoff, raw JSON/clock lifecycle cases, UTF-16 edge cases, native worker telemetry and Firebase emulator checks; 13 additional native watch, identity, validation, telemetry and maintenance contracts passed |
 | Dependency audits | npm production audit and Cargo audit passed |
 | Rust production container | CI builds the current image and runs the HTTP/auth smoke; runtime UID 10001 |
-| Deployment script | Shell syntax passed; cloud deployment not performed |
+| Deployment script | Shell syntax and Python deployment unit tests passed; cloud deployment not performed |
 
 Production cutover and the observation window are separate release gates; these local checks do not establish either.
 
@@ -47,7 +47,7 @@ Before promoting a Rust revision:
 4. Verify callbacks against public TLS endpoints, signatures over exact bytes, redirect refusal, DNS changes and private/reserved-address rejection. Exercise dead workers, duplicates and overlapping workers.
 5. Verify Android registration, pairing, notification entry, SMS consent/manual submission, multi-phone races, forms and wizards without changing the APK.
 6. Deploy Rust with `BACKEND=rust TRAFFIC_MODE=stage` to the existing production service. Use its tagged URL for health and authenticated contracts while preserving canonical `SERVICE_URL` as worker audience.
-7. Record the old and candidate revision names, then move 100% of traffic to the accepted exact Rust revision using `gcloud run services update-traffic --to-revisions REVISION=100` with explicit project, service and region.
+7. Record the prior and staged revision names. Rerun the guarded deployment with the accepted immutable `IMAGE_URI`, unchanged configuration, `BACKEND=rust TRAFFIC_MODE=live` and the explicit project, service and region. This creates a fresh zero-traffic candidate, verifies it, and promotes 5%, 25%, then 100% with observation and rollback. Do not bypass those checks with a manual traffic jump.
 8. Monitor errors, maintenance completion, delivery backlog and expired-result cleanup. Roll back to the recorded TypeScript revision for a confirmed compatibility, authorization or delivery regression.
 9. After seven successful days, remove the TypeScript runtime and change the default build. Keep Node emulator, contract and metadata-recovery tooling.
 

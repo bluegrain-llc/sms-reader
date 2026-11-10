@@ -6,7 +6,9 @@ COPY server-rust/compat ./compat
 RUN cargo build --release --locked --bin sms-code-relay
 
 FROM debian:bookworm-slim
+ARG SOURCE_REVISION=unknown
 LABEL org.opencontainers.image.source="https://github.com/bluegrain-llc/sms-reader"
+LABEL org.opencontainers.image.revision=$SOURCE_REVISION
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 10001 relay && useradd --uid 10001 --gid relay --no-create-home relay
 ENV PORT=8080

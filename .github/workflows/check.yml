@@ -107,8 +107,20 @@ jobs:
       - run: cargo test --manifest-path server-rust/Cargo.toml --locked
       - uses: taiki-e/install-action@cargo-audit
       - run: cargo audit --file server-rust/Cargo.lock
-      - run: docker build -f server-rust/Dockerfile -t sms-code-relay:rust .
+      - run: docker build --build-arg SOURCE_REVISION="$GITHUB_SHA" -f server-rust/Dockerfile -t sms-code-relay:rust .
       - run: IMAGE=sms-code-relay:rust scripts/container-smoke.sh
+      - name: Archive tested Rust candidate
+        run: |
+          docker save sms-code-relay:rust | gzip > /tmp/relay-rust-image.tar.gz
+          cd /tmp
+          sha256sum relay-rust-image.tar.gz > relay-rust-image.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: relay-rust-container
+          path: |
+            /tmp/relay-rust-image.tar.gz
+            /tmp/relay-rust-image.sha256
+          retention-days: 7
 
   android-unit:
     name: Android unit tests, lint and build

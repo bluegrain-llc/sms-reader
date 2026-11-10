@@ -5,12 +5,13 @@
 The required jobs check:
 
 - Server TypeScript compilation, unit tests and production dependency audit.
-- Firestore and Firebase Auth Emulator integration tests, including transactional lifecycle, races, expiry, caller isolation, REST authentication and MCP client requests. Missing emulators fail this suite.
+- Firestore and Firebase Auth Emulator integration tests with both backend selections, bidirectional migration and native runtime contracts, transactional lifecycle, races, expiry, caller isolation, REST authentication and MCP client requests. Missing emulators fail this suite. Strict test-source type checking and compatibility fixture regeneration run before these contracts.
+- Rust formatting, Clippy with warnings denied, unit tests, dependency audit, and a production Rust Docker build with HTTP/authentication smoke checks.
 - A production Docker build with startup, health and unauthenticated-request smoke checks.
 - Android unit tests, lint, debug APK and instrumentation APK builds.
 - Connected Compose UI tests on an API 36 Android emulator. These cover approval, manual entry, automatic submission, cancellation, expiry and navigation. The separate opt-in `SmsInjectionTest` needs the telephony/Play-services runner in `scripts/test-sms-injection.py` and is not included in this UI suite.
 
-Each run retains Android test/lint reports, debug APKs and the tested container archive as private workflow artifacts. Failed backend integration runs also retain emulator logs. Debug APKs have no production configuration and show the setup screen.
+Each run retains Android test/lint reports, debug APKs and both tested container archives as private workflow artifacts. The Rust image is `relay-rust-container`, with `relay-rust-image.tar.gz` and its SHA-256 checksum; it carries the source commit revision label. Failed backend integration runs also retain emulator logs. Debug APKs have no production configuration and show the setup screen.
 
 After all jobs pass on a push to `main`, delivery loads the exact container archive that passed its smoke test and publishes it to GitHub Container Registry:
 
