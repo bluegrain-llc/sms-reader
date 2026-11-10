@@ -1,3 +1,4 @@
+import { telemetry, category } from './telemetry.js';
 import express, { Request, Response, NextFunction } from 'express';
 import { z, ZodError } from 'zod';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -26,6 +27,7 @@ function bearer(req: Request) {
 export function app(relay: Relay, options: HttpOptions) {
   const app = express();
   app.disable('x-powered-by');
+  app.use(telemetry.http);
   app.set('trust proxy', options.trustProxyHops ?? 0);
   app.use((_req, res, next) => { res.set('Cache-Control', 'no-store'); res.set('X-Content-Type-Options', 'nosniff'); next(); });
   app.use((req, _res, next) => {
@@ -134,7 +136,7 @@ export function app(relay: Relay, options: HttpOptions) {
   });
   app.post('/internal/maintenance', async (req, res) => {
     try { await options.verifyScheduler(bearer(req)); } catch { throw new RelayError(401, 'invalid_scheduler_identity'); }
-    await relay.maintenance(); res.json({ ok: true });
+    await telemetry.maintenance(() => relay.maintenance(), relay.db); res.json({ ok: true });
   });
   app.post('/mcp', async (req, res) => {
     const secret = bearer(req); await relay.checkAgent(secret);
@@ -142,7 +144,10 @@ export function app(relay: Relay, options: HttpOptions) {
     const server = new McpServer({ name: 'sms-code-relay', version: '0.6.0' });
     const tool = (fn: () => Promise<unknown>) => fn().then(result => ({
       content: [{ type: 'text' as const, text: JSON.stringify(result) }], structuredContent: result as Record<string, unknown>,
-    })).catch(error => ({ isError: true, content: [{ type: 'text' as const, text: JSON.stringify({ error: error instanceof RelayError ? error.reason : 'internal_error' }) }] }));
+    })).catch(error => {
+      if (!(error instanceof RelayError)) telemetry.emit({ event: 'mcp_tool_failed', category: category(error) });
+      return { isError: true, content: [{ type: 'text' as const, text: JSON.stringify({ error: error instanceof RelayError ? error.reason : 'internal_error' }) }] };
+    });
     server.registerTool('request_sms_code', {
       description: 'Notify the owner’s registered phones about an upcoming SMS, queuing behind another caller if needed. Wait for ready before triggering SMS in a separate system. First approved response wins. Never triggers SMS.',
       inputSchema: requestSchema.shape,
@@ -169,7 +174,7 @@ export function app(relay: Relay, options: HttpOptions) {
     if (err instanceof RelayError) res.status(err.status).json({ error: err.reason });
     else if (err instanceof ZodError || err instanceof SyntaxError) res.status(400).json({ error: 'invalid_input' });
     else if ((err as { type?: string })?.type === 'entity.too.large') res.status(413).json({ error: 'payload_too_large' });
-    else { console.error('request_failed'); res.status(500).json({ error: 'internal_error' }); }
+    else { telemetry.emit({ event: 'request_failed', category: category(err) }); res.status(500).json({ error: 'internal_error' }); }
   });
   return app;
 }

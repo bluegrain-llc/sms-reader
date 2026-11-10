@@ -31,7 +31,7 @@ The script is rerunnable and updates the existing service and Scheduler job. It 
 - `ALLOWED_ORIGINS`: optional comma-separated exact browser origins; empty denies browser-origin requests. Native Android and ordinary MCP clients need no entry. A browser integration additionally needs its own deliberate CORS design; no permissive CORS middleware is supplied.
 - `PORT`: injected by Cloud Run (8080 in local container).
 
-Do not enable request-body/header dumps, HTTP interceptors, APM body capture, or query-string credentials. Cloud Run access logs contain route/status metadata; the service logs only static event names. Use status/error counts and Scheduler failures for monitoring. Alarm on maintenance failure, oldest pending delivery age, quota errors, and growth of expired result documents. Firestore TTL is asynchronous and is a backstop, not an API expiry check.
+Do not enable request-body/header dumps, HTTP interceptors, APM body capture, or query-string credentials. Cloud Run access logs contain route/status metadata; the service logs only static event names. Use [production monitoring, alert provisioning and incident runbooks](OPERATIONS.md) for sanitized status/error counts, backlog sampling and Scheduler failures. Alarm on maintenance failure, oldest pending delivery age, quota errors, and growth of expired result documents. Firestore TTL is asynchronous and is a backstop, not an API expiry check.
 
 For local service development, run with Application Default Credentials for a dedicated development project or explicit emulator variables. Emulator authentication bypasses real JWT signing by Firebase design; never set `FIREBASE_AUTH_EMULATOR_HOST` or `FIRESTORE_EMULATOR_HOST` on the deployed service.
 

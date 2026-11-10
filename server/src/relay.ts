@@ -1,3 +1,4 @@
+import { telemetry } from './telemetry.js';
 import { randomUUID } from 'node:crypto';
 import { Forms } from './forms.js';
 import { Connections } from './connections.js';
@@ -294,18 +295,21 @@ export class Relay {
       const g = (await tx.get(this.ref('grants', r.grantId))).data() as Grant | undefined;
       const valid = await this.validGrant(tx, g), a = await this.account(tx, r.ownerId), devices = await this.devices(tx, r.ownerId);
       this.expire(tx, r, a, valid, devices); if (!active(r.status)) return [];
-      r.phones = this.phones(r); const plans: { deviceId: string; token: string; lease: number; attempts: number; ttl: number }[] = [];
+      r.phones = this.phones(r); const plans: { deviceId: string; token: string; lease: number; attempts: number; ttl: number; createdAt: number }[] = [];
       for (const [deviceId, p] of Object.entries(r.phones)) {
         const d = devices.find(d => d.id === deviceId);
         if (!d || !active(p.status)) { p.sent = true; continue; }
         if (p.sent || p.lease > this.now() || p.nextAt > this.now()) continue;
         p.lease = this.now() + MINUTE; p.attempts++;
-        plans.push({ deviceId, token: d.fcmToken, lease: p.lease, attempts: p.attempts, ttl: r.expiresAt - this.now() });
+        plans.push({ deviceId, token: d.fcmToken, lease: p.lease, attempts: p.attempts, ttl: r.expiresAt - this.now(), createdAt: r.createdAt });
       }
       this.deliverySummary(r); tx.set(this.ref('requests', id), r); return plans;
     });
     await Promise.all(claimed.map(async claim => {
-      let sent = false; try { await this.notify(claim.token, id, claim.ttl); sent = true; } catch { /* payloads never logged */ }
+      let sent = false;
+      try { await this.notify(claim.token, id, claim.ttl); sent = true; }
+      catch (error) { telemetry.delivery('sms', claim.createdAt, 'failed', error); }
+      if (sent) telemetry.delivery('sms', claim.createdAt, 'accepted');
       await this.db.runTransaction(async tx => {
         const r = (await tx.get(this.ref('requests', id))).data() as CodeRequest | undefined;
         if (!r?.phones || !active(r.status)) return;
