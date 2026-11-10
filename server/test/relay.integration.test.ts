@@ -881,6 +881,12 @@ integration('stream admission keeps its committed deadline and slow event reads 
   assert.equal(release.deadline - time, 80000);
   await release();
   await relay.forms.approve(uid, grantId, true);
+  const stream = relay.access.stream.bind(relay.access); let released: (() => void) | undefined;
+  const releaseCompleted = new Promise<void>(resolve => { released = resolve; });
+  relay.access.stream = async (...args) => {
+    const release = await stream(...args);
+    return Object.assign(async () => { await release(); released?.(); }, { deadline: release.deadline });
+  };
   const events = relay.forms.events.bind(relay.forms); let reads = 0, unblock: (() => void) | undefined;
   const pending = new Promise<void>(resolve => { unblock = resolve; });
   relay.forms.events = async (...args) => { if (++reads > 1) { await pending; return { events: [], cursor: null }; } return events(...args); };
@@ -891,17 +897,16 @@ integration('stream admission keeps its committed deadline and slow event reads 
     assert.equal(response.status, 200);
     const text = await response.text(); assert.ok(text.includes('heartbeat')); assert.equal(reads, 2);
     // The second database read is still pending when the response ends.
-    const leaseRef = db.collection('streamLimits').doc(hash(`grant:${grantId}`)), deadline = Date.now() + 3000;
-    let count = 1;
-    do {
-      count = Object.keys((await leaseRef.get()).data()?.leases ?? {}).length;
-      if (count) await new Promise(resolve => setTimeout(resolve, 25));
-    } while (count && Date.now() < deadline);
-    assert.equal(count, 0, 'HTTP close must release its lease while its event read is pending');
+    t.signal.throwIfAborted();
+    await Promise.race([releaseCompleted, new Promise<never>((_, reject) => {
+      t.signal.addEventListener('abort', () => reject(t.signal.reason), { once: true });
+    })]);
+    const leaseRef = db.collection('streamLimits').doc(hash(`grant:${grantId}`));
+    assert.equal(Object.keys((await leaseRef.get()).data()?.leases ?? {}).length, 0);
     const first = await relay.access.stream(uid, grantId, 1000), secondRelease = await relay.access.stream(uid, grantId, 1000);
     try { await assert.rejects(relay.access.stream(uid, grantId, 1000), reason('stream_limit_reached')); }
     finally { await first(); await secondRelease(); }
-  } finally { unblock?.(); relay.forms.events = events; server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); }
+  } finally { unblock?.(); relay.forms.events = events; relay.access.stream = stream; server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); }
 });
 
 integration('deletion failures remain observable and retain backlog age across retries', { timeout: 30000 }, async () => {
