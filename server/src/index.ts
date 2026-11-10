@@ -28,6 +28,7 @@ const server = app(relay, {
   },
   publicUrl: process.env.SERVICE_URL,
   androidCertSha256: process.env.ANDROID_SIGNING_SHA256,
+  androidCertSha256s: process.env.ANDROID_SIGNING_SHA256S ? JSON.parse(process.env.ANDROID_SIGNING_SHA256S) as string[] : undefined,
   trustProxyHops: 1,
   origins: (process.env.ALLOWED_ORIGINS ?? '').split(',').filter(Boolean),
 }).listen(Number(process.env.PORT ?? 8080), '0.0.0.0', () => console.info('sms_relay_listening'));
