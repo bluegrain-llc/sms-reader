@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "url": {
+      "type": "string",
+      "maxLength": 2048,
+      "format": "uri"
+    },
+    "events": {
+      "minItems": 1,
+      "maxItems": 10,
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "request.created",
+          "notification.accepted",
+          "notification.tapped",
+          "request.opened",
+          "input.ready",
+          "input.timeout",
+          "request.submitted",
+          "request.declined",
+          "request.cancelled",
+          "request.expired"
+        ]
+      }
+    }
+  },
+  "required": [
+    "url",
+    "events"
+  ],
+  "additionalProperties": false
+}

@@ -1,0 +1,192 @@
+[
+  {
+    "input": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "method": "initialize",
+      "params": {
+        "protocolVersion": "2025-11-25",
+        "clientInfo": {
+          "name": "fixture",
+          "version": "1"
+        },
+        "capabilities": {
+          "sampling": {
+            "tools": {},
+            "context": {}
+          }
+        }
+      }
+    },
+    "valid": true
+  },
+  {
+    "input": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "method": "initialize",
+      "params": {
+        "protocolVersion": "2025-11-25",
+        "clientInfo": {
+          "name": "fixture",
+          "version": "1"
+        },
+        "capabilities": {
+          "experimental": {
+            "feature": {}
+          },
+          "extensions": {
+            "feature": []
+          }
+        }
+      }
+    },
+    "valid": true
+  },
+  {
+    "input": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "method": "initialize",
+      "params": {
+        "protocolVersion": "2025-11-25",
+        "clientInfo": {
+          "name": "fixture",
+          "version": "1"
+        },
+        "capabilities": {
+          "elicitation": {}
+        }
+      }
+    },
+    "valid": true
+  },
+  {
+    "input": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "method": "initialize",
+      "params": {
+        "protocolVersion": "2025-11-25",
+        "clientInfo": {
+          "name": "fixture",
+          "version": "1"
+        },
+        "capabilities": {
+          "elicitation": {
+            "form": {
+              "applyDefaults": true
+            },
+            "url": []
+          }
+        }
+      }
+    },
+    "valid": true
+  },
+  {
+    "input": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "method": "initialize",
+      "params": {
+        "protocolVersion": "2025-11-25",
+        "clientInfo": {
+          "name": "fixture",
+          "version": "1"
+        },
+        "capabilities": {
+          "tasks": {
+            "list": {},
+            "cancel": {}
+          }
+        }
+      }
+    },
+    "valid": true
+  },
+  {
+    "input": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "method": "initialize",
+      "params": {
+        "protocolVersion": "2025-11-25",
+        "clientInfo": {
+          "name": "fixture",
+          "version": "1"
+        },
+        "capabilities": {
+          "sampling": {
+            "tools": null
+          }
+        }
+      }
+    },
+    "valid": false,
+    "error": "[\n  {\n    \"code\": \"custom\",\n    \"path\": [\n      \"params\",\n      \"capabilities\",\n      \"sampling\",\n      \"tools\"\n    ],\n    \"message\": \"Invalid input\"\n  }\n]"
+  },
+  {
+    "input": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "method": "initialize",
+      "params": {
+        "protocolVersion": "2025-11-25",
+        "clientInfo": {
+          "name": "fixture",
+          "version": "1"
+        },
+        "capabilities": {
+          "experimental": {
+            "feature": 1
+          }
+        }
+      }
+    },
+    "valid": false,
+    "error": "[\n  {\n    \"code\": \"custom\",\n    \"path\": [\n      \"params\",\n      \"capabilities\",\n      \"experimental\",\n      \"feature\"\n    ],\n    \"message\": \"Invalid input\"\n  }\n]"
+  },
+  {
+    "input": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "method": "initialize",
+      "params": {
+        "protocolVersion": "2025-11-25",
+        "clientInfo": {
+          "name": "fixture",
+          "version": "1"
+        },
+        "capabilities": {
+          "elicitation": []
+        }
+      }
+    },
+    "valid": false,
+    "error": "[\n  {\n    \"expected\": \"object\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"params\",\n      \"capabilities\",\n      \"elicitation\"\n    ],\n    \"message\": \"Invalid input: expected object, received array\"\n  },\n  {\n    \"expected\": \"record\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"params\",\n      \"capabilities\",\n      \"elicitation\"\n    ],\n    \"message\": \"Invalid input: expected record, received array\"\n  }\n]"
+  },
+  {
+    "input": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "method": "initialize",
+      "params": {
+        "protocolVersion": "2025-11-25",
+        "clientInfo": {
+          "name": "fixture",
+          "version": "1"
+        },
+        "capabilities": {
+          "elicitation": {
+            "form": {
+              "applyDefaults": "yes"
+            }
+          }
+        }
+      }
+    },
+    "valid": false,
+    "error": "[\n  {\n    \"expected\": \"boolean\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"params\",\n      \"capabilities\",\n      \"elicitation\",\n      \"form\",\n      \"applyDefaults\"\n    ],\n    \"message\": \"Invalid input: expected boolean, received string\"\n  }\n]"
+  }
+]

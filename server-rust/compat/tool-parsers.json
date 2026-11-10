@@ -1,0 +1,829 @@
+{
+  "request_sms_code": {
+    "type": "object",
+    "shape": {
+      "purpose": {
+        "type": "string",
+        "checks": [
+          {
+            "check": "overwrite"
+          },
+          {
+            "check": "min_length",
+            "minimum": 1
+          },
+          {
+            "check": "max_length",
+            "maximum": 4000
+          }
+        ]
+      },
+      "title": {
+        "type": "optional",
+        "inner": {
+          "type": "string",
+          "checks": [
+            {
+              "check": "overwrite"
+            },
+            {
+              "check": "min_length",
+              "minimum": 1
+            },
+            {
+              "check": "max_length",
+              "maximum": 80
+            }
+          ]
+        }
+      },
+      "senderPhone": {
+        "type": "optional",
+        "inner": {
+          "type": "string",
+          "checks": [
+            {
+              "check": "string_format",
+              "format": "regex",
+              "pattern": {
+                "source": "^\\+[1-9][0-9]{5,14}$",
+                "display": "/^\\+[1-9][0-9]{5,14}$/"
+              }
+            }
+          ]
+        }
+      },
+      "idempotencyKey": {
+        "type": "string",
+        "checks": [
+          {
+            "check": "min_length",
+            "minimum": 8
+          },
+          {
+            "check": "max_length",
+            "maximum": 128
+          }
+        ]
+      }
+    }
+  },
+  "create_request": {
+    "type": "object",
+    "shape": {
+      "title": {
+        "type": "string",
+        "checks": [
+          {
+            "check": "overwrite"
+          },
+          {
+            "check": "min_length",
+            "minimum": 1
+          },
+          {
+            "check": "max_length",
+            "maximum": 80
+          }
+        ]
+      },
+      "body": {
+        "type": "string",
+        "checks": [
+          {
+            "check": "min_length",
+            "minimum": 1
+          },
+          {
+            "check": "max_length",
+            "maximum": 16000
+          }
+        ]
+      },
+      "fields": {
+        "type": "default",
+        "inner": {
+          "type": "array",
+          "checks": [
+            {
+              "check": "max_length",
+              "maximum": 30
+            }
+          ],
+          "element": {
+            "type": "union",
+            "options": [
+              {
+                "type": "object",
+                "shape": {
+                  "id": {
+                    "type": "string",
+                    "checks": [
+                      {
+                        "check": "string_format",
+                        "format": "regex",
+                        "pattern": {
+                          "source": "^[a-zA-Z0-9_-]{1,128}$",
+                          "display": "/^[a-zA-Z0-9_-]{1,128}$/"
+                        }
+                      }
+                    ]
+                  },
+                  "label": {
+                    "type": "string",
+                    "checks": [
+                      {
+                        "check": "overwrite"
+                      },
+                      {
+                        "check": "min_length",
+                        "minimum": 1
+                      },
+                      {
+                        "check": "max_length",
+                        "maximum": 160
+                      }
+                    ]
+                  },
+                  "required": {
+                    "type": "default",
+                    "inner": {
+                      "type": "boolean"
+                    },
+                    "default": false
+                  },
+                  "type": {
+                    "type": "enum",
+                    "values": [
+                      "text",
+                      "multiline"
+                    ]
+                  },
+                  "maxLength": {
+                    "type": "default",
+                    "inner": {
+                      "type": "number",
+                      "checks": [
+                        {
+                          "type": "number",
+                          "check": "number_format",
+                          "abort": false,
+                          "format": "safeint"
+                        },
+                        {
+                          "check": "greater_than",
+                          "value": 1,
+                          "inclusive": true
+                        },
+                        {
+                          "check": "less_than",
+                          "value": 4000,
+                          "inclusive": true
+                        }
+                      ]
+                    },
+                    "default": 1000
+                  },
+                  "input": {
+                    "type": "optional",
+                    "inner": {
+                      "type": "literal",
+                      "values": [
+                        "sms_code"
+                      ]
+                    }
+                  }
+                },
+                "strict": true
+              },
+              {
+                "type": "object",
+                "shape": {
+                  "id": {
+                    "type": "string",
+                    "checks": [
+                      {
+                        "check": "string_format",
+                        "format": "regex",
+                        "pattern": {
+                          "source": "^[a-zA-Z0-9_-]{1,128}$",
+                          "display": "/^[a-zA-Z0-9_-]{1,128}$/"
+                        }
+                      }
+                    ]
+                  },
+                  "label": {
+                    "type": "string",
+                    "checks": [
+                      {
+                        "check": "overwrite"
+                      },
+                      {
+                        "check": "min_length",
+                        "minimum": 1
+                      },
+                      {
+                        "check": "max_length",
+                        "maximum": 160
+                      }
+                    ]
+                  },
+                  "required": {
+                    "type": "default",
+                    "inner": {
+                      "type": "boolean"
+                    },
+                    "default": false
+                  },
+                  "type": {
+                    "type": "literal",
+                    "values": [
+                      "number"
+                    ]
+                  },
+                  "min": {
+                    "type": "optional",
+                    "inner": {
+                      "type": "number",
+                      "checks": []
+                    }
+                  },
+                  "max": {
+                    "type": "optional",
+                    "inner": {
+                      "type": "number",
+                      "checks": []
+                    }
+                  }
+                },
+                "strict": true
+              },
+              {
+                "type": "object",
+                "shape": {
+                  "id": {
+                    "type": "string",
+                    "checks": [
+                      {
+                        "check": "string_format",
+                        "format": "regex",
+                        "pattern": {
+                          "source": "^[a-zA-Z0-9_-]{1,128}$",
+                          "display": "/^[a-zA-Z0-9_-]{1,128}$/"
+                        }
+                      }
+                    ]
+                  },
+                  "label": {
+                    "type": "string",
+                    "checks": [
+                      {
+                        "check": "overwrite"
+                      },
+                      {
+                        "check": "min_length",
+                        "minimum": 1
+                      },
+                      {
+                        "check": "max_length",
+                        "maximum": 160
+                      }
+                    ]
+                  },
+                  "required": {
+                    "type": "default",
+                    "inner": {
+                      "type": "boolean"
+                    },
+                    "default": false
+                  },
+                  "type": {
+                    "type": "literal",
+                    "values": [
+                      "checkbox"
+                    ]
+                  }
+                },
+                "strict": true
+              },
+              {
+                "type": "object",
+                "shape": {
+                  "id": {
+                    "type": "string",
+                    "checks": [
+                      {
+                        "check": "string_format",
+                        "format": "regex",
+                        "pattern": {
+                          "source": "^[a-zA-Z0-9_-]{1,128}$",
+                          "display": "/^[a-zA-Z0-9_-]{1,128}$/"
+                        }
+                      }
+                    ]
+                  },
+                  "label": {
+                    "type": "string",
+                    "checks": [
+                      {
+                        "check": "overwrite"
+                      },
+                      {
+                        "check": "min_length",
+                        "minimum": 1
+                      },
+                      {
+                        "check": "max_length",
+                        "maximum": 160
+                      }
+                    ]
+                  },
+                  "required": {
+                    "type": "default",
+                    "inner": {
+                      "type": "boolean"
+                    },
+                    "default": false
+                  },
+                  "type": {
+                    "type": "enum",
+                    "values": [
+                      "single_choice",
+                      "multiple_choice"
+                    ]
+                  },
+                  "options": {
+                    "type": "array",
+                    "checks": [
+                      {
+                        "check": "min_length",
+                        "minimum": 1
+                      },
+                      {
+                        "check": "max_length",
+                        "maximum": 40
+                      }
+                    ],
+                    "element": {
+                      "type": "object",
+                      "shape": {
+                        "id": {
+                          "type": "string",
+                          "checks": [
+                            {
+                              "check": "string_format",
+                              "format": "regex",
+                              "pattern": {
+                                "source": "^[a-zA-Z0-9_-]{1,128}$",
+                                "display": "/^[a-zA-Z0-9_-]{1,128}$/"
+                              }
+                            }
+                          ]
+                        },
+                        "label": {
+                          "type": "string",
+                          "checks": [
+                            {
+                              "check": "overwrite"
+                            },
+                            {
+                              "check": "min_length",
+                              "minimum": 1
+                            },
+                            {
+                              "check": "max_length",
+                              "maximum": 160
+                            }
+                          ]
+                        }
+                      },
+                      "strict": true
+                    }
+                  }
+                },
+                "strict": true
+              },
+              {
+                "type": "object",
+                "shape": {
+                  "id": {
+                    "type": "string",
+                    "checks": [
+                      {
+                        "check": "string_format",
+                        "format": "regex",
+                        "pattern": {
+                          "source": "^[a-zA-Z0-9_-]{1,128}$",
+                          "display": "/^[a-zA-Z0-9_-]{1,128}$/"
+                        }
+                      }
+                    ]
+                  },
+                  "label": {
+                    "type": "string",
+                    "checks": [
+                      {
+                        "check": "overwrite"
+                      },
+                      {
+                        "check": "min_length",
+                        "minimum": 1
+                      },
+                      {
+                        "check": "max_length",
+                        "maximum": 160
+                      }
+                    ]
+                  },
+                  "required": {
+                    "type": "default",
+                    "inner": {
+                      "type": "boolean"
+                    },
+                    "default": false
+                  },
+                  "type": {
+                    "type": "literal",
+                    "values": [
+                      "date"
+                    ]
+                  }
+                },
+                "strict": true
+              }
+            ],
+            "discriminator": "type"
+          }
+        },
+        "default": []
+      },
+      "actions": {
+        "type": "array",
+        "checks": [
+          {
+            "check": "min_length",
+            "minimum": 1
+          },
+          {
+            "check": "max_length",
+            "maximum": 8
+          }
+        ],
+        "element": {
+          "type": "object",
+          "shape": {
+            "id": {
+              "type": "string",
+              "checks": [
+                {
+                  "check": "string_format",
+                  "format": "regex",
+                  "pattern": {
+                    "source": "^[a-zA-Z0-9_-]{1,128}$",
+                    "display": "/^[a-zA-Z0-9_-]{1,128}$/"
+                  }
+                }
+              ]
+            },
+            "label": {
+              "type": "string",
+              "checks": [
+                {
+                  "check": "overwrite"
+                },
+                {
+                  "check": "min_length",
+                  "minimum": 1
+                },
+                {
+                  "check": "max_length",
+                  "maximum": 80
+                }
+              ]
+            },
+            "type": {
+              "type": "enum",
+              "values": [
+                "submit",
+                "approve",
+                "decline",
+                "acknowledge"
+              ]
+            }
+          },
+          "strict": true
+        }
+      },
+      "steps": {
+        "type": "optional",
+        "inner": {
+          "type": "array",
+          "checks": [
+            {
+              "check": "min_length",
+              "minimum": 2
+            },
+            {
+              "check": "max_length",
+              "maximum": 12
+            }
+          ],
+          "element": {
+            "type": "object",
+            "shape": {
+              "id": {
+                "type": "string",
+                "checks": [
+                  {
+                    "check": "string_format",
+                    "format": "regex",
+                    "pattern": {
+                      "source": "^[a-zA-Z0-9_-]{1,128}$",
+                      "display": "/^[a-zA-Z0-9_-]{1,128}$/"
+                    }
+                  }
+                ]
+              },
+              "title": {
+                "type": "string",
+                "checks": [
+                  {
+                    "check": "overwrite"
+                  },
+                  {
+                    "check": "min_length",
+                    "minimum": 1
+                  },
+                  {
+                    "check": "max_length",
+                    "maximum": 120
+                  }
+                ]
+              },
+              "body": {
+                "type": "optional",
+                "inner": {
+                  "type": "string",
+                  "checks": [
+                    {
+                      "check": "max_length",
+                      "maximum": 4000
+                    }
+                  ]
+                }
+              },
+              "fieldIds": {
+                "type": "array",
+                "checks": [
+                  {
+                    "check": "max_length",
+                    "maximum": 30
+                  }
+                ],
+                "element": {
+                  "type": "string",
+                  "checks": [
+                    {
+                      "check": "string_format",
+                      "format": "regex",
+                      "pattern": {
+                        "source": "^[a-zA-Z0-9_-]{1,128}$",
+                        "display": "/^[a-zA-Z0-9_-]{1,128}$/"
+                      }
+                    }
+                  ]
+                }
+              },
+              "when": {
+                "type": "optional",
+                "inner": {
+                  "type": "union",
+                  "options": [
+                    {
+                      "type": "object",
+                      "shape": {
+                        "fieldId": {
+                          "type": "string",
+                          "checks": [
+                            {
+                              "check": "string_format",
+                              "format": "regex",
+                              "pattern": {
+                                "source": "^[a-zA-Z0-9_-]{1,128}$",
+                                "display": "/^[a-zA-Z0-9_-]{1,128}$/"
+                              }
+                            }
+                          ]
+                        },
+                        "equals": {
+                          "type": "union",
+                          "options": [
+                            {
+                              "type": "string",
+                              "checks": [
+                                {
+                                  "check": "max_length",
+                                  "maximum": 4000
+                                }
+                              ]
+                            },
+                            {
+                              "type": "number",
+                              "checks": []
+                            },
+                            {
+                              "type": "boolean"
+                            }
+                          ]
+                        }
+                      },
+                      "strict": true
+                    },
+                    {
+                      "type": "object",
+                      "shape": {
+                        "fieldId": {
+                          "type": "string",
+                          "checks": [
+                            {
+                              "check": "string_format",
+                              "format": "regex",
+                              "pattern": {
+                                "source": "^[a-zA-Z0-9_-]{1,128}$",
+                                "display": "/^[a-zA-Z0-9_-]{1,128}$/"
+                              }
+                            }
+                          ]
+                        },
+                        "contains": {
+                          "type": "string",
+                          "checks": [
+                            {
+                              "check": "string_format",
+                              "format": "regex",
+                              "pattern": {
+                                "source": "^[a-zA-Z0-9_-]{1,128}$",
+                                "display": "/^[a-zA-Z0-9_-]{1,128}$/"
+                              }
+                            }
+                          ]
+                        }
+                      },
+                      "strict": true
+                    }
+                  ]
+                }
+              }
+            },
+            "strict": true
+          }
+        }
+      },
+      "expiresInSeconds": {
+        "type": "default",
+        "inner": {
+          "type": "number",
+          "checks": [
+            {
+              "type": "number",
+              "check": "number_format",
+              "abort": false,
+              "format": "safeint"
+            },
+            {
+              "check": "greater_than",
+              "value": 60,
+              "inclusive": true
+            },
+            {
+              "check": "less_than",
+              "value": 604800,
+              "inclusive": true
+            }
+          ]
+        },
+        "default": 86400
+      },
+      "idempotencyKey": {
+        "type": "string",
+        "checks": [
+          {
+            "check": "min_length",
+            "minimum": 8
+          },
+          {
+            "check": "max_length",
+            "maximum": 128
+          }
+        ]
+      }
+    }
+  },
+  "get_sms_code_request": {
+    "type": "object",
+    "shape": {
+      "requestId": {
+        "type": "string",
+        "checks": [
+          {
+            "check": "string_format",
+            "format": "regex",
+            "pattern": {
+              "source": "^[a-zA-Z0-9_-]{1,128}$",
+              "display": "/^[a-zA-Z0-9_-]{1,128}$/"
+            }
+          }
+        ]
+      }
+    }
+  },
+  "cancel_sms_code_request": {
+    "type": "object",
+    "shape": {
+      "requestId": {
+        "type": "string",
+        "checks": [
+          {
+            "check": "string_format",
+            "format": "regex",
+            "pattern": {
+              "source": "^[a-zA-Z0-9_-]{1,128}$",
+              "display": "/^[a-zA-Z0-9_-]{1,128}$/"
+            }
+          }
+        ]
+      }
+    }
+  },
+  "inspect_request": {
+    "type": "object",
+    "shape": {
+      "requestId": {
+        "type": "string",
+        "checks": [
+          {
+            "check": "string_format",
+            "format": "regex",
+            "pattern": {
+              "source": "^[a-zA-Z0-9_-]{1,128}$",
+              "display": "/^[a-zA-Z0-9_-]{1,128}$/"
+            }
+          }
+        ]
+      }
+    }
+  },
+  "cancel_request": {
+    "type": "object",
+    "shape": {
+      "requestId": {
+        "type": "string",
+        "checks": [
+          {
+            "check": "string_format",
+            "format": "regex",
+            "pattern": {
+              "source": "^[a-zA-Z0-9_-]{1,128}$",
+              "display": "/^[a-zA-Z0-9_-]{1,128}$/"
+            }
+          }
+        ]
+      }
+    }
+  },
+  "get_request_result": {
+    "type": "object",
+    "shape": {
+      "requestId": {
+        "type": "string",
+        "checks": [
+          {
+            "check": "string_format",
+            "format": "regex",
+            "pattern": {
+              "source": "^[a-zA-Z0-9_-]{1,128}$",
+              "display": "/^[a-zA-Z0-9_-]{1,128}$/"
+            }
+          }
+        ]
+      }
+    }
+  },
+  "poll_request_events": {
+    "type": "object",
+    "shape": {
+      "cursor": {
+        "type": "optional",
+        "inner": {
+          "type": "string",
+          "checks": [
+            {
+              "check": "max_length",
+              "maximum": 128
+            }
+          ]
+        }
+      }
+    }
+  }
+}

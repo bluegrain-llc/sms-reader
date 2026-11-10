@@ -42,7 +42,7 @@ Environment secrets: `RELAY_KEYSTORE_BASE64`, `RELAY_STORE_PASSWORD`, `RELAY_KEY
 
 The release workflow serializes production deploys and does not cancel an in-progress deployment for a later one. Staging may use the same scripts with a separate explicit project and identities. For an operator-run deployment set `PROJECT_ID`, `IMAGE_URI` (`LOCATION-docker.pkg.dev/PROJECT/REPO/IMAGE@sha256:...`), full `COMMIT_SHA`, `RELAY_SMOKE_TOKEN`, and certificate configuration before invoking `scripts/deploy.sh`. The operator must first establish the same successful-CI provenance; the protected workflow automates that check.
 
-`DEPLOYMENT_MANIFEST_PATH` defaults to `artifacts/deployment.json`. Its JSON fields include `projectId`, `region`, `service`, `serviceUrl`, `revision`, `image`, `commit`, `schedulerEmail`, `deliveryQueue`, `candidateUrl`, `previousTraffic`, `previousImages` and `status`. No token or signing secret is written. `PROMOTION_HOLD_SECONDS` may extend, but cannot shorten, the 60-second observation period.
+`DEPLOYMENT_MANIFEST_PATH` defaults to `artifacts/deployment.json`. Its JSON fields include `projectId`, `region`, `service`, `serviceUrl`, `revision`, `image`, `commit`, `backend`, `trafficMode`, `schedulerEmail`, `deliveryQueue`, `candidateUrl`, `previousTraffic`, `previousImages` and `status`. Stage mode records status `staged` after verifying the zero-traffic candidate. No token or signing secret is written. `PROMOTION_HOLD_SECONDS` may extend, but cannot shorten, the 60-second observation period.
 
 ## Failure and rollback
 
@@ -59,3 +59,13 @@ Use JDK 17+ (JDK 21 in CI), SDK 36 and the pinned Gradle wrapper. `scripts/build
 The backend accepts `ANDROID_SIGNING_SHA256S` as a JSON array and continues to accept legacy `ANDROID_SIGNING_SHA256`. Asset Links contains the deduplicated union; malformed fingerprints fail closed. Do not drop an active certificate until its installed clients have migrated.
 
 Do not enable request/header/body capture. Use [production monitoring, alert provisioning and incident runbooks](OPERATIONS.md) for maintenance, delivery age, provider failures and overdue result deletion. API expiry is independent of asynchronous TTL cleanup. Signed release and cloud smoke evidence do not replace physical-phone consent, denial, lifecycle or multi-phone acceptance in [PILOT.md](PILOT.md).
+
+## Rust migration candidates
+
+`BACKEND=typescript` remains the deployment default. Supply an already tested Rust image digest through `IMAGE_URI` and set `BACKEND=rust`; the deployment defaults `TRAFFIC_MODE` to `stage`, leaving the verified tagged candidate at zero production traffic. The protected release workflow continues to publish the TypeScript image. `BACKEND` describes the supplied image; it does not build or select a different artifact.
+
+Download `relay-rust-container` from the successful `main`-push CI run for `COMMIT_SHA`, verify `relay-rust-image.sha256`, and load `relay-rust-image.tar.gz`. Check its `org.opencontainers.image.revision` label against `COMMIT_SHA`, then tag and push that loaded image to the chosen Artifact Registry repository. Resolve its immutable registry digest for `IMAGE_URI`; do not rebuild the accepted image. Pull-request artifacts carry the temporary merge commit revision; use the successful `main` run after merge for deployment. Rust artifacts are retained for seven days and are not automatically published or deployed by the TypeScript release workflow.
+
+Stage mode still deploys the selected Firestore rules and indexes and configures the Cloud Run service environment; zero traffic applies to the new revision.
+
+Set `TRAFFIC_MODE=live` only after the isolated staging and production-candidate acceptance steps in [RUST_MIGRATION.md](RUST_MIGRATION.md). Reuse the accepted immutable digest and configuration. Live mode creates a fresh zero-traffic candidate, verifies its tagged URL, then uses the same guarded 5%, 25%, 100% promotion and rollback as TypeScript; it does not promote the earlier staged revision in place. Keep the TypeScript source and prior Cloud Run revision for seven days of observation before making Rust the default.

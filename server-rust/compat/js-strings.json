@@ -1,0 +1,50 @@
+[
+  {
+    "input": "\ud800",
+    "json": "\"\\ud800\"",
+    "units": 1,
+    "points": 1,
+    "utf8": "�",
+    "jsonHash": "8c0c59dd0d275aadcd462a5fe12eb352cbdfeaf961eae4f85a4660521df7d2f5"
+  },
+  {
+    "input": "\udfff",
+    "json": "\"\\udfff\"",
+    "units": 1,
+    "points": 1,
+    "utf8": "�",
+    "jsonHash": "aa68369aff102de57c3da5ad0dd5c24149f811b4afcd13c55f2da895bd15c782"
+  },
+  {
+    "input": "\ud800\ud800",
+    "json": "\"\\ud800\\ud800\"",
+    "units": 2,
+    "points": 2,
+    "utf8": "��",
+    "jsonHash": "fb4359663475e3eae44437bda464378c64b025016f8a3aacfe99a82949402ee2"
+  },
+  {
+    "input": "😀",
+    "json": "\"😀\"",
+    "units": 2,
+    "points": 1,
+    "utf8": "😀",
+    "jsonHash": "7a0c50b92434b015545fe93ab723db2d4b2cdd14a441405624a9ce8be29f1d5a"
+  },
+  {
+    "input": "󰀀",
+    "json": "\"󰀀\"",
+    "units": 3,
+    "points": 2,
+    "utf8": "󰀀",
+    "jsonHash": "dc2e3a0dcbe9d35fc8934084b541be202b6689a264eb1ca5de883941ab1bed45"
+  },
+  {
+    "input": "\\ud800",
+    "json": "\"\\\\ud800\"",
+    "units": 6,
+    "points": 6,
+    "utf8": "\\ud800",
+    "jsonHash": "eb5c7a825b6ee1b0ea16c7246ddd460a5a9dbd69e612726591d50d5395e6c854"
+  }
+]

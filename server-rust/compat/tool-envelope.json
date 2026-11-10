@@ -1,0 +1,969 @@
+{
+  "call": {
+    "type": "object",
+    "shape": {
+      "method": {
+        "type": "literal",
+        "values": [
+          "tools/call"
+        ]
+      },
+      "params": {
+        "type": "object",
+        "shape": {
+          "_meta": {
+            "type": "optional",
+            "inner": {
+              "type": "object",
+              "shape": {
+                "progressToken": {
+                  "type": "optional",
+                  "inner": {
+                    "type": "union",
+                    "options": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "number",
+                        "checks": [
+                          {
+                            "type": "number",
+                            "check": "number_format",
+                            "abort": false,
+                            "format": "safeint"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                },
+                "io.modelcontextprotocol/related-task": {
+                  "type": "optional",
+                  "inner": {
+                    "type": "object",
+                    "shape": {
+                      "taskId": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                }
+              },
+              "strict": false
+            }
+          },
+          "task": {
+            "type": "optional",
+            "inner": {
+              "type": "object",
+              "shape": {
+                "ttl": {
+                  "type": "optional",
+                  "inner": {
+                    "type": "number",
+                    "checks": []
+                  }
+                }
+              }
+            }
+          },
+          "name": {
+            "type": "string"
+          },
+          "arguments": {
+            "type": "optional",
+            "inner": {
+              "type": "record",
+              "key": {
+                "type": "string"
+              },
+              "value": {
+                "type": "unknown"
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "task": {
+    "type": "object",
+    "shape": {
+      "_meta": {
+        "type": "optional",
+        "inner": {
+          "type": "object",
+          "shape": {
+            "progressToken": {
+              "type": "optional",
+              "inner": {
+                "type": "union",
+                "options": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "number",
+                    "checks": [
+                      {
+                        "type": "number",
+                        "check": "number_format",
+                        "abort": false,
+                        "format": "safeint"
+                      }
+                    ]
+                  }
+                ]
+              }
+            },
+            "io.modelcontextprotocol/related-task": {
+              "type": "optional",
+              "inner": {
+                "type": "object",
+                "shape": {
+                  "taskId": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          },
+          "strict": false
+        }
+      },
+      "task": {
+        "type": "optional",
+        "inner": {
+          "type": "object",
+          "shape": {
+            "ttl": {
+              "type": "optional",
+              "inner": {
+                "type": "number",
+                "checks": []
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "request": {
+    "type": "object",
+    "shape": {
+      "jsonrpc": {
+        "type": "literal",
+        "values": [
+          "2.0"
+        ]
+      },
+      "id": {
+        "type": "union",
+        "options": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "number",
+            "checks": [
+              {
+                "type": "number",
+                "check": "number_format",
+                "abort": false,
+                "format": "safeint"
+              }
+            ]
+          }
+        ]
+      },
+      "method": {
+        "type": "string"
+      },
+      "params": {
+        "type": "optional",
+        "inner": {
+          "type": "object",
+          "shape": {
+            "_meta": {
+              "type": "optional",
+              "inner": {
+                "type": "object",
+                "shape": {
+                  "progressToken": {
+                    "type": "optional",
+                    "inner": {
+                      "type": "union",
+                      "options": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "number",
+                          "checks": [
+                            {
+                              "type": "number",
+                              "check": "number_format",
+                              "abort": false,
+                              "format": "safeint"
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  },
+                  "io.modelcontextprotocol/related-task": {
+                    "type": "optional",
+                    "inner": {
+                      "type": "object",
+                      "shape": {
+                        "taskId": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  }
+                },
+                "strict": false
+              }
+            }
+          },
+          "strict": false
+        }
+      }
+    },
+    "strict": true
+  },
+  "message": {
+    "type": "union",
+    "options": [
+      {
+        "type": "object",
+        "shape": {
+          "jsonrpc": {
+            "type": "literal",
+            "values": [
+              "2.0"
+            ]
+          },
+          "id": {
+            "type": "union",
+            "options": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "number",
+                "checks": [
+                  {
+                    "type": "number",
+                    "check": "number_format",
+                    "abort": false,
+                    "format": "safeint"
+                  }
+                ]
+              }
+            ]
+          },
+          "method": {
+            "type": "string"
+          },
+          "params": {
+            "type": "optional",
+            "inner": {
+              "type": "object",
+              "shape": {
+                "_meta": {
+                  "type": "optional",
+                  "inner": {
+                    "type": "object",
+                    "shape": {
+                      "progressToken": {
+                        "type": "optional",
+                        "inner": {
+                          "type": "union",
+                          "options": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "number",
+                              "checks": [
+                                {
+                                  "type": "number",
+                                  "check": "number_format",
+                                  "abort": false,
+                                  "format": "safeint"
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      },
+                      "io.modelcontextprotocol/related-task": {
+                        "type": "optional",
+                        "inner": {
+                          "type": "object",
+                          "shape": {
+                            "taskId": {
+                              "type": "string"
+                            }
+                          }
+                        }
+                      }
+                    },
+                    "strict": false
+                  }
+                }
+              },
+              "strict": false
+            }
+          }
+        },
+        "strict": true
+      },
+      {
+        "type": "object",
+        "shape": {
+          "jsonrpc": {
+            "type": "literal",
+            "values": [
+              "2.0"
+            ]
+          },
+          "method": {
+            "type": "string"
+          },
+          "params": {
+            "type": "optional",
+            "inner": {
+              "type": "object",
+              "shape": {
+                "_meta": {
+                  "type": "optional",
+                  "inner": {
+                    "type": "object",
+                    "shape": {
+                      "progressToken": {
+                        "type": "optional",
+                        "inner": {
+                          "type": "union",
+                          "options": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "number",
+                              "checks": [
+                                {
+                                  "type": "number",
+                                  "check": "number_format",
+                                  "abort": false,
+                                  "format": "safeint"
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      },
+                      "io.modelcontextprotocol/related-task": {
+                        "type": "optional",
+                        "inner": {
+                          "type": "object",
+                          "shape": {
+                            "taskId": {
+                              "type": "string"
+                            }
+                          }
+                        }
+                      }
+                    },
+                    "strict": false
+                  }
+                }
+              },
+              "strict": false
+            }
+          }
+        },
+        "strict": true
+      },
+      {
+        "type": "object",
+        "shape": {
+          "jsonrpc": {
+            "type": "literal",
+            "values": [
+              "2.0"
+            ]
+          },
+          "id": {
+            "type": "union",
+            "options": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "number",
+                "checks": [
+                  {
+                    "type": "number",
+                    "check": "number_format",
+                    "abort": false,
+                    "format": "safeint"
+                  }
+                ]
+              }
+            ]
+          },
+          "result": {
+            "type": "object",
+            "shape": {
+              "_meta": {
+                "type": "optional",
+                "inner": {
+                  "type": "object",
+                  "shape": {
+                    "progressToken": {
+                      "type": "optional",
+                      "inner": {
+                        "type": "union",
+                        "options": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "number",
+                            "checks": [
+                              {
+                                "type": "number",
+                                "check": "number_format",
+                                "abort": false,
+                                "format": "safeint"
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    },
+                    "io.modelcontextprotocol/related-task": {
+                      "type": "optional",
+                      "inner": {
+                        "type": "object",
+                        "shape": {
+                          "taskId": {
+                            "type": "string"
+                          }
+                        }
+                      }
+                    }
+                  },
+                  "strict": false
+                }
+              }
+            },
+            "strict": false
+          }
+        },
+        "strict": true
+      },
+      {
+        "type": "object",
+        "shape": {
+          "jsonrpc": {
+            "type": "literal",
+            "values": [
+              "2.0"
+            ]
+          },
+          "id": {
+            "type": "optional",
+            "inner": {
+              "type": "union",
+              "options": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "number",
+                  "checks": [
+                    {
+                      "type": "number",
+                      "check": "number_format",
+                      "abort": false,
+                      "format": "safeint"
+                    }
+                  ]
+                }
+              ]
+            }
+          },
+          "error": {
+            "type": "object",
+            "shape": {
+              "code": {
+                "type": "number",
+                "checks": [
+                  {
+                    "type": "number",
+                    "check": "number_format",
+                    "abort": false,
+                    "format": "safeint"
+                  }
+                ]
+              },
+              "message": {
+                "type": "string"
+              },
+              "data": {
+                "type": "optional",
+                "inner": {
+                  "type": "unknown"
+                }
+              }
+            }
+          }
+        },
+        "strict": true
+      }
+    ]
+  },
+  "initialize": {
+    "type": "object",
+    "shape": {
+      "method": {
+        "type": "literal",
+        "values": [
+          "initialize"
+        ]
+      },
+      "params": {
+        "type": "object",
+        "shape": {
+          "_meta": {
+            "type": "optional",
+            "inner": {
+              "type": "object",
+              "shape": {
+                "progressToken": {
+                  "type": "optional",
+                  "inner": {
+                    "type": "union",
+                    "options": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "number",
+                        "checks": [
+                          {
+                            "type": "number",
+                            "check": "number_format",
+                            "abort": false,
+                            "format": "safeint"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                },
+                "io.modelcontextprotocol/related-task": {
+                  "type": "optional",
+                  "inner": {
+                    "type": "object",
+                    "shape": {
+                      "taskId": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                }
+              },
+              "strict": false
+            }
+          },
+          "protocolVersion": {
+            "type": "string"
+          },
+          "capabilities": {
+            "type": "object",
+            "shape": {
+              "experimental": {
+                "type": "optional",
+                "inner": {
+                  "type": "record",
+                  "key": {
+                    "type": "string"
+                  },
+                  "value": {
+                    "type": "assert_object"
+                  }
+                }
+              },
+              "sampling": {
+                "type": "optional",
+                "inner": {
+                  "type": "object",
+                  "shape": {
+                    "context": {
+                      "type": "optional",
+                      "inner": {
+                        "type": "assert_object"
+                      }
+                    },
+                    "tools": {
+                      "type": "optional",
+                      "inner": {
+                        "type": "assert_object"
+                      }
+                    }
+                  }
+                }
+              },
+              "elicitation": {
+                "type": "optional",
+                "inner": {
+                  "type": "elicitation",
+                  "schema": {
+                    "type": "intersection",
+                    "left": {
+                      "type": "object",
+                      "shape": {
+                        "form": {
+                          "type": "optional",
+                          "inner": {
+                            "type": "intersection",
+                            "left": {
+                              "type": "object",
+                              "shape": {
+                                "applyDefaults": {
+                                  "type": "optional",
+                                  "inner": {
+                                    "type": "boolean"
+                                  }
+                                }
+                              }
+                            },
+                            "right": {
+                              "type": "record",
+                              "key": {
+                                "type": "string"
+                              },
+                              "value": {
+                                "type": "unknown"
+                              }
+                            }
+                          }
+                        },
+                        "url": {
+                          "type": "optional",
+                          "inner": {
+                            "type": "assert_object"
+                          }
+                        }
+                      }
+                    },
+                    "right": {
+                      "type": "optional",
+                      "inner": {
+                        "type": "record",
+                        "key": {
+                          "type": "string"
+                        },
+                        "value": {
+                          "type": "unknown"
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              "roots": {
+                "type": "optional",
+                "inner": {
+                  "type": "object",
+                  "shape": {
+                    "listChanged": {
+                      "type": "optional",
+                      "inner": {
+                        "type": "boolean"
+                      }
+                    }
+                  }
+                }
+              },
+              "tasks": {
+                "type": "optional",
+                "inner": {
+                  "type": "object",
+                  "shape": {
+                    "list": {
+                      "type": "optional",
+                      "inner": {
+                        "type": "assert_object"
+                      }
+                    },
+                    "cancel": {
+                      "type": "optional",
+                      "inner": {
+                        "type": "assert_object"
+                      }
+                    },
+                    "requests": {
+                      "type": "optional",
+                      "inner": {
+                        "type": "object",
+                        "shape": {
+                          "sampling": {
+                            "type": "optional",
+                            "inner": {
+                              "type": "object",
+                              "shape": {
+                                "createMessage": {
+                                  "type": "optional",
+                                  "inner": {
+                                    "type": "assert_object"
+                                  }
+                                }
+                              },
+                              "strict": false
+                            }
+                          },
+                          "elicitation": {
+                            "type": "optional",
+                            "inner": {
+                              "type": "object",
+                              "shape": {
+                                "create": {
+                                  "type": "optional",
+                                  "inner": {
+                                    "type": "assert_object"
+                                  }
+                                }
+                              },
+                              "strict": false
+                            }
+                          }
+                        },
+                        "strict": false
+                      }
+                    }
+                  },
+                  "strict": false
+                }
+              },
+              "extensions": {
+                "type": "optional",
+                "inner": {
+                  "type": "record",
+                  "key": {
+                    "type": "string"
+                  },
+                  "value": {
+                    "type": "assert_object"
+                  }
+                }
+              }
+            }
+          },
+          "clientInfo": {
+            "type": "object",
+            "shape": {
+              "name": {
+                "type": "string"
+              },
+              "title": {
+                "type": "optional",
+                "inner": {
+                  "type": "string"
+                }
+              },
+              "icons": {
+                "type": "optional",
+                "inner": {
+                  "type": "array",
+                  "element": {
+                    "type": "object",
+                    "shape": {
+                      "src": {
+                        "type": "string"
+                      },
+                      "mimeType": {
+                        "type": "optional",
+                        "inner": {
+                          "type": "string"
+                        }
+                      },
+                      "sizes": {
+                        "type": "optional",
+                        "inner": {
+                          "type": "array",
+                          "element": {
+                            "type": "string"
+                          }
+                        }
+                      },
+                      "theme": {
+                        "type": "optional",
+                        "inner": {
+                          "type": "enum",
+                          "values": [
+                            "light",
+                            "dark"
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              "version": {
+                "type": "string"
+              },
+              "websiteUrl": {
+                "type": "optional",
+                "inner": {
+                  "type": "string"
+                }
+              },
+              "description": {
+                "type": "optional",
+                "inner": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "list": {
+    "type": "object",
+    "shape": {
+      "method": {
+        "type": "literal",
+        "values": [
+          "tools/list"
+        ]
+      },
+      "params": {
+        "type": "optional",
+        "inner": {
+          "type": "object",
+          "shape": {
+            "_meta": {
+              "type": "optional",
+              "inner": {
+                "type": "object",
+                "shape": {
+                  "progressToken": {
+                    "type": "optional",
+                    "inner": {
+                      "type": "union",
+                      "options": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "number",
+                          "checks": [
+                            {
+                              "type": "number",
+                              "check": "number_format",
+                              "abort": false,
+                              "format": "safeint"
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  },
+                  "io.modelcontextprotocol/related-task": {
+                    "type": "optional",
+                    "inner": {
+                      "type": "object",
+                      "shape": {
+                        "taskId": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  }
+                },
+                "strict": false
+              }
+            },
+            "cursor": {
+              "type": "optional",
+              "inner": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "ping": {
+    "type": "object",
+    "shape": {
+      "method": {
+        "type": "literal",
+        "values": [
+          "ping"
+        ]
+      },
+      "params": {
+        "type": "optional",
+        "inner": {
+          "type": "object",
+          "shape": {
+            "_meta": {
+              "type": "optional",
+              "inner": {
+                "type": "object",
+                "shape": {
+                  "progressToken": {
+                    "type": "optional",
+                    "inner": {
+                      "type": "union",
+                      "options": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "number",
+                          "checks": [
+                            {
+                              "type": "number",
+                              "check": "number_format",
+                              "abort": false,
+                              "format": "safeint"
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  },
+                  "io.modelcontextprotocol/related-task": {
+                    "type": "optional",
+                    "inner": {
+                      "type": "object",
+                      "shape": {
+                        "taskId": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  }
+                },
+                "strict": false
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

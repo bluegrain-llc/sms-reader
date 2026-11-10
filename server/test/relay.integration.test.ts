@@ -8,8 +8,12 @@ import { getFirestore } from 'firebase-admin/firestore';
 import { getAuth } from 'firebase-admin/auth';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-import { Relay } from '../src/relay.js';
-import { app } from '../src/http.js';
+import { Relay as TypeScriptRelay } from '../src/relay.js';
+type Relay = TypeScriptRelay;
+const rust = process.env.RELAY_BACKEND === 'rust' ? await import('./rust-adapter.js') : undefined;
+const Relay: typeof TypeScriptRelay = rust ? rust.RustRelay as unknown as typeof TypeScriptRelay : TypeScriptRelay;
+import { app as typescriptApp } from '../src/http.js';
+const app: typeof typescriptApp = rust ? rust.rustApp as unknown as typeof typescriptApp : typescriptApp;
 import { snapshotMetadata, applyDenials, type Snapshot } from '../src/recovery.js';
 import type { RecoveryObjects } from '../src/security-ledger.js';
 import { hash, MINUTE, RelayError } from '../src/model.js';
@@ -480,7 +484,8 @@ integration('SMS helper readiness and timeout are independent of the form deadli
 });
 integration('transactional outbox leases tolerate duplicate workers, failures and a lost wakeup', async () => {
   await allowForms();
-  const { Forms } = await import('../src/forms.js');
+  const { Forms: TypeScriptForms } = await import('../src/forms.js');
+  const Forms = rust ? rust.RustForms as unknown as typeof TypeScriptForms : TypeScriptForms;
   let callbacks: { id: string; type: string }[] = [], fail = true;
   const forms = new Forms(relay, async () => { throw Error('tasks temporarily down'); }, async (_url, _secret, event) => {
     callbacks.push(event as { id: string; type: string }); if (fail) { fail = false; throw Error('timeout'); }
@@ -542,6 +547,14 @@ integration('v2 REST, MCP, and SSE authenticate, replay from durable storage and
       body: JSON.stringify({ submissionId: 'wizard-via-rest', action: 'approve', values: { travel: false } }) })).status, 200);
     const wizardResult = await client.callTool({ name: 'get_request_result', arguments: { requestId: w.requestId } });
     assert.deepEqual(JSON.parse((wizardResult.content as { text: string }[])[0]!.text).result.values, { travel: false });
+    const tool = async (name: string, args: Record<string, unknown>) => {
+      const response = await client.callTool({ name, arguments: args }); assert.equal(response.isError, undefined);
+      return JSON.parse((response.content as { text: string }[])[0]!.text);
+    };
+    const pending = await tool('create_request', formInput('mcp-cancel-form'));
+    assert.equal((await tool('inspect_request', { requestId: pending.requestId })).status, 'pending');
+    assert.ok((await tool('poll_request_events', {})).events.some((event: { requestId: string }) => event.requestId === pending.requestId));
+    assert.equal((await tool('cancel_request', { requestId: pending.requestId })).status, 'cancelled');
     assert.equal((await fetch(base + '/internal/delivery', { method: 'POST', headers })).status, 401);
   } finally { await client.close(); await Promise.all([server, secondServer].map(s => new Promise<void>(resolve => s ? s.close(() => resolve()) : resolve()))); }
 });
@@ -674,11 +687,12 @@ integration('wizard cancellation, expiry and connection isolation preserve one t
   assert.equal((await db.collection('formResults').get()).size, 0);
 });
 
-integration('shared grant watches deliver event tails and close on account deletion', async () => {
+integration('TypeScript shared grant watches deliver event tails and close on account deletion', async () => {
+  const relay = new TypeScriptRelay(db, async () => {}, () => time);
   const { EventStreams } = await import('../src/event-streams.js');
   await relay.forms.approve(uid, grantId, true);
   const streams = new EventStreams(relay.forms), changed: number[] = [], closed: number[] = [];
-  let a: Awaited<ReturnType<EventStreams['subscribe']>> | undefined, b: typeof a;
+  let a: Awaited<ReturnType<InstanceType<typeof EventStreams>['subscribe']>> | undefined, b: typeof a;
   try {
     a = await streams.subscribe(token, { changed: () => changed.push(1), closed: () => closed.push(1) });
     b = await streams.subscribe(token, { changed: () => changed.push(2), closed: () => closed.push(2) });
@@ -693,7 +707,7 @@ integration('shared grant watches deliver event tails and close on account delet
     a.stop();assert.equal(streams.activeFeeds,1);b.stop();assert.equal(streams.activeFeeds,0);
   } finally { a?.stop();b?.stop(); }
 });
-integration('maintenance cursors move past poison records beyond page limits and wrap for retry', async () => {
+integration('TypeScript maintenance cursors move past poison records beyond page limits and wrap for retry', async () => {
   const { MaintenancePages } = await import('../src/maintenance-pages.js');
   const collection='capacityMaintenanceFixture', pages=new MaintenancePages(db), processed=new Set<string>();
   try {
@@ -707,7 +721,7 @@ integration('maintenance cursors move past poison records beyond page limits and
     assert.equal(processed.size,501);
   } finally { await db.recursiveDelete(db.collection(collection));await db.collection('maintenancePages').doc('capacity-fixture').delete(); }
 });
-integration('expired cleanup batches 400 unchanged records without per-document read transactions', { timeout: 30000 }, async () => {
+integration('TypeScript expired cleanup batches 400 unchanged records without per-document read transactions', { timeout: 30000 }, async () => {
   const { MaintenancePages } = await import('../src/maintenance-pages.js');
   const collection = 'capacityPurgeFixture', seed = db.batch();
   for (let i = 0; i < 400; i++) seed.set(db.collection(collection).doc(String(i)), { purgeAt: new Date(time - 1) });
@@ -730,7 +744,7 @@ integration('expired cleanup batches 400 unchanged records without per-document 
     await db.recursiveDelete(db.collection(collection)); await db.collection('maintenancePages').doc(`purge-${collection}`).delete();
   }
 });
-integration('conditional purge preserves a concurrently renewed record and cleans unaffected records', { timeout: 15000 }, async () => {
+integration('TypeScript conditional purge preserves a concurrently renewed record and cleans unaffected records', { timeout: 15000 }, async () => {
   const { MaintenancePages } = await import('../src/maintenance-pages.js');
   const collection = 'capacityRenewalFixture', renewed = db.collection(collection).doc('renewed');
   const seed = db.batch();
@@ -978,7 +992,7 @@ integration('legacy deletion attempts migrate atomically, resume identity retrie
   assert.equal((await db.collection('deletionJobs').doc(hash(uid)).get()).data()?.backlogAt, time - 10 * MINUTE);
   let fail = true;
   await relay.deletions.dispatch(async () => { if (fail) throw Error('identity unavailable'); });
-  let rows: { kind?: string; count?: number }[] = [];
+  let rows: { event?: string; kind?: string; count?: number }[] = [];
   await new Telemetry(row => rows.push(row), () => time + MINUTE).backlogs(db);
   assert.equal(rows.find(row => row.kind === 'legacy_deletion')?.count, 0);
   assert.equal(rows.find(row => row.kind === 'deletion')?.count, 1);
@@ -1038,7 +1052,7 @@ integration('HEAD and batched MCP reads consume shared owner and caller budgets'
   } finally { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); }
 });
 
-integration('stream admission keeps its committed deadline and slow event reads cannot hold responses open', { timeout: 15000 }, async t => {
+integration('TypeScript stream admission keeps its committed deadline and slow event reads cannot hold responses open', { timeout: 15000 }, async t => {
   const delayed = Object.create(db) as typeof db;
   delayed.runTransaction = (async (fn: Parameters<typeof db.runTransaction>[0]) => {
     const result = await db.runTransaction(fn); time += 20000; return result;
@@ -1046,6 +1060,7 @@ integration('stream admission keeps its committed deadline and slow event reads 
   const release = await new Access(delayed, () => time).stream(uid, grantId, 100000);
   assert.equal(release.deadline - time, 80000);
   await release();
+  relay = new TypeScriptRelay(db, async () => {}, () => time);
   await relay.forms.approve(uid, grantId, true);
   // A full retained page forces a durable replay read even with shared watches.
   const replay = db.batch();
@@ -1064,7 +1079,7 @@ integration('stream admission keeps its committed deadline and slow event reads 
   const events = relay.forms.events.bind(relay.forms); let reads = 0, unblock: (() => void) | undefined;
   const pending = new Promise<void>(resolve => { unblock = resolve; });
   relay.forms.events = async (...args) => { if (++reads > 1) { await pending; return { events: [], cursor: null }; } return events(...args); };
-  const server = app(relay, { sseDurationMs: 1500, verifyOwner: async () => ({ uid, authTime: time / 1000 }), verifyScheduler: async () => {}, deleteIdentity: async () => {} }).listen(0, '127.0.0.1');
+  const server = typescriptApp(relay, { sseDurationMs: 1500, verifyOwner: async () => ({ uid, authTime: time / 1000 }), verifyScheduler: async () => {}, deleteIdentity: async () => {} }).listen(0, '127.0.0.1');
   try {
     await new Promise<void>(resolve => server.once('listening', resolve));
     const response = await fetch(`http://127.0.0.1:${(server.address() as { port: number }).port}/v2/events/stream`, { headers: { authorization: `Bearer ${token}` }, signal: AbortSignal.any([t.signal, AbortSignal.timeout(5000)]) });
@@ -1083,17 +1098,17 @@ integration('stream admission keeps its committed deadline and slow event reads 
   } finally { unblock?.(); relay.forms.events = events; relay.access.stream = stream; server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); }
 });
 
-integration('deletion failures remain observable and retain backlog age across retries', { timeout: 30000 }, async () => {
+integration('TypeScript deletion failures remain observable and retain backlog age across retries', { timeout: 30000 }, async () => {
   const rows: Parameters<typeof telemetry.emit>[0][] = [], emit = telemetry.emit;
   telemetry.emit = row => { rows.push(row); };
   try {
-    const worker = new Relay(db, async () => {}, () => time, async () => { throw { code: 'unavailable' }; });
+    const worker = new TypeScriptRelay(db, async () => {}, () => time, async () => { throw { code: 'unavailable' }; });
     await worker.deletions.request(uid);
     assert.equal(rows.filter(row => row.event === 'wakeup_failed').length, 1);
     time += 6 * MINUTE;
     for (let attempt = 0; attempt < 2; attempt++) {
       await worker.deletions.dispatch(async () => { throw { code: 'permission-denied' }; });
-      const snapshots: { kind?: string; count?: number; oldest_due_age_s?: number }[] = [];
+      const snapshots: { event?: string; kind?: string; count?: number; oldest_due_age_s?: number }[] = [];
       await new Telemetry(row => snapshots.push(row), () => time).backlogs(db);
       const backlog = snapshots.find(row => row.kind === 'deletion'); assert.equal(backlog?.count, 1); assert.ok(backlog!.oldest_due_age_s! >= 360);
       time += MINUTE;
@@ -1145,14 +1160,17 @@ integration('repeated deletion adopts the original legacy acceptance age without
 });
 
 
-integration('large valid form deletion shrinks failed transaction pages until cleanup completes', { timeout: 60000 }, async () => {
-  await relay.forms.approve(uid, grantId, true);
+integration('TypeScript deletion shrinks failed transaction pages for large valid form records', { timeout: 60000 }, async () => {
+  // The failure injector below wraps the TypeScript Firestore transaction.
+  // Prepare its large fixture with that runtime under either backend selection.
+  const fixture = new TypeScriptRelay(db, async () => {}, () => time);
+  await fixture.forms.approve(uid, grantId, true);
   const definition = { ...formInput('large-delete-first'), fields: Array.from({ length: 30 }, (_, i) => ({ id: `field${i}`, label: 'Choose', type: 'single_choice' as const,
     options: Array.from({ length: 40 }, (_, j) => ({ id: `option${j}`, label: 'x'.repeat(160) })) })) };
   assert.ok(Buffer.byteLength(JSON.stringify(definition)) < 256 * 1024);
-  const secondCaller = await relay.createGrant(uid, did, 'Second large-form caller', 30);
-  await relay.forms.approve(uid, secondCaller.grantId, true);
-  for (let i = 0; i < 60; i++) await relay.forms.create(i < 30 ? token : secondCaller.token, { ...definition, idempotencyKey: `large-delete-${i}` });
+  const secondCaller = await fixture.createGrant(uid, did, 'Second large-form caller', 30);
+  await fixture.forms.approve(uid, secondCaller.grantId, true);
+  for (let i = 0; i < 60; i++) await fixture.forms.create(i < 30 ? token : secondCaller.token, { ...definition, idempotencyKey: `large-delete-${i}` });
   const records = await db.collection('formRequests').where('ownerId', '==', uid).get();
   assert.equal(records.size, 60);
   const sizes = new Map(records.docs.map(doc => [doc.ref.path, Buffer.byteLength(JSON.stringify(doc.data()))]));

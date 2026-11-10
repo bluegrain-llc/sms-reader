@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Deploy an already tested image, smoke a tagged revision, and promote safely."""
+"""Stage a tested image, verify its tagged revision, and optionally promote it."""
 import datetime
 import json
 import os
@@ -37,6 +37,10 @@ def config(env):
     c.update(REGION=env.get('REGION', 'us-central1'), SERVICE=env.get('SERVICE', 'sms-code-relay'), CERTS=list(dict.fromkeys(f.upper() for f in certs)))
     if not all(re.fullmatch(r'[a-z][a-z0-9-]*', c[k]) for k in ['REGION', 'SERVICE']):
         raise ValueError('Invalid region or service')
+    c['BACKEND'] = env.get('BACKEND', 'typescript')
+    c['TRAFFIC_MODE'] = env.get('TRAFFIC_MODE', 'stage' if c['BACKEND'] == 'rust' else 'live')
+    if c['BACKEND'] not in ('typescript', 'rust') or c['TRAFFIC_MODE'] not in ('stage', 'live'):
+        raise ValueError('Invalid backend or traffic mode')
     c['MANIFEST'] = env.get('DEPLOYMENT_MANIFEST_PATH', 'artifacts/deployment.json')
     c['HOLD'] = int(env.get('PROMOTION_HOLD_SECONDS', '60'))
     if c['HOLD'] < 60:
@@ -47,7 +51,7 @@ def config(env):
 def deploy(c):
     project, region, service = c['PROJECT_ID'], c['REGION'], c['SERVICE']
     scope = ['--project', project, '--region', region]
-    manifest = {'projectId': project, 'region': region, 'service': service, 'image': c['IMAGE_URI'], 'commit': c['COMMIT_SHA'], 'status': 'preflight'}
+    manifest = {'projectId': project, 'region': region, 'service': service, 'image': c['IMAGE_URI'], 'commit': c['COMMIT_SHA'], 'status': 'preflight', 'backend': c['BACKEND'], 'trafficMode': c['TRAFFIC_MODE']}
     target = Path(c['MANIFEST'])
     target.parent.mkdir(parents=True, exist_ok=True)
 
@@ -117,6 +121,9 @@ def deploy(c):
         def smoke():
             subprocess.run(['node', 'scripts/release-smoke.mjs'], env=smoke_env, check=True)
         smoke()
+        if c['TRAFFIC_MODE'] == 'stage':
+            save('staged')
+            return manifest
         for percent in (5, 25, 100):
             allocation = {rev: p * (100 - percent) // 100 for rev, p in traffic.items()}
             # Preserve exact total with rounding allocated to the first previous revision.

@@ -1,0 +1,38 @@
+[package]
+name = "sms-code-relay"
+version = "0.6.0"
+edition = "2024"
+rust-version = "1.98"
+
+[dependencies]
+async-compression = { version = "0.4", features = ["tokio", "gzip", "zlib", "brotli"] }
+axum = "0.8.6"
+base64 = "0.22"
+chrono = { version = "0.4", features = ["serde"] }
+firestore = "=0.65.4"
+futures = "0.3"
+gcp_auth = "0.12.7"
+hmac = "0.12"
+http-body = "1"
+ipnet = "2"
+jsonschema = { version = "0.61", default-features = false }
+jsonwebtoken = { version = "11.1", default-features = false, features = ["aws_lc_rs"] }
+rand = "0.9"
+regex = "1"
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
+rmcp = { version = "=3.9.0", features = ["transport-streamable-http-server"] }
+ryu-js = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order", "arbitrary_precision", "raw_value"] }
+sha2 = "0.10"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
+tokio-util = { version = "0.7", features = ["io"] }
+tower = { version = "0.5", features = ["util"] }
+url = "2"
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+http-body-util = "0.1"
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "json"] }
