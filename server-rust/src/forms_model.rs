@@ -282,6 +282,29 @@ pub fn definition(mut v: Value) -> Result<Value> {
     }
     Ok(v)
 }
+fn answer_value<'a>(values: &'a Value, key: &str) -> Option<&'a Value> {
+    values.get(key).or_else(|| {
+        // Legacy values are ordinary JS objects: omitted prototype names resolve
+        // to a non-primitive value. It cannot match a condition or a field type.
+        static INHERITED: OnceLock<Value> = OnceLock::new();
+        matches!(
+            key,
+            "constructor"
+                | "__defineGetter__"
+                | "__defineSetter__"
+                | "hasOwnProperty"
+                | "__lookupGetter__"
+                | "__lookupSetter__"
+                | "isPrototypeOf"
+                | "propertyIsEnumerable"
+                | "toString"
+                | "valueOf"
+                | "__proto__"
+                | "toLocaleString"
+        )
+        .then(|| INHERITED.get_or_init(|| json!({})))
+    })
+}
 pub fn visible_fields(def: &Value, values: &Value) -> Vec<Value> {
     let Some(steps) = def["steps"].as_array() else {
         return arr(def, "fields");
@@ -297,15 +320,13 @@ pub fn visible_fields(def: &Value, values: &Value) -> Vec<Value> {
                 .into_iter()
                 .find(|f| text(f, "id") == fid)
                 .unwrap();
-            let value =
-                values
-                    .get(fid)
-                    .cloned()
-                    .unwrap_or(if text(&source, "type") == "checkbox" {
-                        json!(false)
-                    } else {
-                        Value::Null
-                    });
+            let value = answer_value(values, fid).cloned().unwrap_or(
+                if text(&source, "type") == "checkbox" {
+                    json!(false)
+                } else {
+                    Value::Null
+                },
+            );
             if c.get("equals").is_some() {
                 if !js_equal(&value, &c["equals"]) {
                     continue;
@@ -357,7 +378,7 @@ pub fn validate_submission(def: &Value, input: &Value) -> Result<&'static str> {
         "hidden_field",
     )?;
     for f in fields {
-        let v = values.get(text(&f, "id"));
+        let v = answer_value(&input["values"], text(&f, "id"));
         let missing =
             v.is_none_or(|v| v.as_str() == Some("") || v.as_array().is_some_and(Vec::is_empty));
         ensure(!flag(&f, "required") || !missing, 400, "required_field")?;

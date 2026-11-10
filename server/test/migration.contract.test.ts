@@ -80,6 +80,12 @@ for (const direction of ['typescript-to-rust', 'rust-to-typescript']) {
     const accepted = await writer.forms.submit(uid, did, empty.requestId, submission);
     assert.deepEqual(JSON.parse(JSON.stringify(await reader.forms.submit(uid, did, empty.requestId, submission))), JSON.parse(JSON.stringify(accepted)));
     assert.deepEqual((await reader.forms.result(token, empty.requestId)).result?.values, {});
+    for (const fieldId of ['constructor', 'toString', '__proto__']) {
+      const prototype = await writer.forms.create(token, { title: 'Prototype field', body: 'Body', fields: [{ id: fieldId, type: 'text', label: 'Name' }], actions: [{ id: 'submit', label: 'Send', type: 'submit' }], idempotencyKey: `cross-prototype-${fieldId}` });
+      for (const backend of [writer, reader]) await assert.rejects(backend.forms.submit(uid, did, prototype.requestId, { submissionId: 'missing-prototype', action: 'submit', values: {} }), /invalid_text/);
+      assert.equal((await reader.forms.get({ secret: token }, prototype.requestId)).status, 'pending');
+      await writer.forms.cancel(token, prototype.requestId);
+    }
     await writer.forms.registerWebhook(token, { url: 'https://8.8.8.8/#', events: ['request.created'] });
     assert.equal((await reader.forms.webhooks(token))[0]!.url, 'https://8.8.8.8/#');
   });
@@ -146,6 +152,7 @@ test('HTTP errors, body bounds, auth ordering, headers and protocol negotiation 
     };
     for (const [body, headers] of [
       ...['resources/list', 'prompts/list', 'resources/templates/list', 'resources/read', 'tasks/list', 'unknown'].map(method => [JSON.stringify({ jsonrpc: '2.0', id: 1, method }), {}]),
+      ['{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"create_request","arguments":{"title":"Test","body":"Body","idempotencyKey":"numeric-errors","actions":[{"id":"send","label":"Send","type":"submit","2":0,"1":0}]}}}', {}],
       [JSON.stringify([list(1), list(2)]), {}], [JSON.stringify([list(1)]), {}], ['[]', {}],
       [JSON.stringify(list(-1)), {}], [JSON.stringify(list(1)), { 'mcp-protocol-version': '2024-10-07' }],
       [JSON.stringify(list(1)), { 'mcp-protocol-version': 'unsupported' }],

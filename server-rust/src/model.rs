@@ -25,7 +25,12 @@ pub fn num(v: &Value, k: &str) -> i64 {
         .or_else(|| v[k].as_f64().filter(|n| n.fract() == 0.0).map(|n| n as i64))
         .unwrap_or(0)
 }
-// JSON.parse represents every number as IEEE-754, including integer tokens.
+fn array_index(k: &str) -> Option<u32> {
+    k.parse::<u32>()
+        .ok()
+        .filter(|n| *n < u32::MAX && n.to_string() == k)
+}
+// JSON.parse uses IEEE-754 numbers and enumerates array-index keys numerically.
 pub fn js_numbers(value: &mut Value) {
     match value {
         Value::Number(n) => {
@@ -40,7 +45,17 @@ pub fn js_numbers(value: &mut Value) {
             }
         }
         Value::Array(a) => a.iter_mut().for_each(js_numbers),
-        Value::Object(m) => m.values_mut().for_each(js_numbers),
+        Value::Object(m) => {
+            let mut entries = std::mem::take(m).into_iter().collect::<Vec<_>>();
+            entries.sort_by_key(|(k, _)| array_index(k).map(|n| (0, n)).unwrap_or((1, 0)));
+            *m = entries
+                .into_iter()
+                .map(|(k, mut v)| {
+                    js_numbers(&mut v);
+                    (k, v)
+                })
+                .collect();
+        }
         _ => {}
     }
 }
@@ -178,16 +193,11 @@ pub fn js_json(v: &Value, canonical: bool) -> String {
                 .join(",")
         ),
         Value::Object(m) => {
-            let index = |k: &str| {
-                k.parse::<u32>()
-                    .ok()
-                    .filter(|n| *n < u32::MAX && n.to_string() == k)
-            };
             let mut keys = m.keys().collect::<Vec<_>>();
             if canonical {
                 keys.sort_by_key(|a| crate::js_string::units(a));
             }
-            keys.sort_by_key(|k| index(k).map(|n| (0, n)).unwrap_or((1, 0)));
+            keys.sort_by_key(|k| array_index(k).map(|n| (0, n)).unwrap_or((1, 0)));
             format!(
                 "{{{}}}",
                 keys.iter()
