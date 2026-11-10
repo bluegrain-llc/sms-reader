@@ -4,7 +4,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-import { cloud, config, ownerClaims, preflight, privateValue, report, request, requireThat, scenarios, writeReport } from './core.mjs';
+import { callbackReceipts, checkedScenario, cloud, config, fixtureCredentials, ownerClaims, preflight, preserveExpiryFixture, privateValue, report, request, requireThat, scenarios, winnerAgreement, writeReport } from './core.mjs';
 
 const args = process.argv.slice(2);
 const option = name => { const i = args.indexOf(name); return i < 0 ? undefined : args[i + 1]; };
@@ -16,19 +16,15 @@ let cfg;
 try { cfg = config(JSON.parse(await readFile(configPath, 'utf8'))); }
 catch { console.error('Acceptance configuration rejected.'); process.exit(1); }
 if (args.includes('--plan')) {
-  console.log(JSON.stringify({ projectId: cfg.projectId, service: cfg.service, scenarios, destructive: 'Creates fixtures and deletes the explicitly configured disposable owner account.', productionAllowed: false }));
+  console.log(JSON.stringify({ projectId: cfg.projectId, service: cfg.service, budgetUsd: cfg.budgetUsd, scenarios, destructive: 'Creates fixtures and deletes the explicitly configured disposable owner account.', productionAllowed: false }));
   process.exit(0);
 }
 const results = [], startedAt = new Date().toISOString(), runId = randomUUID();
-let context = {}, caller, otherCaller, owner, hookIds = [], collectorIds = [], createdDevices = [], apiStarted = false;
+let context = {}, caller, otherCaller, owner, credentials, hookIds = [], collectorIds = [], createdDevices = [], apiStarted = false;
 const call = (path, token, body, method, origin = cfg.serviceUrl) => request(origin, path, token, body, method);
 const ok = async (...params) => { const r = await call(...params); requireThat(r.status >= 200 && r.status < 300, 'unexpected_api_status'); return r.value; };
 const ownerToken = async () => { const value = await privateValue(cfg.ownerTokenFile); ownerClaims(value, cfg.disposableOwnerUid, cfg.projectId); return value; };
-const check = async (scenario, fn) => {
-  const begin = Date.now();
-  try { const facts = await fn(); results.push({ scenario, status: 'passed', durationMs: Date.now() - begin, ...facts }); }
-  catch { results.push({ scenario, status: 'failed', durationMs: Date.now() - begin }); throw new Error('scenario_failed'); }
-};
+const check = (scenario, fn) => checkedScenario(results, scenario, fn);
 const pending = (scenario, reason) => results.push({ scenario, status: 'pending', reason });
 async function until(fn, timeoutMs = 150_000) {
   const end = Date.now() + timeoutMs;
@@ -37,7 +33,7 @@ async function until(fn, timeoutMs = 150_000) {
 }
 async function callbackProbe(mode) {
   requireThat(cfg.callbackUrl && cfg.callbackAdminTokenFile, 'callback_receiver_required');
-  const admin = await privateValue(cfg.callbackAdminTokenFile), id = randomUUID(); collectorIds.push(id);
+  const admin = credentials.callbackAdmin, id = randomUUID(); collectorIds.push(id);
   const hook = await ok('/v2/webhooks', caller, { url: `${cfg.callbackUrl}/hooks/${id}`, events: ['request.created'] }); hookIds.push(hook.id);
   const configured = await request(cfg.callbackUrl, `/admin/${id}`, admin, { secret: hook.secret, mode });
   requireThat(configured.status === 201, 'receiver_configuration_failed');
@@ -47,9 +43,9 @@ async function callbackProbe(mode) {
       const response = await request(cfg.callbackUrl, `/admin/${id}`, admin);
       requireThat(response.status === 200, 'receiver_unavailable');
       const values = response.value.receipts.filter(r => r.requestId === form.requestId);
-      return values.some(r => r.attempt >= 2 && r.status === 204) ? values : null;
+      return values.some(r => r.attempt >= 2 && r.status === 204) && (mode !== 'timeout-once' || values.some(r => r.attempt === 1 && r.clientClosedBeforeResponse !== undefined)) ? values : null;
     });
-    requireThat(receipts[0]?.status === 503 && new Set(receipts.map(r => r.id)).size === 1, 'callback_retry_contract');
+    callbackReceipts(mode, receipts);
     return { attempts: receipts.length, verifiedPublicTls: true, verifiedSignedEvent: true };
   } finally { await ok(`/v2/requests/${form.requestId}/cancel`, caller, {}); }
 }
@@ -57,7 +53,7 @@ async function callbackProbe(mode) {
 try {
   // Complete the cloud guard before reading credentials or sending any mutating request.
   context = await preflight(cfg);
-  owner = await ownerToken();
+  credentials = await fixtureCredentials(cfg); owner = credentials.owner;
   requireThat((await ok('/v1/devices', owner)).length === 0 && (await ok('/v1/callers', owner)).length === 0, 'fresh_disposable_owner_required');
   await check('infrastructure', async () => {
     const health = await call('/health'); requireThat(health.status === 200 && health.value?.ok === true, 'health_failed');
@@ -76,11 +72,14 @@ try {
     requireThat(scheduler.httpTarget?.oidcToken?.audience === cfg.serviceUrl && scheduler.httpTarget?.uri === `${cfg.serviceUrl}/internal/maintenance`, 'scheduler_target_mismatch');
     return { readyIndexes: indexes.length, activeTtlPolicies: fields.filter(f => f.ttlConfig?.state === 'ACTIVE').length };
   });
-  apiStarted = true;
-  for (const tokenFile of cfg.fcmTokenFiles) {
-    const id = randomUUID(), fcmToken = await privateValue(tokenFile);
-    await ok(`/v1/devices/${id}`, owner, { name: 'Cloud acceptance fixture', fcmToken, wizardVersion: 1 }, 'PUT'); createdDevices.push(id);
-  }
+  await check('device-setup', async () => {
+    apiStarted = true;
+    for (const fcmToken of credentials.phones) {
+      const id = randomUUID();
+      await ok(`/v1/devices/${id}`, owner, { name: 'Cloud acceptance fixture', fcmToken, wizardVersion: 1 }, 'PUT'); createdDevices.push(id);
+    }
+    return { registeredDevices: createdDevices.length };
+  });
   await check('pairing', async () => {
     const connection = await ok('/v1/connections', undefined, { callerName: 'Staging acceptance', purpose: 'Disposable cloud verification fixture.', expiresInDays: 1 });
     caller = connection.connectionToken;
@@ -115,9 +114,11 @@ try {
     await ok(`/v1/devices/${createdDevices[0]}/requests/${r.requestId}/events`, owner, { status: 'completed', source: 'manual', code });
     requireThat((await ok(`/v1/requests/${r.requestId}`, caller)).code === code, 'manual_result_mismatch');
     const other = await ok(`/v1/devices/${createdDevices[1]}/requests/${r.requestId}`, owner); requireThat(!('code' in other), 'code_leaked_to_phone');
+    const proveRetained = await preserveExpiryFixture(cfg, r.requestId);
     await delay(121_000);
+    await proveRetained();
     requireThat(!(await ok(`/v1/requests/${r.requestId}`, caller)).code, 'result_expiry_failed');
-    return { source: 'synthetic_manual_api', physicalConsentProven: false, expiryWaitMs: 121000 };
+    return { source: 'synthetic_manual_api', physicalConsentProven: false, expiryWaitMs: 121000, expiredResultRetainedBeforeApiRead: true };
   });
   await check('forms-wizard', async () => {
     const definition = { title: 'Synthetic wizard', body: 'Synthetic cloud acceptance.', idempotencyKey: randomUUID(), fields: [{ id: 'enabled', type: 'checkbox' }, { id: 'note', type: 'text', required: true }].map(f => ({ ...f, label: f.id })), steps: [{ id: 'start', title: 'Start', fieldIds: ['enabled'] }, { id: 'branch', title: 'Branch', fieldIds: ['note'], when: { fieldId: 'enabled', equals: true } }], actions: [{ id: 'submit', label: 'Submit', type: 'submit' }] };
@@ -128,8 +129,17 @@ try {
       return new Set(page.events.filter(e => e.requestId === form.requestId && e.type === 'notification.accepted').map(e => e.deviceId)).size === 2;
     });
     const wrong = await call(`/v2/devices/${createdDevices[0]}/requests/${form.requestId}/submissions`, owner, { submissionId: randomUUID(), action: 'submit', values: { enabled: false, note: 'hidden' } }); requireThat(wrong.status === 400, 'hidden_branch_accepted');
-    await Promise.all(createdDevices.map((id, i) => ok(`/v2/devices/${id}/requests/${form.requestId}/submissions`, owner, { submissionId: randomUUID(), action: 'submit', values: { enabled: true, note: `synthetic-${i}` } })));
+    const uploads = createdDevices.map((id, i) => ({ id, body: { submissionId: randomUUID(), action: 'submit', values: { enabled: true, note: `synthetic-${i}` } } }));
+    const submit = upload => ok(`/v2/devices/${upload.id}/requests/${form.requestId}/submissions`, owner, upload.body);
+    const responses = await Promise.all(uploads.map(submit));
+    const winningDevice = winnerAgreement(responses, createdDevices);
     const result = await ok(`/v2/requests/${form.requestId}/result`, caller); requireThat(['synthetic-0', 'synthetic-1'].includes(result.result?.values?.note), 'wizard_winner_invalid');
+    const winner = uploads.find(u => u.id === winningDevice), loser = uploads.find(u => u.id !== winningDevice);
+    requireThat(result.result.values.note === winner.body.values.note, 'wizard_winner_value_mismatch');
+    winnerAgreement([await submit(loser), await submit(winner)], [winningDevice]);
+    requireThat(JSON.stringify((await ok(`/v2/requests/${form.requestId}/result`, caller)).result) === JSON.stringify(result.result), 'wizard_result_overwritten');
+    const terminalEvents = (await ok('/v2/events', caller)).events.filter(e => e.requestId === form.requestId && e.type === 'request.submitted');
+    requireThat(terminalEvents.length === 1, 'duplicate_terminal_submission');
     return { competingPhones: 2, acceptedResults: 1, fcmAcceptedDevices: 2, phoneDisplayProven: false };
   });
   await check('events-replay', async () => {
@@ -151,7 +161,13 @@ try {
     await check('webhook-timeout', () => callbackProbe('timeout-once'));
   } else { pending('webhook-tls-retry', 'public_receiver_required'); pending('webhook-timeout', 'public_receiver_required'); }
   for (const name of ['enqueue-recovery', 'worker-recovery', 'duplicate-delivery', 'provider-outage', 'storage-outage']) pending(name, 'operator_fault_drill_required');
-} catch { /* Never print arbitrary provider errors, responses, tokens or submitted values. */ }
+} catch {
+  // Never print arbitrary provider errors, responses, tokens or submitted values.
+  if (!results.some(r => r.status === 'failed')) {
+    const previous = results.find(r => r.scenario === 'infrastructure');
+    if (previous) previous.status = 'failed'; else results.push({ scenario: 'infrastructure', status: 'failed' });
+  }
+}
 finally {
   if (!results.some(r => r.scenario === 'infrastructure')) results.push({ scenario: 'infrastructure', status: 'failed' });
   let cleaned = !apiStarted;
@@ -172,7 +188,7 @@ finally {
     } catch { if (!results.some(r => r.scenario === 'deletion')) results.push({ scenario: 'deletion', status: 'failed' }); }
   }
   for (const name of scenarios) if (!results.some(r => r.scenario === name)) pending(name, 'prerequisite_not_completed');
-  const evidence = report(results, { runId, projectId: cfg.projectId, ...context, startedAt, finishedAt: new Date().toISOString(), cleanupComplete: cleaned });
+  const evidence = report(results, { runId, projectId: cfg.projectId, budgetUsd: cfg.budgetUsd, ...context, startedAt, finishedAt: new Date().toISOString(), cleanupComplete: cleaned });
   try { await writeReport(evidencePath, evidence); }
   catch { console.error('Evidence write failed; use a new private output path.'); process.exitCode = 1; }
   console.log(JSON.stringify({ complete: evidence.complete, passed: results.filter(r => r.status === 'passed').length, failed: results.filter(r => r.status === 'failed').length, pending: results.filter(r => r.status === 'pending').length, cleanupComplete: cleaned }));

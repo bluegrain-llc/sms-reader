@@ -4,7 +4,8 @@ import { createHmac } from 'node:crypto';
 import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { config, eventMetadata, httpsOrigin, ownerClaims, preflight, privateValue, report, scenarios, verifySignature, writeReport } from './core.mjs';
+import { EventEmitter } from 'node:events';
+import { callbackOutcome, callbackReceipts, checkedScenario, clientDisconnectedBeforeResponse, config, eventMetadata, expiryFixtureState, fixtureCredentials, httpsOrigin, ownerClaims, preflight, privateValue, report, scenarios, verifySignature, winnerAgreement, writeReport } from './core.mjs';
 
 const base = { projectId: 'relay-staging-123', productionProjectId: 'relay-production-123', account: 'operator@example.com', region: 'us-central1', service: 'relay-service', serviceUrl: 'https://relay.run.app', ownerTokenFile: '/private/owner', disposableOwnerUid: 'disposable', fcmTokenFiles: ['/private/one', '/private/two'], budgetUsd: 10 };
 test('destructive staging guard rejects production, implicit account, unsafe URLs and missing budget', () => {
@@ -45,6 +46,45 @@ test('callback verification binds exact body and timestamp and refuses stale or 
   assert.equal(verifySignature(secret, timestamp, body, 'v1=bad', now), false);
   assert.equal(verifySignature(secret, 'NaN', body, signature, now), false);
 });
+test('timeout evidence requires an observed client abort, not delayed rejection or success', async () => {
+  assert.deepEqual(callbackOutcome('timeout-once', 1), { status: 204, timeout: true });
+  assert.deepEqual(callbackOutcome('fail-once', 1), { status: 503, timeout: false });
+  const first = { id: 'same-event', attempt: 1, status: 204, clientClosedBeforeResponse: true }, retry = { id: 'same-event', attempt: 2, status: 204 };
+  callbackReceipts('timeout-once', [first, retry]);
+  assert.throws(() => callbackReceipts('timeout-once', [{ ...first, status: 503 }, retry]));
+  assert.throws(() => callbackReceipts('timeout-once', [{ ...first, clientClosedBeforeResponse: false }, retry]));
+  assert.throws(() => callbackReceipts('timeout-once', [first]));
+  const closed = new EventEmitter(); closed.writableFinished = false;
+  const observed = clientDisconnectedBeforeResponse(closed, 1000); closed.emit('close');
+  assert.equal(await observed, true); assert.equal(closed.listenerCount('close'), 0);
+  const finished = new EventEmitter(); finished.writableFinished = true;
+  const successful = clientDisconnectedBeforeResponse(finished, 1000); finished.emit('close');
+  assert.equal(await successful, false);
+  assert.equal(await clientDisconnectedBeforeResponse(new EventEmitter(), 1), false);
+});
+test('winner evidence rejects last-writer-wins responses and missing winner identity', () => {
+  const first = { status: 'submitted', completedByDeviceId: 'phone-one' };
+  assert.equal(winnerAgreement([first, first], ['phone-one', 'phone-two']), 'phone-one');
+  assert.throws(() => winnerAgreement([first, { ...first, completedByDeviceId: 'phone-two' }], ['phone-one', 'phone-two']));
+  assert.throws(() => winnerAgreement([{ status: 'submitted' }], ['phone-one', 'phone-two']));
+  assert.throws(() => winnerAgreement([{ ...first, status: 'pending' }], ['phone-one', 'phone-two']));
+});
+test('expiry evidence requires an owned, still-retained document beyond API expiry', () => {
+  const now = 1800000000000, cfg = { disposableOwnerUid: 'test-owner' };
+  const doc = { fields: { ownerId: { stringValue: cfg.disposableOwnerUid }, expiresAt: { integerValue: String(now - 1000) }, purgeAt: { timestampValue: new Date(now + 1200000).toISOString() } } };
+  expiryFixtureState(doc, cfg, true, now);
+  assert.throws(() => expiryFixtureState({}, cfg, true, now));
+  assert.throws(() => expiryFixtureState(doc, { disposableOwnerUid: 'other-owner' }, true, now));
+  assert.throws(() => expiryFixtureState(doc, cfg, false, now));
+  const purged = structuredClone(doc); purged.fields.purgeAt.timestampValue = new Date(now - 1).toISOString();
+  assert.throws(() => expiryFixtureState(purged, cfg, true, now));
+});
+test('device setup exceptions are failed scenarios, never merely pending acceptance', async () => {
+  const results = [];
+  await assert.rejects(checkedScenario(results, 'device-setup', async () => { throw new Error('provider body must stay private'); }), /scenario_failed/);
+  assert.equal(results[0].status, 'failed');
+  assert.equal(JSON.stringify(report(results, {})).includes('provider body'), false);
+});
 test('callback evidence refuses answers, owner IDs and arbitrary payload keys', () => {
   const event = { id: 'event', type: 'request.created', sequence: 1, requestId: 'request', at: 1800000000000 };
   assert.deepEqual(eventMetadata(event), { id: 'event', type: 'request.created', sequence: 1, requestId: 'request' });
@@ -68,5 +108,26 @@ test('credentials require private permissions and evidence is exclusive and priv
     await writeReport(evidence, { complete: false });
     await assert.rejects(writeReport(evidence, { complete: true }));
     assert.equal(JSON.parse(await readFile(evidence, 'utf8')).complete, false);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+test('all fixture credentials fail validation before callers can begin setup mutations', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'relay-credential-preflight-'));
+  try {
+    const ownerFile = join(dir, 'owner'), first = join(dir, 'first'), second = join(dir, 'second'), admin = join(dir, 'admin');
+    const claims = { sub: 'disposable', aud: base.projectId, iss: `https://securetoken.google.com/${base.projectId}`, exp: Math.floor(Date.now() / 1000) + 3600, firebase: { sign_in_provider: 'google.com' } };
+    await writeFile(ownerFile, `h.${Buffer.from(JSON.stringify(claims)).toString('base64url')}.s`, { mode: 0o600 });
+    await writeFile(first, 'first-token', { mode: 0o600 });
+    const cfg = { ...base, ownerTokenFile: ownerFile, fcmTokenFiles: [first, second] };
+    let mutationStarted = false;
+    await assert.rejects(async () => { await fixtureCredentials(cfg); mutationStarted = true; });
+    assert.equal(mutationStarted, false);
+    await writeFile(second, 'second-token', { mode: 0o644 });
+    await assert.rejects(fixtureCredentials(cfg));
+    await chmod(second, 0o600);
+    const withCallback = { ...cfg, callbackUrl: 'https://receiver.run.app', callbackAdminTokenFile: admin };
+    await assert.rejects(fixtureCredentials(withCallback));
+    await writeFile(admin, 'admin-secret', { mode: 0o600 });
+    const result = await fixtureCredentials(withCallback);
+    assert.deepEqual(result.phones, ['first-token', 'second-token']); assert.equal(result.callbackAdmin, 'admin-secret');
   } finally { await rm(dir, { recursive: true, force: true }); }
 });

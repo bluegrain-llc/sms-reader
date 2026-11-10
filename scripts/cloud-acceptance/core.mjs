@@ -4,7 +4,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
 const execute = promisify(execFile);
-export const scenarios = ['infrastructure', 'pairing', 'sms-api', 'forms-wizard', 'events-replay', 'webhook-tls-retry', 'webhook-timeout', 'enqueue-recovery', 'worker-recovery', 'duplicate-delivery', 'provider-outage', 'storage-outage', 'deletion'];
+export const scenarios = ['infrastructure', 'device-setup', 'pairing', 'sms-api', 'forms-wizard', 'events-replay', 'webhook-tls-retry', 'webhook-timeout', 'enqueue-recovery', 'worker-recovery', 'duplicate-delivery', 'provider-outage', 'storage-outage', 'deletion'];
 export function requireThat(condition, code) { if (!condition) throw new Error(code); }
 export function httpsOrigin(raw) {
   const url = new URL(raw);
@@ -30,6 +30,67 @@ export async function privateValue(file) {
   requireThat(metadata.isFile() && (metadata.mode & 0o077) === 0, 'private_credential_file_required');
   const value = (await readFile(file, 'utf8')).trim();
   requireThat(value.length > 0, 'empty_credential'); return value;
+}
+export async function fixtureCredentials(cfg) {
+  const owner = await privateValue(cfg.ownerTokenFile);
+  ownerClaims(owner, cfg.disposableOwnerUid, cfg.projectId);
+  const phones = await Promise.all(cfg.fcmTokenFiles.map(privateValue));
+  const callbackAdmin = cfg.callbackUrl ? await privateValue(cfg.callbackAdminTokenFile) : undefined;
+  return { owner, phones, callbackAdmin };
+}
+export function callbackOutcome(mode, attempt) {
+  return { status: attempt === 1 && mode === 'fail-once' ? 503 : 204, timeout: attempt === 1 && mode === 'timeout-once' };
+}
+export async function clientDisconnectedBeforeResponse(response, deadlineMs = 11_000) {
+  return new Promise(resolve => {
+    const done = closed => { clearTimeout(timer); response.removeListener('close', close); resolve(closed); };
+    const close = () => done(!response.writableFinished);
+    const timer = setTimeout(() => done(false), deadlineMs);
+    response.once('close', close);
+    if (response.destroyed) close();
+  });
+}
+export function callbackReceipts(mode, receipts) {
+  const first = receipts.find(r => r.attempt === 1);
+  const retry = receipts.find(r => r.attempt >= 2 && r.status === 204);
+  requireThat(first && retry && new Set(receipts.map(r => r.id)).size === 1, 'callback_retry_contract');
+  if (mode === 'timeout-once') requireThat(first.status === 204 && first.clientClosedBeforeResponse === true, 'callback_timeout_not_observed');
+  else requireThat(first.status === 503, 'callback_rejection_not_observed');
+}
+export function winnerAgreement(responses, devices) {
+  const winner = responses[0]?.completedByDeviceId;
+  requireThat(devices.includes(winner) && responses.every(r => r.status === 'submitted' && r.completedByDeviceId === winner), 'inconsistent_submission_winners');
+  return winner;
+}
+export function expiryFixtureState(document, cfg, expired, now = Date.now()) {
+  requireThat(document.fields?.ownerId?.stringValue === cfg.disposableOwnerUid, 'expiry_fixture_owner_mismatch');
+  const expiresAt = Number(document.fields?.expiresAt?.integerValue);
+  requireThat(Number.isSafeInteger(expiresAt) && (expired ? expiresAt <= now : expiresAt > now), 'expiry_fixture_deadline_mismatch');
+  if (expired) requireThat(Date.parse(document.fields?.purgeAt?.timestampValue) > now, 'expired_result_not_retained');
+}
+export async function checkedScenario(results, scenario, fn) {
+  const begin = Date.now();
+  try { const facts = await fn(); results.push({ scenario, status: 'passed', durationMs: Date.now() - begin, ...facts }); }
+  catch { results.push({ scenario, status: 'failed', durationMs: Date.now() - begin }); throw new Error('scenario_failed'); }
+}
+export async function preserveExpiryFixture(cfg, requestId) {
+  requireThat(/^[a-f0-9]{64}$/.test(requestId), 'invalid_fixture_id');
+  const { stdout } = await execute('gcloud', ['auth', 'print-access-token', `--account=${cfg.account}`, `--project=${cfg.projectId}`, '--quiet'], { timeout: 30_000, maxBuffer: 64 * 1024 });
+  const endpoint = `https://firestore.googleapis.com/v1/projects/${cfg.projectId}/databases/(default)/documents/results/${requestId}`;
+  const token = stdout.trim();
+  const read = async () => {
+    const response = await fetch(endpoint, { headers: { authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(20_000), redirect: 'error' });
+    requireThat(response.ok, 'expiry_fixture_missing'); return response.json();
+  };
+  const before = await read();
+  expiryFixtureState(before, cfg, false);
+  const purgeAt = new Date(Date.now() + 20 * 60_000).toISOString();
+  const response = await fetch(`${endpoint}?updateMask.fieldPaths=purgeAt`, { method: 'PATCH', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, signal: AbortSignal.timeout(20_000), redirect: 'error', body: JSON.stringify({ fields: { purgeAt: { timestampValue: purgeAt } } }) });
+  requireThat(response.ok, 'expiry_fixture_ttl_extension_failed');
+  return async () => {
+    const result = await read();
+    expiryFixtureState(result, cfg, true);
+  };
 }
 export function ownerClaims(token, uid, project, now = Date.now()) {
   let claims;

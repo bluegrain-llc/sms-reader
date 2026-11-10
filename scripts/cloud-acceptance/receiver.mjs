@@ -2,7 +2,7 @@ import { createServer } from 'node:http';
 import { timingSafeEqual, createHash } from 'node:crypto';
 import { initializeApp } from 'firebase-admin/app';
 import { FieldValue, getFirestore } from 'firebase-admin/firestore';
-import { eventMetadata, verifySignature } from './core.mjs';
+import { callbackOutcome, clientDisconnectedBeforeResponse, eventMetadata, verifySignature } from './core.mjs';
 
 if (!process.env.GOOGLE_CLOUD_PROJECT || !/^[A-Za-z0-9_-]{43}$/.test(process.env.CALLBACK_ADMIN_SECRET ?? '') || !process.env.GOOGLE_CLOUD_PROJECT.match(/staging|-stg/) || process.env.FIRESTORE_EMULATOR_HOST) throw new Error('staging_receiver_configuration_required');
 initializeApp({ projectId: process.env.GOOGLE_CLOUD_PROJECT });
@@ -44,12 +44,19 @@ const server = createServer(async (req, res) => {
       if (receipts.length >= 100) return null;
       const attempt = receipts.filter(r => r.id === event.id).length + 1;
       const mode = fresh.mode;
-      const status = attempt === 1 && mode !== 'success' ? 503 : 204;
+      const { status, timeout } = callbackOutcome(mode, attempt);
       tx.update(ref, { receipts: FieldValue.arrayUnion({ ...event, attempt, status, at: Date.now() }) });
-      return { status, timeout: attempt === 1 && mode === 'timeout-once' };
+      return { status, timeout };
     });
     if (!outcome) return json(res, 410, { error: 'fixture_expired_or_full' });
-    if (outcome.timeout) await new Promise(resolve => setTimeout(resolve, 11_000));
+    if (outcome.timeout) {
+      const clientClosedBeforeResponse = await clientDisconnectedBeforeResponse(res);
+      await db.runTransaction(async tx => {
+        const latest = (await tx.get(ref)).data();
+        if (latest) tx.update(ref, { receipts: latest.receipts.map(r => r.id === event.id && r.attempt === 1 ? { ...r, clientClosedBeforeResponse } : r) });
+      });
+      if (clientClosedBeforeResponse) return;
+    }
     res.writeHead(outcome.status); res.end();
   } catch { if (!res.headersSent) json(res, 500, { error: 'probe_failed' }); }
 });

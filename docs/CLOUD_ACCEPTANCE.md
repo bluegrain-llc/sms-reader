@@ -37,7 +37,14 @@ identity with no personal records. No production project is accepted.
    These prove FCM provider acceptance, not physical display, owner recognition,
    carrier delivery or system consent. The runner creates unique installation
    IDs and submits synthetic manual values through authenticated owner APIs.
-6. Google authentication must remain fresh for deletion. Reauthenticate the same
+6. The selected cloud operator needs read/write access to the **disposable staging**
+   `results` collection. The expiry check changes only its fixture's `purgeAt` to
+   20 minutes ahead, leaving `expiresAt` unchanged. After 121 seconds it requires
+   the expired document still exists with future `purgeAt` before checking API
+   denial. A missing document fails the scenario; TTL cleanup alone cannot pass.
+   Owner deletion removes the fixture even if a check fails. Do not grant these
+   permissions to an API caller or production runtime for the test.
+7. Google authentication must remain fresh for deletion. Reauthenticate the same
    disposable owner and update its private ID-token file while long callback
    checks run. Ordinary token refresh alone does not refresh `auth_time`.
 
@@ -71,9 +78,14 @@ callback routes verify HMAC over the exact raw body, timestamp tolerance, event
 ID, and an allowlist excluding answers and owner/grant fields. Receipt counters
 are transactional and survive receiver cold starts.
 
-Two modes independently exercise a first-attempt 503 and an 11-second delay
-(longer than the relay's 10-second timeout). A retry must carry the same event ID
-and receive 204. The probe does not follow redirects or proxy caller destinations.
+Two modes independently exercise a first-attempt 503 and an 11-second response
+delay (longer than the relay's 10-second timeout). The timeout mode plans a 204,
+never a delayed rejection. It records whether the HTTP client disconnected before
+the response, and requires that observation plus a later same-event successful
+retry. A caller that waits for the delayed 204 cannot pass. If the hosting proxy
+does not propagate disconnects, this scenario fails rather than claiming timeout
+proof. Receipt `status` is the planned response; `clientClosedBeforeResponse`
+distinguishes an aborted timeout attempt. The probe does not proxy destinations.
 
 ## Running the baseline
 
@@ -90,8 +102,10 @@ node scripts/cloud-acceptance/run.mjs --config /private/staging.json \
 `--plan` validates configuration without reading credentials or contacting cloud
 services. A baseline run checks infrastructure, paired versus unapproved callers,
 authenticated MCP create/cancel, an independent valid caller's result isolation,
-synthetic manual SMS API submission and two-minute expiry, hidden wizard branch
-rejection, two-device first-winner behavior, two FCM provider acceptances,
+synthetic manual SMS API submission and two-minute expiry with a retained result
+document, hidden wizard branch rejection, consistent winner identity across both
+competing responses, losing/winning retries without overwrites, exactly one
+terminal submission event, two FCM provider acceptances,
 cross-revision Last-Event-ID replay, callback retries, and receipt-based account
 deletion. It never stores response values or callback secrets in evidence.
 
