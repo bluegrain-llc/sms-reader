@@ -68,7 +68,7 @@ fn without_lengths(v: &Value) -> Value {
 }
 fn lengths(schema: &Value, v: &Value) -> bool {
     if let Some(s) = v.as_str() {
-        let n = js_len(s) as u64;
+        let n = s.chars().count() as u64;
         if schema["minLength"].as_u64().is_some_and(|m| n < m)
             || schema["maxLength"].as_u64().is_some_and(|m| n > m)
         {

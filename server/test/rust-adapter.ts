@@ -19,6 +19,7 @@ async function init() {
         const parts: Buffer[] = []; for await (const chunk of req) parts.push(chunk);
         const { kind, args } = JSON.parse(Buffer.concat(parts).toString());
         const relay = clients.get(Number(req.url?.slice(1)))!;
+        if (kind === 'now') { res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify(relay.now())); return; }
         const fn = (kind === 'notify' ? relay.notify : kind === 'wake' ? relay.wake : kind === 'webhook' ? relay.callback
           : kind === 'owner' ? relay.options!.verifyOwner : kind === 'worker' ? relay.options!.verifyScheduler : relay.options!.deleteIdentity) as (...args: unknown[]) => Promise<unknown>;
         const value = await fn(...args as unknown[]);

@@ -1,0 +1,222 @@
+[
+  {
+    "name": "get_sms_code_request",
+    "input": {},
+    "error": "MCP error -32602: Input validation error: Invalid arguments for tool get_sms_code_request: Invalid input: expected string, received undefined at requestId"
+  },
+  {
+    "name": "get_sms_code_request",
+    "input": {
+      "requestId": 1
+    },
+    "error": "MCP error -32602: Input validation error: Invalid arguments for tool get_sms_code_request: Invalid input: expected string, received number at requestId"
+  },
+  {
+    "name": "get_sms_code_request",
+    "input": {
+      "requestId": "?"
+    },
+    "error": "MCP error -32602: Input validation error: Invalid arguments for tool get_sms_code_request: Invalid string: must match pattern /^[a-zA-Z0-9_-]{1,128}$/ at requestId"
+  },
+  {
+    "name": "get_sms_code_request",
+    "input": {
+      "requestId": "valid",
+      "extra": true
+    },
+    "value": {
+      "requestId": "valid"
+    }
+  },
+  {
+    "name": "request_sms_code",
+    "input": {
+      "purpose": "  ",
+      "idempotencyKey": "short"
+    },
+    "error": "MCP error -32602: Input validation error: Invalid arguments for tool request_sms_code: Too small: expected string to have >=1 characters at purpose\nToo small: expected string to have >=8 characters at idempotencyKey"
+  },
+  {
+    "name": "request_sms_code",
+    "input": {
+      "purpose": " Text ",
+      "idempotencyKey": "valid-key",
+      "extra": true
+    },
+    "value": {
+      "purpose": "Text",
+      "idempotencyKey": "valid-key"
+    }
+  },
+  {
+    "name": "create_request",
+    "input": {
+      "title": " Test ",
+      "body": "Body",
+      "idempotencyKey": "tool-input",
+      "actions": [
+        {
+          "id": "ok",
+          "label": " OK ",
+          "type": "submit"
+        }
+      ]
+    },
+    "value": {
+      "title": "Test",
+      "body": "Body",
+      "fields": [],
+      "actions": [
+        {
+          "id": "ok",
+          "label": "OK",
+          "type": "submit"
+        }
+      ],
+      "expiresInSeconds": 86400,
+      "idempotencyKey": "tool-input"
+    }
+  },
+  {
+    "name": "create_request",
+    "input": {
+      "title": " Test ",
+      "body": "Body",
+      "idempotencyKey": "tool-input",
+      "actions": [
+        {
+          "id": "ok",
+          "label": " OK ",
+          "type": "submit"
+        }
+      ],
+      "expiresInSeconds": 1.1
+    },
+    "error": "MCP error -32602: Input validation error: Invalid arguments for tool create_request: Invalid input: expected int, received number at expiresInSeconds"
+  },
+  {
+    "name": "create_request",
+    "input": {
+      "title": " Test ",
+      "body": "Body",
+      "idempotencyKey": "tool-input",
+      "actions": [
+        {
+          "id": "ok",
+          "label": " OK ",
+          "type": "submit"
+        }
+      ],
+      "expiresInSeconds": 100000000000000000000
+    },
+    "error": "MCP error -32602: Input validation error: Invalid arguments for tool create_request: Too big: expected int to be <=9007199254740991 at expiresInSeconds\nToo big: expected number to be <=604800 at expiresInSeconds"
+  },
+  {
+    "name": "create_request",
+    "input": {
+      "title": " Test ",
+      "body": "Body",
+      "idempotencyKey": "tool-input",
+      "actions": [
+        {
+          "id": "ok",
+          "label": " OK ",
+          "type": "submit"
+        }
+      ],
+      "expiresInSeconds": 1
+    },
+    "error": "MCP error -32602: Input validation error: Invalid arguments for tool create_request: Too small: expected number to be >=60 at expiresInSeconds"
+  },
+  {
+    "name": "create_request",
+    "input": {
+      "title": " Test ",
+      "body": "Body",
+      "idempotencyKey": "tool-input",
+      "actions": []
+    },
+    "error": "MCP error -32602: Input validation error: Invalid arguments for tool create_request: Too small: expected array to have >=1 items at actions"
+  },
+  {
+    "name": "create_request",
+    "input": {
+      "title": " Test ",
+      "body": "Body",
+      "idempotencyKey": "tool-input",
+      "actions": [
+        {
+          "id": "ok",
+          "label": " OK ",
+          "type": "submit"
+        }
+      ],
+      "fields": [
+        {
+          "type": "invalid"
+        }
+      ]
+    },
+    "error": "MCP error -32602: Input validation error: Invalid arguments for tool create_request: Invalid discriminator value. Expected 'text' | 'multiline' | 'number' | 'checkbox' | 'single_choice' | 'multiple_choice' | 'date' at fields[0].type"
+  },
+  {
+    "name": "create_request",
+    "input": {
+      "title": " Test ",
+      "body": "Body",
+      "idempotencyKey": "tool-input",
+      "actions": [
+        {
+          "id": "ok",
+          "label": " OK ",
+          "type": "submit"
+        }
+      ],
+      "fields": [
+        {
+          "id": "f",
+          "label": " F ",
+          "type": "text",
+          "extra": 1
+        }
+      ]
+    },
+    "error": "MCP error -32602: Input validation error: Invalid arguments for tool create_request: Unrecognized key: \"extra\" at fields[0]"
+  },
+  {
+    "name": "create_request",
+    "input": {
+      "title": " Test ",
+      "body": "Body",
+      "idempotencyKey": "tool-input",
+      "actions": [
+        {
+          "id": "ok",
+          "label": " OK ",
+          "type": "submit"
+        }
+      ],
+      "steps": [
+        {
+          "id": "one",
+          "title": "One",
+          "fieldIds": [],
+          "when": {
+            "fieldId": "f",
+            "equals": null
+          }
+        }
+      ]
+    },
+    "error": "MCP error -32602: Input validation error: Invalid arguments for tool create_request: Invalid input at steps[0].when\nToo small: expected array to have >=2 items at steps"
+  },
+  {
+    "name": "poll_request_events",
+    "input": {
+      "cursor": "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀"
+    },
+    "value": {
+      "cursor": "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀"
+    }
+  }
+]

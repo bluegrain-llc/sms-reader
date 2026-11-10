@@ -5,6 +5,7 @@ edition = "2024"
 rust-version = "1.98"
 
 [dependencies]
+async-compression = { version = "0.4", features = ["tokio", "gzip", "zlib", "brotli"] }
 axum = "0.8.6"
 base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
@@ -26,9 +27,11 @@ sha2 = "0.10"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
 tokio-stream = "0.1"
+tokio-util = { version = "0.7", features = ["io"] }
 tower = { version = "0.5", features = ["util"] }
 url = "2"
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 http-body-util = "0.1"
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "json"] }

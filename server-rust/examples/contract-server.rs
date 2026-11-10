@@ -236,7 +236,31 @@ async fn call(State(h): State<Host>, Json(v): Json<Value>) -> impl IntoResponse 
     }
 }
 async fn start(State(h): State<Host>, Json(v): Json<Value>) -> Json<Value> {
-    let r = relay(&h, &v);
+    let mut r = relay(&h, &v);
+    let clock_url = text(&v, "callback").to_owned();
+    // Clock reads must reach the same live injected function as direct calls,
+    // including reads made by the SSE task between HTTP requests. Blocking I/O
+    // stays on a dedicated thread in this emulator-only target.
+    r.clock = Arc::new(move || {
+        let url = clock_url.clone();
+        std::thread::spawn(move || {
+            reqwest::blocking::Client::builder()
+                .no_proxy()
+                .timeout(Duration::from_secs(10))
+                .build()
+                .unwrap()
+                .post(url)
+                .json(&json!({"kind":"now","args":[]}))
+                .send()
+                .unwrap()
+                .error_for_status()
+                .unwrap()
+                .json::<i64>()
+                .unwrap()
+        })
+        .join()
+        .unwrap()
+    });
     let o = &v["options"];
     let options = Options {
         auth: callback(&v),

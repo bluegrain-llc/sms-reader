@@ -6,13 +6,54 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { z } from 'zod';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { getParseErrorMessage } from '@modelcontextprotocol/sdk/server/zod-compat.js';
 import { app } from '../server/src/http.js';
 import type { Relay } from '../server/src/relay.js';
-import { requestSchema } from '../server/src/model.js';
+import { requestSchema, idSchema } from '../server/src/model.js';
 import { formSchema, submissionSchema, observationSchema, webhookSchema } from '../server/src/forms-model.js';
 const root = new URL('../', import.meta.url), directory = new URL('server-rust/compat/', root);
 const save = (name: string, value: unknown) => writeFileSync(new URL(name, directory), JSON.stringify(value, null, 2) + '\n');
 for (const [name, schema] of Object.entries({ form: formSchema, submission: submissionSchema, observation: observationSchema, webhook: webhookSchema, sms: requestSchema })) save(`${name}.schema.json`, z.toJSONSchema(schema));
+// Preserve the SDK's Zod preprocessing and issue order independently of REST.
+function toolParser(schema: z.ZodType): unknown {
+  const d = schema._zod.def as any;
+  const out: any = { type: d.type };
+  if (d.checks) out.checks = d.checks.filter((c: any) => c._zod.def.check !== 'custom').map((c: any) => {
+    const check = c._zod.def;
+    return JSON.parse(JSON.stringify(check, (_key, value) => value instanceof RegExp ? { source: value.source, display: String(value) } : value));
+  });
+  if (d.shape) out.shape = Object.fromEntries(Object.entries(d.shape).map(([k, s]) => [k, toolParser(s as z.ZodType)]));
+  if (d.catchall) out.strict = d.catchall._zod.def.type === 'never';
+  if (d.innerType) out.inner = toolParser(d.innerType);
+  if (d.type === 'default') out.default = d.defaultValue;
+  if (d.element) out.element = toolParser(d.element);
+  if (d.options) out.options = d.options.map(toolParser);
+  if (d.discriminator) out.discriminator = d.discriminator;
+  if (d.values) out.values = d.values;
+  if (d.entries) out.values = Object.values(d.entries);
+  return out;
+}
+const toolSchemas = { request_sms_code: z.object(requestSchema.shape), create_request: z.object(formSchema.shape),
+  get_sms_code_request: z.object({ requestId: idSchema }), cancel_sms_code_request: z.object({ requestId: idSchema }),
+  inspect_request: z.object({ requestId: idSchema }), cancel_request: z.object({ requestId: idSchema }), get_request_result: z.object({ requestId: idSchema }),
+  poll_request_events: z.object({ cursor: z.string().max(128).optional() }),
+};
+save('tool-parsers.json', Object.fromEntries(Object.entries(toolSchemas).map(([name, schema]) => [name, toolParser(schema)])));
+const basicForm = { title: ' Test ', body: 'Body', idempotencyKey: 'tool-input', actions: [{ id: 'ok', label: ' OK ', type: 'submit' }] };
+const toolCases: { name: keyof typeof toolSchemas; input: unknown }[] = [
+  ...[{}, { requestId: 1 }, { requestId: '?' }, { requestId: 'valid', extra: true }].map(input => ({ name: 'get_sms_code_request' as const, input })),
+  ...[{ purpose: '  ', idempotencyKey: 'short' }, { purpose: ' Text ', idempotencyKey: 'valid-key', extra: true }].map(input => ({ name: 'request_sms_code' as const, input })),
+  ...[basicForm, { ...basicForm, expiresInSeconds: 1.1 }, { ...basicForm, expiresInSeconds: 1e20 }, { ...basicForm, expiresInSeconds: 1 },
+    { ...basicForm, actions: [] }, { ...basicForm, fields: [{ type: 'invalid' }] },
+    { ...basicForm, fields: [{ id: 'f', label: ' F ', type: 'text', extra: 1 }] },
+    { ...basicForm, steps: [{ id: 'one', title: 'One', fieldIds: [], when: { fieldId: 'f', equals: null } }] },
+  ].map(input => ({ name: 'create_request' as const, input })),
+  { name: 'poll_request_events', input: { cursor: '😀'.repeat(65) } },
+];
+save('tool-validation.json', toolCases.map(({ name, input }) => {
+  const result = toolSchemas[name].safeParse(input);
+  return { name, input, ...(result.success ? { value: result.data } : { error: `MCP error -32602: Input validation error: Invalid arguments for tool ${name}: ${getParseErrorMessage(result.error)}` }) };
+}));
 const server = app({ forms: {}, checkAgent: async () => {} } as unknown as Relay, { verifyOwner: async () => ({ uid: 'fixture', authTime: 0 }), verifyScheduler: async () => {}, deleteIdentity: async () => {} }).listen(0, '127.0.0.1');
 const client = new Client({ name: 'schema-export', version: '1' });
 try {

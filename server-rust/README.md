@@ -21,7 +21,7 @@ IMAGE=sms-code-relay:rust scripts/container-smoke.sh
 
 Run the npm commands from the repository root with JDK 21 on `PATH`. The contract command builds the emulator-only test host, runs the same 36 integration scenarios against each backend, then checks documents in both directions and compares HTTP/MCP responses. The test host injects clocks, authentication, push, wakeup and callback adapters. Production builds contain none of its routes. Firebase signature verification and live IAM/FCM/Tasks/Scheduler acceptance require the separate staging checks in [the migration record](../docs/RUST_MIGRATION.md).
 
-`compat/` contains schemas, tool declarations, hashing fixtures, reserved-address ranges and pairing HTML captured from the TypeScript implementation. Changes to those contracts must update both backends. String bounds count UTF-16 units, and fingerprints use ECMAScript number formatting, key ordering and default expansion.
+`compat/` contains schemas, tool declarations, SDK parser fixtures, hashing fixtures, reserved-address ranges and pairing HTML captured from the TypeScript implementation. Changes to those contracts must update both backends. Zod schema string bounds count Unicode code points; custom form-answer bounds count UTF-16 units. Fingerprints use ECMAScript number formatting, key ordering and default expansion.
 
 The Firestore adapter preserves timestamp values for `purgeAt`, transactional reads and queries, create preconditions, field masks, and bounded transaction retries. Domain callbacks queue writes; notification and webhook calls run after their claim commits. Codes and form answers live in their separate result collections. Logs contain static failure labels only.
 

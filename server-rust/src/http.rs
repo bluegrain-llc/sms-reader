@@ -6,7 +6,7 @@ use crate::{
     relay::{Auth, Relay},
 };
 use axum::{
-    Json, Router,
+    Router,
     body::Body,
     extract::{Request, State},
     http::{HeaderMap, StatusCode},
@@ -106,7 +106,95 @@ async fn handle(State(s): State<App>, request: Request) -> Response {
     }
 }
 fn json_response(v: Value, status: u16) -> Response {
-    (StatusCode::from_u16(status).unwrap(), Json(v)).into_response()
+    (
+        StatusCode::from_u16(status).unwrap(),
+        [("Content-Type", "application/json; charset=utf-8")],
+        js_json(&v, false),
+    )
+        .into_response()
+}
+async fn json_body(body: Body, headers: &HeaderMap) -> Result<Vec<u8>> {
+    use async_compression::tokio::bufread::{BrotliDecoder, GzipDecoder, ZlibDecoder};
+    use futures::TryStreamExt;
+    use tokio::io::{AsyncRead, AsyncReadExt, BufReader};
+    let stream = body.into_data_stream().map_err(std::io::Error::other);
+    let reader = BufReader::new(tokio_util::io::StreamReader::new(stream));
+    let reader: std::pin::Pin<Box<dyn AsyncRead + Send>> = match header(headers, "content-encoding")
+        .unwrap_or("identity")
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "identity" => Box::pin(reader),
+        "gzip" => Box::pin(GzipDecoder::new(reader)),
+        "deflate" => Box::pin(ZlibDecoder::new(reader)),
+        "br" => Box::pin(BrotliDecoder::new(reader)),
+        _ => return Err(Error::External),
+    };
+    let mut bytes = Vec::new();
+    reader
+        .take(256 * 1024 + 1)
+        .read_to_end(&mut bytes)
+        .await
+        .map_err(|_| Error::External)?;
+    ensure(bytes.len() <= 256 * 1024, 413, "payload_too_large")?;
+    let charset = header(headers, "content-type")
+        .unwrap_or("")
+        .split(';')
+        .skip(1)
+        .find_map(|p| {
+            let (k, v) = p.trim().split_once('=')?;
+            k.eq_ignore_ascii_case("charset")
+                .then(|| v.trim().trim_matches('"').to_ascii_lowercase())
+        })
+        .unwrap_or_else(|| "utf-8".into());
+    let (bytes, charset) = (bytes.as_slice(), charset.as_str());
+    let text = match charset {
+        "utf-8" | "utf8" => String::from_utf8_lossy(bytes).into_owned(),
+        "utf-16" | "utf-16le" | "utf-16be" => {
+            let be =
+                charset == "utf-16be" || (charset == "utf-16" && bytes.starts_with(&[0xfe, 0xff]));
+            let units = bytes
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|c| {
+                    if be {
+                        u16::from_be_bytes([c[0], c[1]])
+                    } else {
+                        u16::from_le_bytes([c[0], c[1]])
+                    }
+                })
+                .collect::<Vec<_>>();
+            let mut text = String::from_utf16_lossy(&units);
+            if bytes.len() % 2 != 0 {
+                text.push('\u{fffd}');
+            }
+            text
+        }
+        "utf-32" | "utf-32le" | "utf-32be" => {
+            let be = charset == "utf-32be"
+                || (charset == "utf-32" && bytes.starts_with(&[0, 0, 0xfe, 0xff]));
+            bytes
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|c| {
+                    char::from_u32(if be {
+                        u32::from_be_bytes(*c)
+                    } else {
+                        u32::from_le_bytes(*c)
+                    })
+                    .unwrap_or('\u{fffd}')
+                })
+                .collect()
+        }
+        _ => return Err(Error::External),
+    };
+    Ok(text
+        .strip_prefix('\u{feff}')
+        .unwrap_or(&text)
+        .as_bytes()
+        .to_vec())
 }
 fn validate_event(v: &Value) -> Result<()> {
     let target = string(v, "status", 1, 64, false)?;
@@ -162,19 +250,22 @@ async fn route(s: App, request: Request) -> Result<Response> {
         .map(|x| x.0.ip().to_string())
         .unwrap_or_else(|| "unknown".into());
     let (parts, body) = request.into_parts();
-    let bytes = axum::body::to_bytes(body, 256 * 1024)
-        .await
-        .map_err(|_| Error::Api(413, "payload_too_large"))?;
-    let mut input = Value::Null;
-    if header(&headers, "content-type").is_some_and(|s| {
+    let is_json = header(&headers, "content-type").is_some_and(|s| {
         s.split(';')
             .next()
             .unwrap()
             .trim()
             .eq_ignore_ascii_case("application/json")
-    }) && !bytes.is_empty()
-    {
+    });
+    let bytes = if is_json {
+        json_body(body, &headers).await?
+    } else {
+        Vec::new()
+    };
+    let mut input = Value::Null;
+    if is_json && !bytes.is_empty() {
         input = serde_json::from_slice(&bytes).map_err(|_| Error::Api(400, "invalid_input"))?;
+        js_numbers(&mut input);
         ensure(input.is_object() || input.is_array(), 400, "invalid_input")?;
     }
     let parts_of_path = path
@@ -183,7 +274,9 @@ async fn route(s: App, request: Request) -> Result<Response> {
         .split('/')
         .enumerate()
         .map(|(i, s)| {
-            if [0, 1, 3, 5].contains(&i) {
+            if [0, 1, 3, 5].contains(&i)
+                || (i == 2 && path.to_ascii_lowercase().starts_with("/v1/connections/"))
+            {
                 s.to_ascii_lowercase()
             } else {
                 s.to_owned()
@@ -207,7 +300,7 @@ async fn route(s: App, request: Request) -> Result<Response> {
         let value =
             query_value("cursor")?.or_else(|| header(&headers, "Last-Event-ID").map(str::to_owned));
         ensure(
-            value.as_ref().is_none_or(|v| js_len(v) <= 128),
+            value.as_ref().is_none_or(|v| v.chars().count() <= 128),
             400,
             "invalid_input",
         )?;
@@ -468,7 +561,7 @@ async fn route(s: App, request: Request) -> Result<Response> {
         ("POST", ["mcp"]) => {
             let secret = bearer(&headers)?;
             r.check_agent(&secret).await?;
-            let request = Request::from_parts(parts, Body::from(bytes));
+            let request = Request::from_parts(parts, Body::from(js_json(&input, false)));
             return Ok(crate::mcp::handle(r.clone(), secret, request).await);
         }
         (_, ["mcp"]) => return Err(Error::Api(405, "method_not_allowed")),
@@ -477,16 +570,21 @@ async fn route(s: App, request: Request) -> Result<Response> {
     Ok(json_response(output, status))
 }
 fn urlencoding(s: &str) -> Result<String> {
-    // Form decoding would turn '+' into a space; path decoding must preserve it.
-    let escaped = s.replace('+', "%2B");
-    let q = format!("x={escaped}");
-    let value = url::form_urlencoded::parse(q.as_bytes())
-        .next()
-        .unwrap()
-        .1
-        .into_owned();
-    ensure(!value.contains('\u{fffd}'), 400, "invalid_input")?;
-    Ok(value)
+    let mut bytes = Vec::new();
+    let mut input = s.as_bytes().iter().copied();
+    while let Some(b) = input.next() {
+        if b == b'%' {
+            let high = input.next().and_then(|b| (b as char).to_digit(16));
+            let low = input.next().and_then(|b| (b as char).to_digit(16));
+            let (Some(high), Some(low)) = (high, low) else {
+                return Err(Error::Api(400, "invalid_input"));
+            };
+            bytes.push((high * 16 + low) as u8);
+        } else {
+            bytes.push(b);
+        }
+    }
+    String::from_utf8(bytes).map_err(|_| Error::Api(400, "invalid_input"))
 }
 async fn stream(s: App, secret: String, cursor: Option<String>) -> Result<Response> {
     let mut page = s.relay.events(secret.clone(), cursor.clone()).await?;

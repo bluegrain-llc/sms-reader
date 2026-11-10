@@ -259,6 +259,8 @@ fn javascript_fixtures() {
         );
     }
     let s = "😀".repeat(4);
+    assert!(sms_input(&json!({"purpose":"okay","idempotencyKey":s})).is_err());
+    let s = "😀".repeat(8);
     assert!(sms_input(&json!({"purpose":"okay","idempotencyKey":s})).is_ok());
     let mut d = def();
     d["idempotencyKey"] = json!(s);

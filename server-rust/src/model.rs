@@ -25,6 +25,25 @@ pub fn num(v: &Value, k: &str) -> i64 {
         .or_else(|| v[k].as_f64().filter(|n| n.fract() == 0.0).map(|n| n as i64))
         .unwrap_or(0)
 }
+// JSON.parse represents every number as IEEE-754, including integer tokens.
+pub fn js_numbers(value: &mut Value) {
+    match value {
+        Value::Number(n) => {
+            if let Some(f) = n.as_f64() {
+                *n = if f.fract() == 0.0
+                    && (-9_223_372_036_854_775_808.0..9_223_372_036_854_775_808.0).contains(&f)
+                {
+                    (f as i64).into()
+                } else {
+                    serde_json::Number::from_f64(f).unwrap()
+                };
+            }
+        }
+        Value::Array(a) => a.iter_mut().for_each(js_numbers),
+        Value::Object(m) => m.values_mut().for_each(js_numbers),
+        _ => {}
+    }
+}
 pub fn flag(v: &Value, k: &str) -> bool {
     v[k].as_bool().unwrap_or(false)
 }
@@ -76,7 +95,11 @@ pub fn string(v: &Value, k: &str, min: usize, max: usize, trim: bool) -> Result<
     } else {
         s
     };
-    ensure((min..=max).contains(&js_len(s)), 400, "invalid_input")?;
+    ensure(
+        (min..=max).contains(&s.chars().count()),
+        400,
+        "invalid_input",
+    )?;
     Ok(s.to_owned())
 }
 pub fn integer(v: &Value, k: &str, min: i64, max: i64, default: Option<i64>) -> Result<i64> {

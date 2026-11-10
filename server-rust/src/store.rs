@@ -243,8 +243,25 @@ impl Store {
         F: for<'a> Fn(&'a mut Tx) -> BoxFuture<'a, Result<T>>,
     {
         let db = self.db().await?;
+        let mut previous = None;
         for attempt in 0..5 {
-            let native = db.begin_transaction().await?;
+            let options = FirestoreTransactionOptions {
+                mode: previous
+                    .clone()
+                    .map(FirestoreTransactionMode::ReadWriteRetry)
+                    .unwrap_or(FirestoreTransactionMode::ReadWrite),
+                ..Default::default()
+            };
+            let native = match db.begin_transaction_with_options(options).await {
+                Ok(native) => native,
+                Err(e) if retry(&e) && attempt < 4 => {
+                    tokio::time::sleep(std::time::Duration::from_millis(100 * (1 << attempt)))
+                        .await;
+                    continue;
+                }
+                Err(e) => return Err(e.into()),
+            };
+            previous = Some(native.transaction_id().clone());
             let read_db = db.clone_with_consistency_selector(
                 FirestoreConsistencySelector::Transaction(native.transaction_id().clone()),
             );
@@ -253,11 +270,16 @@ impl Store {
                 writes: native.into_data(),
             };
             let result = f(&mut tx).await;
+            let rollback_data = tx.writes.clone();
             let native = FirestoreTransaction::from_data(db, tx.writes);
             match result {
                 Ok(value) => match native.commit().await {
                     Ok(_) => return Ok(value),
-                    Err(e) if retry(&e) && attempt < 4 => {}
+                    Err(e) if retry(&e) && attempt < 4 => {
+                        let _ = FirestoreTransaction::from_data(db, rollback_data)
+                            .rollback()
+                            .await;
+                    }
                     Err(e) => return Err(e.into()),
                 },
                 Err(e) => {
@@ -267,7 +289,7 @@ impl Store {
                     }
                 }
             }
-            tokio::time::sleep(std::time::Duration::from_millis(20 * (1 << attempt))).await;
+            tokio::time::sleep(std::time::Duration::from_millis(100 * (1 << attempt))).await;
         }
         unreachable!()
     }

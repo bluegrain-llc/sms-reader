@@ -1,6 +1,7 @@
 import { before, beforeEach, after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
+import { gzipSync, deflateSync, brotliCompressSync } from 'node:zlib';
 import { initializeApp, deleteApp } from 'firebase-admin/app';
 import { getFirestore, FieldValue, Timestamp } from 'firebase-admin/firestore';
 import { getAuth } from 'firebase-admin/auth';
@@ -79,7 +80,7 @@ const options: HttpOptions = {
 };
 test('HTTP errors, body bounds, auth ordering, headers and protocol negotiation match both runtimes', { timeout: 60_000 }, async () => {
   await ts.register(uid, did, 'Phone', 'synthetic-fcm');
-  const { token } = await ts.createGrant(uid, did, 'Caller', 30);
+  const { token, grantId } = await ts.createGrant(uid, did, 'Caller', 30);
   const servers = [app(ts, options).listen(0, '127.0.0.1'), rustApp(rust, options).listen()];
   try {
     await Promise.all(servers.map(server => once(server, 'listening')));
@@ -97,6 +98,12 @@ test('HTTP errors, body bounds, auth ordering, headers and protocol negotiation 
       { path: '/internal/delivery', method: 'POST' }, { path: '/internal/maintenance', method: 'POST' },
       { path: '/v2/requests/nope', headers: { authorization: `Bearer ${token}` } },
       { path: '/v1/devices/nope', method: 'PATCH', headers: { 'content-type': 'application/json' }, body: '{"paused":"yes"}' },
+      { path: `/v1/grants/${grantId}&ignored`, method: 'DELETE', headers: { authorization: 'Bearer owner-session' } },
+      ...['POLL', 'REVIEW', 'DECISION'].map(operation => ({ path: `/v1/connections/${operation}`, method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })),
+      ...[gzipSync, deflateSync, brotliCompressSync].map((compress, i) => ({ path: '/v1/requests', method: 'POST', headers: { 'content-type': 'application/json', 'content-encoding': ['gzip', 'deflate', 'br'][i]!, authorization: `Bearer ${token}` }, body: compress(Buffer.from('{"purpose":"Compressed","idempotencyKey":"encoded-body"}')) })),
+      { path: '/v1/requests', method: 'POST', headers: { 'content-type': 'application/json; charset=utf-16le', authorization: `Bearer ${token}` }, body: Buffer.from('{"purpose":"Compressed","idempotencyKey":"encoded-body"}', 'utf16le') },
+      { path: '/v1/requests', method: 'POST', headers: { 'content-type': 'application/json', 'content-encoding': 'gzip' }, body: gzipSync(Buffer.from(JSON.stringify({ purpose: 'x'.repeat(256 * 1024) }))) },
+      { path: '/health', method: 'POST', headers: { 'content-type': 'text/plain' }, body: 'x'.repeat(256 * 1024 + 1) },
     ];
     for (const item of cases) {
       const results = await Promise.all(bases.map(async base => { const response = await fetch(base + item.path, { ...item, signal: AbortSignal.timeout(15_000) });
@@ -108,6 +115,45 @@ test('HTTP errors, body bounds, auth ordering, headers and protocol negotiation 
         body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: version, capabilities: {}, clientInfo: { name: 'migration', version: '1' } } }), signal: AbortSignal.timeout(15_000) });
         const v = await response.json() as any; return { status: response.status, protocol: v.result?.protocolVersion, server: v.result?.serverInfo }; }));
       assert.deepEqual(results[1], results[0], version);
+    }
+    for (const [name, args] of [
+      ['get_sms_code_request', {}], ['get_sms_code_request', { requestId: 1 }], ['get_sms_code_request', { requestId: '?' }],
+      ['request_sms_code', { purpose: '   ', idempotencyKey: 'short' }], ['request_sms_code', { purpose: 'MCP extras', idempotencyKey: 'mcp-extras', ignored: true }],
+      ['create_request', { ...form('mcp-extra-form'), ignored: true }], ['create_request', { ...form('mcp-invalid-form'), fields: [{ type: 'invalid' }] }],
+      ['poll_request_events', { cursor: 'x'.repeat(129) }], ['not_a_tool', {}],
+    ] as const) {
+      const responses = await Promise.all(bases.map(async base => {
+        const response = await fetch(base + '/mcp', { method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream', authorization: `Bearer ${token}` }, body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name, arguments: args } }), signal: AbortSignal.timeout(15_000) });
+        return response.json();
+      }));
+      assert.deepEqual(responses[1], responses[0], `${name} ${JSON.stringify(args)}`);
+    }
+  } finally { await Promise.all(servers.map(server => new Promise<void>(resolve => server.close(() => resolve())))); }
+});
+
+test('raw JSON numbers and live HTTP clocks preserve observations, helper retries and answers', { timeout: 60_000 }, async () => {
+  await ts.register(uid, did, 'Phone', 'synthetic-fcm', 1);
+  const { token, grantId } = await ts.createGrant(uid, did, 'Caller', 30);
+  await ts.forms.approve(uid, grantId, true);
+  const servers = [app(ts, options).listen(0, '127.0.0.1'), rustApp(rust, options).listen()];
+  try {
+    await Promise.all(servers.map(server => once(server, 'listening')));
+    time += MINUTE;
+    for (const [i, server] of servers.entries()) {
+      const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+      const request = await ts.forms.create(token, { ...form(`raw-json-${i}`), fields: [...form('unused').fields, { id: 'amount', type: 'number', label: 'Amount' }] });
+      time += MINUTE;
+      const post = async (suffix: string, body: string) => {
+        const response = await fetch(`${base}/v2/devices/${did}/requests/${request.requestId}/${suffix}`, { method: 'POST', headers: { authorization: 'Bearer owner-session', 'content-type': 'application/json' }, body, signal: AbortSignal.timeout(15_000) });
+        assert.equal(response.status, 200, await response.clone().text()); return response.json() as Promise<any>;
+      };
+      const opened = await post('events', `{"type":"request.opened","occurredAt":${time - 10_000}.0}`);
+      assert.equal(opened.firstOpenedAt, time - 10_000);
+      const ready = `{"type":"input.ready","fieldId":"code","listenerStartedAt":${time}.0}`;
+      await post('events', ready); await post('events', ready);
+      await post('submissions', '{"submissionId":"raw-number","action":"submit","values":{"code":"1234","amount":9007199254740993}}');
+      assert.equal((await ts.forms.result(token, request.requestId)).result?.values.amount, 9007199254740992);
+      time += 6 * MINUTE;
     }
   } finally { await Promise.all(servers.map(server => new Promise<void>(resolve => server.close(() => resolve())))); }
 });

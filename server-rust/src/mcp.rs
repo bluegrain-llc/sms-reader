@@ -53,6 +53,14 @@ impl ServerHandler for Mcp {
         _: RequestContext<RoleServer>,
     ) -> std::result::Result<CallToolResponse, rmcp::ErrorData> {
         let input = Value::Object(request.arguments.unwrap_or_default());
+        let input = match crate::mcp_input::parse(&request.name, input) {
+            Ok(input) => input,
+            Err(message) => {
+                let mut out = CallToolResult::error(vec![ContentBlock::text(message)]);
+                out.result_type = None;
+                return Ok(out.into());
+            }
+        };
         let key = self.secret.clone();
         let relay = &self.relay;
         let result = async {

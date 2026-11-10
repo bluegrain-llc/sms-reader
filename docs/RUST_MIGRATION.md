@@ -29,9 +29,9 @@ Local verification on 2026-11-10:
 | Check | Result |
 | --- | --- |
 | TypeScript compilation and unit tests | Passed; 11 unit tests |
-| Rust formatting, Clippy with warnings denied, unit tests | Passed; 16 tests |
+| Rust formatting, Clippy with warnings denied, unit tests | Passed; 17 tests |
 | Shared emulator scenarios | 36 passed on TypeScript and 36 passed on Rust; none skipped |
-| Migration contracts | Six passed: both document directions, HTTP/MCP parity, and native Firebase emulator checks |
+| Migration contracts | Seven passed: both document directions, HTTP/MCP parity, raw JSON/clock lifecycle cases, and native Firebase emulator checks |
 | Dependency audits | npm production audit and Cargo audit passed |
 | Rust production container | Build and HTTP/auth smoke passed; runtime UID 10001 |
 | Deployment script | Shell syntax passed; cloud deployment not performed |
