@@ -2,21 +2,53 @@
   {
     "name": "get_sms_code_request",
     "input": {},
-    "error": "MCP error -32602: Input validation error: Invalid arguments for tool get_sms_code_request: Invalid input: expected string, received undefined at requestId"
+    "error": "MCP error -32602: Input validation error: Invalid arguments for tool get_sms_code_request: Invalid input: expected string, received undefined at requestId",
+    "issues": [
+      {
+        "expected": "string",
+        "code": "invalid_type",
+        "path": [
+          "requestId"
+        ],
+        "message": "Invalid input: expected string, received undefined"
+      }
+    ]
   },
   {
     "name": "get_sms_code_request",
     "input": {
       "requestId": 1
     },
-    "error": "MCP error -32602: Input validation error: Invalid arguments for tool get_sms_code_request: Invalid input: expected string, received number at requestId"
+    "error": "MCP error -32602: Input validation error: Invalid arguments for tool get_sms_code_request: Invalid input: expected string, received number at requestId",
+    "issues": [
+      {
+        "expected": "string",
+        "code": "invalid_type",
+        "path": [
+          "requestId"
+        ],
+        "message": "Invalid input: expected string, received number"
+      }
+    ]
   },
   {
     "name": "get_sms_code_request",
     "input": {
       "requestId": "?"
     },
-    "error": "MCP error -32602: Input validation error: Invalid arguments for tool get_sms_code_request: Invalid string: must match pattern /^[a-zA-Z0-9_-]{1,128}$/ at requestId"
+    "error": "MCP error -32602: Input validation error: Invalid arguments for tool get_sms_code_request: Invalid string: must match pattern /^[a-zA-Z0-9_-]{1,128}$/ at requestId",
+    "issues": [
+      {
+        "origin": "string",
+        "code": "invalid_format",
+        "format": "regex",
+        "pattern": "/^[a-zA-Z0-9_-]{1,128}$/",
+        "path": [
+          "requestId"
+        ],
+        "message": "Invalid string: must match pattern /^[a-zA-Z0-9_-]{1,128}$/"
+      }
+    ]
   },
   {
     "name": "get_sms_code_request",
@@ -34,7 +66,29 @@
       "purpose": "  ",
       "idempotencyKey": "short"
     },
-    "error": "MCP error -32602: Input validation error: Invalid arguments for tool request_sms_code: Too small: expected string to have >=1 characters at purpose\nToo small: expected string to have >=8 characters at idempotencyKey"
+    "error": "MCP error -32602: Input validation error: Invalid arguments for tool request_sms_code: Too small: expected string to have >=1 characters at purpose\nToo small: expected string to have >=8 characters at idempotencyKey",
+    "issues": [
+      {
+        "origin": "string",
+        "code": "too_small",
+        "minimum": 1,
+        "inclusive": true,
+        "path": [
+          "purpose"
+        ],
+        "message": "Too small: expected string to have >=1 characters"
+      },
+      {
+        "origin": "string",
+        "code": "too_small",
+        "minimum": 8,
+        "inclusive": true,
+        "path": [
+          "idempotencyKey"
+        ],
+        "message": "Too small: expected string to have >=8 characters"
+      }
+    ]
   },
   {
     "name": "request_sms_code",
@@ -92,7 +146,18 @@
       ],
       "expiresInSeconds": 1.1
     },
-    "error": "MCP error -32602: Input validation error: Invalid arguments for tool create_request: Invalid input: expected int, received number at expiresInSeconds"
+    "error": "MCP error -32602: Input validation error: Invalid arguments for tool create_request: Invalid input: expected int, received number at expiresInSeconds",
+    "issues": [
+      {
+        "expected": "int",
+        "format": "safeint",
+        "code": "invalid_type",
+        "path": [
+          "expiresInSeconds"
+        ],
+        "message": "Invalid input: expected int, received number"
+      }
+    ]
   },
   {
     "name": "create_request",
@@ -109,7 +174,30 @@
       ],
       "expiresInSeconds": 100000000000000000000
     },
-    "error": "MCP error -32602: Input validation error: Invalid arguments for tool create_request: Too big: expected int to be <=9007199254740991 at expiresInSeconds\nToo big: expected number to be <=604800 at expiresInSeconds"
+    "error": "MCP error -32602: Input validation error: Invalid arguments for tool create_request: Too big: expected int to be <=9007199254740991 at expiresInSeconds\nToo big: expected number to be <=604800 at expiresInSeconds",
+    "issues": [
+      {
+        "code": "too_big",
+        "maximum": 9007199254740991,
+        "note": "Integers must be within the safe integer range.",
+        "origin": "int",
+        "inclusive": true,
+        "path": [
+          "expiresInSeconds"
+        ],
+        "message": "Too big: expected int to be <=9007199254740991"
+      },
+      {
+        "origin": "number",
+        "code": "too_big",
+        "maximum": 604800,
+        "inclusive": true,
+        "path": [
+          "expiresInSeconds"
+        ],
+        "message": "Too big: expected number to be <=604800"
+      }
+    ]
   },
   {
     "name": "create_request",
@@ -126,7 +214,19 @@
       ],
       "expiresInSeconds": 1
     },
-    "error": "MCP error -32602: Input validation error: Invalid arguments for tool create_request: Too small: expected number to be >=60 at expiresInSeconds"
+    "error": "MCP error -32602: Input validation error: Invalid arguments for tool create_request: Too small: expected number to be >=60 at expiresInSeconds",
+    "issues": [
+      {
+        "origin": "number",
+        "code": "too_small",
+        "minimum": 60,
+        "inclusive": true,
+        "path": [
+          "expiresInSeconds"
+        ],
+        "message": "Too small: expected number to be >=60"
+      }
+    ]
   },
   {
     "name": "create_request",
@@ -136,7 +236,19 @@
       "idempotencyKey": "tool-input",
       "actions": []
     },
-    "error": "MCP error -32602: Input validation error: Invalid arguments for tool create_request: Too small: expected array to have >=1 items at actions"
+    "error": "MCP error -32602: Input validation error: Invalid arguments for tool create_request: Too small: expected array to have >=1 items at actions",
+    "issues": [
+      {
+        "origin": "array",
+        "code": "too_small",
+        "minimum": 1,
+        "inclusive": true,
+        "path": [
+          "actions"
+        ],
+        "message": "Too small: expected array to have >=1 items"
+      }
+    ]
   },
   {
     "name": "create_request",
@@ -157,7 +269,30 @@
         }
       ]
     },
-    "error": "MCP error -32602: Input validation error: Invalid arguments for tool create_request: Invalid discriminator value. Expected 'text' | 'multiline' | 'number' | 'checkbox' | 'single_choice' | 'multiple_choice' | 'date' at fields[0].type"
+    "error": "MCP error -32602: Input validation error: Invalid arguments for tool create_request: Invalid discriminator value. Expected 'text' | 'multiline' | 'number' | 'checkbox' | 'single_choice' | 'multiple_choice' | 'date' at fields[0].type",
+    "issues": [
+      {
+        "code": "invalid_union",
+        "errors": [],
+        "note": "No matching discriminator",
+        "discriminator": "type",
+        "options": [
+          "text",
+          "multiline",
+          "number",
+          "checkbox",
+          "single_choice",
+          "multiple_choice",
+          "date"
+        ],
+        "path": [
+          "fields",
+          0,
+          "type"
+        ],
+        "message": "Invalid discriminator value. Expected 'text' | 'multiline' | 'number' | 'checkbox' | 'single_choice' | 'multiple_choice' | 'date'"
+      }
+    ]
   },
   {
     "name": "create_request",
@@ -176,7 +311,18 @@
         null
       ]
     },
-    "error": "MCP error -32602: Input validation error: Invalid arguments for tool create_request: Invalid input: expected object, received null at fields[0]"
+    "error": "MCP error -32602: Input validation error: Invalid arguments for tool create_request: Invalid input: expected object, received null at fields[0]",
+    "issues": [
+      {
+        "code": "invalid_type",
+        "expected": "object",
+        "path": [
+          "fields",
+          0
+        ],
+        "message": "Invalid input: expected object, received null"
+      }
+    ]
   },
   {
     "name": "create_request",
@@ -200,7 +346,20 @@
         }
       ]
     },
-    "error": "MCP error -32602: Input validation error: Invalid arguments for tool create_request: Unrecognized key: \"extra\" at fields[0]"
+    "error": "MCP error -32602: Input validation error: Invalid arguments for tool create_request: Unrecognized key: \"extra\" at fields[0]",
+    "issues": [
+      {
+        "code": "unrecognized_keys",
+        "keys": [
+          "extra"
+        ],
+        "path": [
+          "fields",
+          0
+        ],
+        "message": "Unrecognized key: \"extra\""
+      }
+    ]
   },
   {
     "name": "create_request",
@@ -227,7 +386,83 @@
         }
       ]
     },
-    "error": "MCP error -32602: Input validation error: Invalid arguments for tool create_request: Invalid input at steps[0].when\nToo small: expected array to have >=2 items at steps"
+    "error": "MCP error -32602: Input validation error: Invalid arguments for tool create_request: Invalid input at steps[0].when\nToo small: expected array to have >=2 items at steps",
+    "issues": [
+      {
+        "code": "invalid_union",
+        "errors": [
+          [
+            {
+              "code": "invalid_union",
+              "errors": [
+                [
+                  {
+                    "expected": "string",
+                    "code": "invalid_type",
+                    "path": [],
+                    "message": "Invalid input: expected string, received null"
+                  }
+                ],
+                [
+                  {
+                    "expected": "number",
+                    "code": "invalid_type",
+                    "path": [],
+                    "message": "Invalid input: expected number, received null"
+                  }
+                ],
+                [
+                  {
+                    "expected": "boolean",
+                    "code": "invalid_type",
+                    "path": [],
+                    "message": "Invalid input: expected boolean, received null"
+                  }
+                ]
+              ],
+              "path": [
+                "equals"
+              ],
+              "message": "Invalid input"
+            }
+          ],
+          [
+            {
+              "expected": "string",
+              "code": "invalid_type",
+              "path": [
+                "contains"
+              ],
+              "message": "Invalid input: expected string, received undefined"
+            },
+            {
+              "code": "unrecognized_keys",
+              "keys": [
+                "equals"
+              ],
+              "path": [],
+              "message": "Unrecognized key: \"equals\""
+            }
+          ]
+        ],
+        "path": [
+          "steps",
+          0,
+          "when"
+        ],
+        "message": "Invalid input"
+      },
+      {
+        "origin": "array",
+        "code": "too_small",
+        "minimum": 2,
+        "inclusive": true,
+        "path": [
+          "steps"
+        ],
+        "message": "Too small: expected array to have >=2 items"
+      }
+    ]
   },
   {
     "name": "poll_request_events",
@@ -237,5 +472,809 @@
     "value": {
       "cursor": "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀"
     }
+  },
+  {
+    "name": "create_request",
+    "input": {
+      "title": " Test ",
+      "body": "Body",
+      "idempotencyKey": "tool-input",
+      "actions": [
+        {
+          "id": "ok",
+          "label": " OK ",
+          "type": "submit"
+        }
+      ],
+      "steps": [
+        {
+          "id": "one",
+          "title": "One",
+          "fieldIds": []
+        },
+        {
+          "id": "two",
+          "title": "Two",
+          "fieldIds": [],
+          "when": {
+            "fieldId": "f",
+            "contains": "?"
+          }
+        }
+      ]
+    },
+    "error": "MCP error -32602: Input validation error: Invalid arguments for tool create_request: Invalid string: must match pattern /^[a-zA-Z0-9_-]{1,128}$/ at steps[1].when.contains",
+    "issues": [
+      {
+        "origin": "string",
+        "code": "invalid_format",
+        "format": "regex",
+        "pattern": "/^[a-zA-Z0-9_-]{1,128}$/",
+        "path": [
+          "steps",
+          1,
+          "when",
+          "contains"
+        ],
+        "message": "Invalid string: must match pattern /^[a-zA-Z0-9_-]{1,128}$/"
+      }
+    ]
+  },
+  {
+    "name": "create_request",
+    "input": {
+      "title": " Test ",
+      "body": "Body",
+      "idempotencyKey": "tool-input",
+      "actions": [
+        {
+          "id": "ok",
+          "label": " OK ",
+          "type": "submit"
+        }
+      ],
+      "steps": [
+        {
+          "id": "one",
+          "title": "One",
+          "fieldIds": []
+        },
+        {
+          "id": "two",
+          "title": "Two",
+          "fieldIds": [],
+          "when": {
+            "fieldId": "?",
+            "contains": "?"
+          }
+        }
+      ]
+    },
+    "error": "MCP error -32602: Input validation error: Invalid arguments for tool create_request: Invalid string: must match pattern /^[a-zA-Z0-9_-]{1,128}$/ at steps[1].when.fieldId\nInvalid string: must match pattern /^[a-zA-Z0-9_-]{1,128}$/ at steps[1].when.contains",
+    "issues": [
+      {
+        "origin": "string",
+        "code": "invalid_format",
+        "format": "regex",
+        "pattern": "/^[a-zA-Z0-9_-]{1,128}$/",
+        "path": [
+          "steps",
+          1,
+          "when",
+          "fieldId"
+        ],
+        "message": "Invalid string: must match pattern /^[a-zA-Z0-9_-]{1,128}$/"
+      },
+      {
+        "origin": "string",
+        "code": "invalid_format",
+        "format": "regex",
+        "pattern": "/^[a-zA-Z0-9_-]{1,128}$/",
+        "path": [
+          "steps",
+          1,
+          "when",
+          "contains"
+        ],
+        "message": "Invalid string: must match pattern /^[a-zA-Z0-9_-]{1,128}$/"
+      }
+    ]
+  },
+  {
+    "name": "create_request",
+    "input": {
+      "title": " Test ",
+      "body": "Body",
+      "idempotencyKey": "tool-input",
+      "actions": [
+        {
+          "id": "ok",
+          "label": " OK ",
+          "type": "submit"
+        }
+      ],
+      "steps": [
+        {
+          "id": "one",
+          "title": "One",
+          "fieldIds": []
+        },
+        {
+          "id": "two",
+          "title": "Two",
+          "fieldIds": [],
+          "when": {
+            "fieldId": "f",
+            "equals": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+          }
+        }
+      ]
+    },
+    "error": "MCP error -32602: Input validation error: Invalid arguments for tool create_request: Too big: expected string to have <=4000 characters at steps[1].when.equals",
+    "issues": [
+      {
+        "origin": "string",
+        "code": "too_big",
+        "maximum": 4000,
+        "inclusive": true,
+        "path": [
+          "steps",
+          1,
+          "when",
+          "equals"
+        ],
+        "message": "Too big: expected string to have <=4000 characters"
+      }
+    ]
+  },
+  {
+    "name": "create_request",
+    "input": {
+      "title": " Test ",
+      "body": "Body",
+      "idempotencyKey": "tool-input",
+      "actions": [
+        {
+          "id": "ok",
+          "label": " OK ",
+          "type": "submit"
+        }
+      ],
+      "steps": [
+        {
+          "id": "one",
+          "title": "One",
+          "fieldIds": []
+        },
+        {
+          "id": "two",
+          "title": "Two",
+          "fieldIds": [],
+          "when": {
+            "fieldId": "f",
+            "contains": 1
+          }
+        }
+      ]
+    },
+    "error": "MCP error -32602: Input validation error: Invalid arguments for tool create_request: Invalid input at steps[1].when",
+    "issues": [
+      {
+        "code": "invalid_union",
+        "errors": [
+          [
+            {
+              "code": "invalid_union",
+              "errors": [
+                [
+                  {
+                    "expected": "string",
+                    "code": "invalid_type",
+                    "path": [],
+                    "message": "Invalid input: expected string, received undefined"
+                  }
+                ],
+                [
+                  {
+                    "expected": "number",
+                    "code": "invalid_type",
+                    "path": [],
+                    "message": "Invalid input: expected number, received undefined"
+                  }
+                ],
+                [
+                  {
+                    "expected": "boolean",
+                    "code": "invalid_type",
+                    "path": [],
+                    "message": "Invalid input: expected boolean, received undefined"
+                  }
+                ]
+              ],
+              "path": [
+                "equals"
+              ],
+              "message": "Invalid input"
+            },
+            {
+              "code": "unrecognized_keys",
+              "keys": [
+                "contains"
+              ],
+              "path": [],
+              "message": "Unrecognized key: \"contains\""
+            }
+          ],
+          [
+            {
+              "expected": "string",
+              "code": "invalid_type",
+              "path": [
+                "contains"
+              ],
+              "message": "Invalid input: expected string, received number"
+            }
+          ]
+        ],
+        "path": [
+          "steps",
+          1,
+          "when"
+        ],
+        "message": "Invalid input"
+      }
+    ]
+  },
+  {
+    "name": "create_request",
+    "input": {
+      "title": " Test ",
+      "body": "Body",
+      "idempotencyKey": "tool-input",
+      "actions": [
+        {
+          "id": "ok",
+          "label": " OK ",
+          "type": "submit"
+        }
+      ],
+      "steps": [
+        {
+          "id": "one",
+          "title": "One",
+          "fieldIds": []
+        },
+        {
+          "id": "two",
+          "title": "Two",
+          "fieldIds": [],
+          "when": {
+            "fieldId": "f",
+            "contains": "valid",
+            "unexpected": true
+          }
+        }
+      ]
+    },
+    "error": "MCP error -32602: Input validation error: Invalid arguments for tool create_request: Unrecognized key: \"unexpected\" at steps[1].when",
+    "issues": [
+      {
+        "code": "unrecognized_keys",
+        "keys": [
+          "unexpected"
+        ],
+        "path": [
+          "steps",
+          1,
+          "when"
+        ],
+        "message": "Unrecognized key: \"unexpected\""
+      }
+    ]
+  },
+  {
+    "name": "create_request",
+    "input": {
+      "title": " Test ",
+      "body": "Body",
+      "idempotencyKey": "tool-input",
+      "actions": [
+        {
+          "id": "ok",
+          "label": " OK ",
+          "type": "submit"
+        }
+      ],
+      "steps": [
+        {
+          "id": "one",
+          "title": "One",
+          "fieldIds": []
+        },
+        {
+          "id": "two",
+          "title": "Two",
+          "fieldIds": [],
+          "when": {
+            "fieldId": "f",
+            "equals": null
+          }
+        }
+      ]
+    },
+    "error": "MCP error -32602: Input validation error: Invalid arguments for tool create_request: Invalid input at steps[1].when",
+    "issues": [
+      {
+        "code": "invalid_union",
+        "errors": [
+          [
+            {
+              "code": "invalid_union",
+              "errors": [
+                [
+                  {
+                    "expected": "string",
+                    "code": "invalid_type",
+                    "path": [],
+                    "message": "Invalid input: expected string, received null"
+                  }
+                ],
+                [
+                  {
+                    "expected": "number",
+                    "code": "invalid_type",
+                    "path": [],
+                    "message": "Invalid input: expected number, received null"
+                  }
+                ],
+                [
+                  {
+                    "expected": "boolean",
+                    "code": "invalid_type",
+                    "path": [],
+                    "message": "Invalid input: expected boolean, received null"
+                  }
+                ]
+              ],
+              "path": [
+                "equals"
+              ],
+              "message": "Invalid input"
+            }
+          ],
+          [
+            {
+              "expected": "string",
+              "code": "invalid_type",
+              "path": [
+                "contains"
+              ],
+              "message": "Invalid input: expected string, received undefined"
+            },
+            {
+              "code": "unrecognized_keys",
+              "keys": [
+                "equals"
+              ],
+              "path": [],
+              "message": "Unrecognized key: \"equals\""
+            }
+          ]
+        ],
+        "path": [
+          "steps",
+          1,
+          "when"
+        ],
+        "message": "Invalid input"
+      }
+    ]
+  },
+  {
+    "name": "create_request",
+    "input": {
+      "title": " Test ",
+      "body": "Body",
+      "idempotencyKey": "tool-input",
+      "actions": [
+        {
+          "id": "ok",
+          "label": " OK ",
+          "type": "submit"
+        }
+      ],
+      "steps": [
+        {
+          "id": "one",
+          "title": "One",
+          "fieldIds": []
+        },
+        {
+          "id": "two",
+          "title": "Two",
+          "fieldIds": [],
+          "when": {
+            "fieldId": "f",
+            "equals": "valid",
+            "contains": "valid"
+          }
+        }
+      ]
+    },
+    "error": "MCP error -32602: Input validation error: Invalid arguments for tool create_request: Invalid input at steps[1].when",
+    "issues": [
+      {
+        "code": "invalid_union",
+        "errors": [
+          [
+            {
+              "code": "unrecognized_keys",
+              "keys": [
+                "contains"
+              ],
+              "path": [],
+              "message": "Unrecognized key: \"contains\""
+            }
+          ],
+          [
+            {
+              "code": "unrecognized_keys",
+              "keys": [
+                "equals"
+              ],
+              "path": [],
+              "message": "Unrecognized key: \"equals\""
+            }
+          ]
+        ],
+        "path": [
+          "steps",
+          1,
+          "when"
+        ],
+        "message": "Invalid input"
+      }
+    ]
+  },
+  {
+    "name": "create_request",
+    "input": {
+      "title": " Test ",
+      "body": "Body",
+      "idempotencyKey": "tool-input",
+      "actions": [
+        {
+          "id": "ok",
+          "label": " OK ",
+          "type": "submit"
+        }
+      ],
+      "steps": [
+        {
+          "id": "one",
+          "title": "One",
+          "fieldIds": []
+        },
+        {
+          "id": "two",
+          "title": "Two",
+          "fieldIds": [],
+          "when": {
+            "fieldId": "f",
+            "equals": 100000000000000000000
+          }
+        }
+      ]
+    },
+    "value": {
+      "title": "Test",
+      "body": "Body",
+      "fields": [],
+      "actions": [
+        {
+          "id": "ok",
+          "label": "OK",
+          "type": "submit"
+        }
+      ],
+      "steps": [
+        {
+          "id": "one",
+          "title": "One",
+          "fieldIds": []
+        },
+        {
+          "id": "two",
+          "title": "Two",
+          "fieldIds": [],
+          "when": {
+            "fieldId": "f",
+            "equals": 100000000000000000000
+          }
+        }
+      ],
+      "expiresInSeconds": 86400,
+      "idempotencyKey": "tool-input"
+    }
+  },
+  {
+    "name": "create_request",
+    "input": {
+      "title": " Test ",
+      "body": "Body",
+      "idempotencyKey": "tool-input",
+      "actions": [
+        {
+          "id": "ok",
+          "label": " OK ",
+          "type": "submit"
+        }
+      ],
+      "fields": [
+        {
+          "id": "f",
+          "label": "Field",
+          "type": "text",
+          "maxLength": 1.5
+        }
+      ]
+    },
+    "error": "MCP error -32602: Input validation error: Invalid arguments for tool create_request: Invalid input: expected int, received number at fields[0].maxLength",
+    "issues": [
+      {
+        "expected": "int",
+        "format": "safeint",
+        "code": "invalid_type",
+        "path": [
+          "fields",
+          0,
+          "maxLength"
+        ],
+        "message": "Invalid input: expected int, received number"
+      }
+    ]
+  },
+  {
+    "name": "create_request",
+    "input": {
+      "title": " Test ",
+      "body": "Body",
+      "idempotencyKey": "tool-input",
+      "actions": [
+        {
+          "id": "ok",
+          "label": " OK ",
+          "type": "submit"
+        }
+      ],
+      "fields": [
+        {
+          "id": "f",
+          "label": "Field",
+          "type": "text",
+          "maxLength": 100000000000000000000
+        }
+      ]
+    },
+    "error": "MCP error -32602: Input validation error: Invalid arguments for tool create_request: Too big: expected int to be <=9007199254740991 at fields[0].maxLength\nToo big: expected number to be <=4000 at fields[0].maxLength",
+    "issues": [
+      {
+        "code": "too_big",
+        "maximum": 9007199254740991,
+        "note": "Integers must be within the safe integer range.",
+        "origin": "int",
+        "inclusive": true,
+        "path": [
+          "fields",
+          0,
+          "maxLength"
+        ],
+        "message": "Too big: expected int to be <=9007199254740991"
+      },
+      {
+        "origin": "number",
+        "code": "too_big",
+        "maximum": 4000,
+        "inclusive": true,
+        "path": [
+          "fields",
+          0,
+          "maxLength"
+        ],
+        "message": "Too big: expected number to be <=4000"
+      }
+    ]
+  },
+  {
+    "name": "create_request",
+    "input": {
+      "title": " Test ",
+      "body": "Body",
+      "idempotencyKey": "tool-input",
+      "actions": [
+        {
+          "id": "ok",
+          "label": " OK ",
+          "type": "submit"
+        }
+      ],
+      "fields": [
+        {
+          "id": "f",
+          "label": "Field",
+          "type": "text",
+          "maxLength": -100000000000000000000
+        }
+      ]
+    },
+    "error": "MCP error -32602: Input validation error: Invalid arguments for tool create_request: Too small: expected int to be >=-9007199254740991 at fields[0].maxLength\nToo small: expected number to be >=1 at fields[0].maxLength",
+    "issues": [
+      {
+        "code": "too_small",
+        "minimum": -9007199254740991,
+        "note": "Integers must be within the safe integer range.",
+        "origin": "int",
+        "inclusive": true,
+        "path": [
+          "fields",
+          0,
+          "maxLength"
+        ],
+        "message": "Too small: expected int to be >=-9007199254740991"
+      },
+      {
+        "origin": "number",
+        "code": "too_small",
+        "minimum": 1,
+        "inclusive": true,
+        "path": [
+          "fields",
+          0,
+          "maxLength"
+        ],
+        "message": "Too small: expected number to be >=1"
+      }
+    ]
+  },
+  {
+    "envelope": "list",
+    "input": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "method": "tools/list",
+      "params": {
+        "_meta": {
+          "progressToken": 100000000000000000000
+        }
+      }
+    },
+    "issues": [
+      {
+        "code": "too_big",
+        "maximum": 9007199254740991,
+        "note": "Integers must be within the safe integer range.",
+        "origin": "int",
+        "inclusive": true,
+        "path": [
+          "params",
+          "_meta",
+          "progressToken"
+        ],
+        "message": "Too big: expected int to be <=9007199254740991"
+      }
+    ]
+  },
+  {
+    "envelope": "list",
+    "input": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "method": "tools/list",
+      "params": {
+        "_meta": {
+          "progressToken": -100000000000000000000
+        }
+      }
+    },
+    "issues": [
+      {
+        "code": "too_small",
+        "minimum": -9007199254740991,
+        "note": "Integers must be within the safe integer range.",
+        "origin": "int",
+        "inclusive": true,
+        "path": [
+          "params",
+          "_meta",
+          "progressToken"
+        ],
+        "message": "Too small: expected int to be >=-9007199254740991"
+      }
+    ]
+  },
+  {
+    "envelope": "list",
+    "input": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "method": "tools/list",
+      "params": {
+        "_meta": {
+          "progressToken": 1.5
+        }
+      }
+    },
+    "issues": [
+      {
+        "code": "invalid_union",
+        "errors": [
+          [
+            {
+              "expected": "string",
+              "code": "invalid_type",
+              "path": [],
+              "message": "Invalid input: expected string, received number"
+            }
+          ],
+          [
+            {
+              "expected": "int",
+              "format": "safeint",
+              "code": "invalid_type",
+              "path": [],
+              "message": "Invalid input: expected int, received number"
+            }
+          ]
+        ],
+        "path": [
+          "params",
+          "_meta",
+          "progressToken"
+        ],
+        "message": "Invalid input"
+      }
+    ]
+  },
+  {
+    "envelope": "list",
+    "input": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "method": "tools/list",
+      "params": {
+        "_meta": {
+          "progressToken": false
+        }
+      }
+    },
+    "issues": [
+      {
+        "code": "invalid_union",
+        "errors": [
+          [
+            {
+              "expected": "string",
+              "code": "invalid_type",
+              "path": [],
+              "message": "Invalid input: expected string, received boolean"
+            }
+          ],
+          [
+            {
+              "expected": "number",
+              "code": "invalid_type",
+              "path": [],
+              "message": "Invalid input: expected number, received boolean"
+            }
+          ]
+        ],
+        "path": [
+          "params",
+          "_meta",
+          "progressToken"
+        ],
+        "message": "Invalid input"
+      }
+    ]
   }
 ]

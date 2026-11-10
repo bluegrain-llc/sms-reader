@@ -1,13 +1,45 @@
 //! Captured Zod input semantics used by the existing MCP SDK registration.
 use crate::model::{js_whitespace, text};
 use serde_json::{Value, json};
-use std::sync::OnceLock;
+use std::{collections::HashMap, sync::OnceLock};
+
+fn parsers() -> &'static Value {
+    static PARSERS: OnceLock<Value> = OnceLock::new();
+    PARSERS
+        .get_or_init(|| serde_json::from_str(include_str!("../compat/tool-parsers.json")).unwrap())
+}
+
+#[cfg(test)]
+static REGEX_COMPILATIONS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+fn regexes() -> &'static HashMap<String, regex::Regex> {
+    static REGEXES: OnceLock<HashMap<String, regex::Regex>> = OnceLock::new();
+    REGEXES.get_or_init(|| {
+        fn collect(schema: &Value, compiled: &mut HashMap<String, regex::Regex>) {
+            if text(schema, "check") == "string_format" {
+                let source = text(&schema["pattern"], "source");
+                compiled.entry(source.to_owned()).or_insert_with(|| {
+                    #[cfg(test)]
+                    REGEX_COMPILATIONS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    regex::Regex::new(source).expect("captured MCP regex")
+                });
+            }
+            match schema {
+                Value::Object(values) => values.values().for_each(|value| collect(value, compiled)),
+                Value::Array(values) => values.iter().for_each(|value| collect(value, compiled)),
+                _ => {}
+            }
+        }
+        let mut compiled = HashMap::new();
+        // Only captured schemas supply patterns; request values never grow this cache.
+        collect(parsers(), &mut compiled);
+        collect(envelopes(), &mut compiled);
+        compiled
+    })
+}
 
 pub fn parse(name: &str, input: Value) -> std::result::Result<Value, String> {
-    static PARSERS: OnceLock<Value> = OnceLock::new();
-    let parsers = PARSERS
-        .get_or_init(|| serde_json::from_str(include_str!("../compat/tool-parsers.json")).unwrap());
-    let Some(schema) = parsers.get(name) else {
+    let Some(schema) = parsers().get(name) else {
         return Err(format!("MCP error -32602: Tool {name} not found"));
     };
     let (value, issues) = check(schema, Some(&input), &[]);
@@ -95,7 +127,7 @@ pub fn envelope(input: &Value) -> Option<(u16, Value)> {
     };
     error.map(|error| (200, json!({"jsonrpc":"2.0","id":input["id"],"error":error})))
 }
-fn formatted_issues(issues: &Vec<Value>) -> String {
+fn formatted_issues(issues: &Vec<Issue>) -> String {
     // Zod embeds JSON.stringify output in another JSON message string.
     let pretty = serde_json::to_string_pretty(issues).unwrap();
     let wire = crate::js_string::utf16_json(&crate::js_string::units(&pretty)).unwrap();
@@ -120,15 +152,42 @@ pub fn normalized_envelope(input: &Value) -> Value {
     }
     value
 }
-fn issue(mut value: Value, path: &[Value], message: String) -> Value {
+// Zod keeps continuation on internal issues, then removes it when formatting.
+// Keep that control state separate so nested union diagnostics retain public JSON.
+#[derive(Clone)]
+struct Issue {
+    value: Value,
+    continuation: Option<bool>,
+}
+impl std::ops::Deref for Issue {
+    type Target = Value;
+    fn deref(&self) -> &Value {
+        &self.value
+    }
+}
+impl serde::Serialize for Issue {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.value.serialize(serializer)
+    }
+}
+impl Issue {
+    fn checked(mut self, check: &Value) -> Self {
+        self.continuation = Some(check["abort"] != true);
+        self
+    }
+}
+fn issue(mut value: Value, path: &[Value], message: String) -> Issue {
     value["path"] = json!(path);
     value["message"] = json!(message);
-    value
+    Issue {
+        value,
+        continuation: None,
+    }
 }
-fn bound_issue(kind: &str, big: bool, length: bool, bound: &Value, path: &[Value]) -> Value {
-    let mut error =
-        json!({"origin":kind,"code":if big {"too_big"} else {"too_small"}, "inclusive":true});
+fn bound_issue(kind: &str, big: bool, length: bool, bound: &Value, path: &[Value]) -> Issue {
+    let mut error = json!({"origin":kind,"code":if big {"too_big"} else {"too_small"}});
     error[if big { "maximum" } else { "minimum" }] = bound.clone();
+    error["inclusive"] = json!(true);
     let predicate = if length {
         format!(
             "to have {}{bound} {}",
@@ -167,7 +226,7 @@ fn child_path(path: &[Value], key: Value) -> Vec<Value> {
     p.push(key);
     p
 }
-fn check(s: &Value, v: Option<&Value>, path: &[Value]) -> (Value, Vec<Value>) {
+fn check(s: &Value, v: Option<&Value>, path: &[Value]) -> (Value, Vec<Issue>) {
     let kind = text(s, "type");
     match kind {
         "assert_object" => {
@@ -176,11 +235,7 @@ fn check(s: &Value, v: Option<&Value>, path: &[Value]) -> (Value, Vec<Value>) {
             } else {
                 (
                     Value::Null,
-                    vec![issue(
-                        json!({"code":"custom"}),
-                        path,
-                        "Invalid input".into(),
-                    )],
+                    vec![issue(json!({"code":"custom"}), path, "Invalid input".into()).checked(s)],
                 )
             };
         }
@@ -215,7 +270,7 @@ fn check(s: &Value, v: Option<&Value>, path: &[Value]) -> (Value, Vec<Value>) {
                     return (
                         Value::Null,
                         vec![issue(
-                            json!({"expected":"object","code":"invalid_type"}),
+                            json!({"code":"invalid_type","expected":"object"}),
                             path,
                             format!("Invalid input: expected object, received {}", received(v)),
                         )],
@@ -247,14 +302,39 @@ fn check(s: &Value, v: Option<&Value>, path: &[Value]) -> (Value, Vec<Value>) {
                     )],
                 );
             }
-            let mut errors = vec![];
+            let mut results = vec![];
             for option in options {
-                let (out, e) = check(option, v, &[]);
-                if e.is_empty() {
-                    return (out, e);
+                let result = check(option, v, &[]);
+                if result.1.is_empty() {
+                    return result;
                 }
-                errors.push(e);
+                results.push(result);
             }
+            // handleUnionResults selects exactly one non-aborted result. A
+            // nested union that made the same choice preserves continuation.
+            let continuing = results
+                .iter()
+                .enumerate()
+                .filter_map(|(index, (_, issues))| {
+                    issues
+                        .iter()
+                        .all(|issue| issue.continuation == Some(true))
+                        .then_some(index)
+                })
+                .collect::<Vec<_>>();
+            if let [index] = continuing.as_slice() {
+                let (out, mut issues) = results.swap_remove(*index);
+                for issue in &mut issues {
+                    let mut full_path = path.to_vec();
+                    full_path.extend(issue["path"].as_array().unwrap().iter().cloned());
+                    issue.value["path"] = json!(full_path);
+                }
+                return (out, issues);
+            }
+            let errors = results
+                .into_iter()
+                .map(|(_, issues)| issues)
+                .collect::<Vec<_>>();
             return (
                 Value::Null,
                 vec![issue(
@@ -339,7 +419,7 @@ fn check(s: &Value, v: Option<&Value>, path: &[Value]) -> (Value, Vec<Value>) {
             .collect::<Vec<_>>();
         if s["strict"] == true && !unknown.is_empty() {
             let suffix = if unknown.len() == 1 { "" } else { "s" };
-            errors.push(issue(
+            let mut unknown_keys = issue(
                 json!({"code":"unrecognized_keys","keys":unknown}),
                 path,
                 format!(
@@ -350,7 +430,9 @@ fn check(s: &Value, v: Option<&Value>, path: &[Value]) -> (Value, Vec<Value>) {
                         .collect::<Vec<_>>()
                         .join(", ")
                 ),
-            ));
+            );
+            unknown_keys.continuation = Some(true);
+            errors.push(unknown_keys);
         }
         out = Value::Object(result);
     } else if kind == "array" {
@@ -361,7 +443,7 @@ fn check(s: &Value, v: Option<&Value>, path: &[Value]) -> (Value, Vec<Value>) {
         }) {
             return (
                 out,
-                vec![bound_issue("array", true, true, &cap["maximum"], path)],
+                vec![bound_issue("array", true, true, &cap["maximum"], path).checked(cap)],
             );
         }
         for (i, value) in out.as_array_mut().unwrap().iter_mut().enumerate() {
@@ -371,6 +453,14 @@ fn check(s: &Value, v: Option<&Value>, path: &[Value]) -> (Value, Vec<Value>) {
         }
     }
     for c in s["checks"].as_array().into_iter().flatten() {
+        let aborted = errors.iter().any(|issue| issue.continuation != Some(true));
+        let explicit = errors.iter().any(|issue| issue.continuation == Some(false));
+        // Captured length checks have Zod's built-in `when`, which runs through
+        // implicit type errors but still respects an explicit aborting check.
+        let length_check = matches!(text(c, "check"), "min_length" | "max_length");
+        if aborted && (!length_check || explicit) {
+            continue;
+        }
         match text(c, "check") {
             "overwrite" => {
                 if let Some(value) = out.as_str() {
@@ -380,11 +470,13 @@ fn check(s: &Value, v: Option<&Value>, path: &[Value]) -> (Value, Vec<Value>) {
             "number_format" => {
                 let n = out.as_f64().unwrap();
                 if n.fract() != 0.0 {
-                    errors.push(issue(
+                    let mut invalid = issue(
                         json!({"expected":"int","format":"safeint","code":"invalid_type"}),
                         path,
                         "Invalid input: expected int, received number".into(),
-                    ));
+                    );
+                    invalid.continuation = Some(false);
+                    errors.push(invalid);
                     break;
                 }
                 if n.abs() > 9_007_199_254_740_991.0 {
@@ -399,15 +491,18 @@ fn check(s: &Value, v: Option<&Value>, path: &[Value]) -> (Value, Vec<Value>) {
                     e["note"] = json!("Integers must be within the safe integer range.");
                     e["origin"] = json!("int");
                     e["inclusive"] = json!(true);
-                    errors.push(issue(
-                        e,
-                        path,
-                        format!(
-                            "Too {}: expected int to be {}{bound}",
-                            if big { "big" } else { "small" },
-                            if big { "<=" } else { ">=" }
-                        ),
-                    ));
+                    errors.push(
+                        issue(
+                            e,
+                            path,
+                            format!(
+                                "Too {}: expected int to be {}{bound}",
+                                if big { "big" } else { "small" },
+                                if big { "<=" } else { ">=" }
+                            ),
+                        )
+                        .checked(c),
+                    );
                 }
             }
             "min_length" | "max_length" | "greater_than" | "less_than" => {
@@ -430,17 +525,18 @@ fn check(s: &Value, v: Option<&Value>, path: &[Value]) -> (Value, Vec<Value>) {
                 } else {
                     n < bound.as_f64().unwrap()
                 } {
-                    errors.push(bound_issue(kind, big, length, bound, path));
+                    errors.push(bound_issue(kind, big, length, bound, path).checked(c));
                 }
             }
             "string_format" => {
                 let pattern = text(&c["pattern"], "source");
-                if !regex::Regex::new(pattern)
-                    .unwrap()
+                if !regexes()
+                    .get(pattern)
+                    .expect("pattern belongs to captured MCP schemas")
                     .is_match(out.as_str().unwrap())
                 {
                     let display = text(&c["pattern"], "display");
-                    errors.push(issue(json!({"origin":"string","code":"invalid_format","format":"regex","pattern":display}),path,format!("Invalid string: must match pattern {display}")));
+                    errors.push(issue(json!({"origin":"string","code":"invalid_format","format":"regex","pattern":display}),path,format!("Invalid string: must match pattern {display}")).checked(c));
                 }
             }
             _ => {}
@@ -452,6 +548,51 @@ fn check(s: &Value, v: Option<&Value>, path: &[Value]) -> (Value, Vec<Value>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn maximum_choice_forms_reuse_captured_regexes() {
+        let input = json!({
+            "title":"Synthetic form", "body":"Choose one option per field", "idempotencyKey":"regex-cache",
+            "fields":(0..30).map(|i| json!({"id":format!("field{i}"),"label":"Choose","type":"single_choice",
+                "options":(0..40).map(|j| json!({"id":format!("option{j}"),"label":"Option"})).collect::<Vec<_>>()
+            })).collect::<Vec<_>>(),
+            "actions":[{"id":"send","label":"Send","type":"submit"}]
+        });
+        assert!(crate::model::js_json(&input, false).len() < 256 * 1024);
+        parse("create_request", input.clone()).unwrap();
+        let compiled = REGEX_COMPILATIONS.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(compiled, regexes().len());
+        for _ in 0..3 {
+            parse("create_request", input.clone()).unwrap();
+        }
+        assert_eq!(
+            REGEX_COMPILATIONS.load(std::sync::atomic::Ordering::SeqCst),
+            compiled
+        );
+        let mut invalid = input;
+        invalid["fields"][29]["options"][39]["id"] = json!("invalid identifier");
+        assert!(
+            parse("create_request", invalid)
+                .unwrap_err()
+                .contains("Invalid string: must match pattern")
+        );
+        assert_eq!(
+            REGEX_COMPILATIONS.load(std::sync::atomic::Ordering::SeqCst),
+            compiled
+        );
+    }
+    #[test]
+    fn captured_check_abort_flag_changes_union_eligibility() {
+        let mut schema = parsers()["create_request"]["shape"]["steps"]["inner"]["element"]["shape"]
+            ["when"]["inner"]
+            .clone();
+        let input = json!({"fieldId":"f","contains":"?"});
+        let (_, issues) = check(&schema, Some(&input), &[]);
+        assert_eq!(issues[0]["code"], "invalid_format");
+        schema["options"][1]["shape"]["contains"]["checks"][0]["abort"] = json!(true);
+        let (_, issues) = check(&schema, Some(&input), &[]);
+        assert_eq!(issues[0]["code"], "invalid_union");
+        assert_eq!(issues[0]["errors"].as_array().unwrap().len(), 2);
+    }
     #[test]
     fn captured_sdk_validation() {
         let initialization: Value =
@@ -471,6 +612,28 @@ mod tests {
         let cases: Value =
             serde_json::from_str(include_str!("../compat/tool-validation.json")).unwrap();
         for case in cases.as_array().unwrap() {
+            let schema = if let Some(name) = case["envelope"].as_str() {
+                envelopes()[name].clone()
+            } else {
+                parsers()[text(case, "name")].clone()
+            };
+            let (_, issues) = check(&schema, Some(&case["input"]), &[]);
+            if let Some(expected) = case.get("issues") {
+                assert_eq!(
+                    serde_json::to_value(&issues).unwrap(),
+                    *expected,
+                    "{}",
+                    case["input"]
+                );
+                // Also pin JSON field order used by SDK envelope diagnostics.
+                assert_eq!(
+                    formatted_issues(&issues),
+                    serde_json::to_string_pretty(expected).unwrap()
+                );
+            }
+            if case.get("name").is_none() {
+                continue;
+            }
             let result = parse(text(case, "name"), case["input"].clone());
             if let Some(error) = case["error"].as_str() {
                 assert_eq!(result.unwrap_err(), error, "{}", case["input"]);

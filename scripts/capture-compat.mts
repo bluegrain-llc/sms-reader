@@ -37,6 +37,8 @@ function toolParser(schema: z.ZodType): unknown {
   if (d.right) out.right = toolParser(d.right);
   if (d.checks) out.checks = d.checks.filter((c: any) => c._zod.def.check !== 'custom').map((c: any) => {
     const check = c._zod.def;
+    if (check.abort !== undefined && typeof check.abort !== 'boolean') throw Error('Unsupported check abort flag');
+    if (check.when && !['min_length', 'max_length', 'length_equals'].includes(check.check)) throw Error('Unsupported custom check condition');
     return JSON.parse(JSON.stringify(check, (_key, value) => value instanceof RegExp ? { source: value.source, display: String(value) } : value));
   });
   if (d.shape) out.shape = Object.fromEntries(Object.entries(d.shape).map(([k, s]) => [k, toolParser(s as z.ZodType)]));
@@ -69,6 +71,9 @@ save('initialization-validation.json', [
   return { input, valid: result.success, ...(result.success ? {} : { error: result.error.message }) };
 }));
 const basicForm = { title: ' Test ', body: 'Body', idempotencyKey: 'tool-input', actions: [{ id: 'ok', label: ' OK ', type: 'submit' }] };
+const whenForm = (when: unknown) => ({ ...basicForm, steps: [
+  { id: 'one', title: 'One', fieldIds: [] }, { id: 'two', title: 'Two', fieldIds: [], when },
+] });
 const toolCases: { name: keyof typeof toolSchemas; input: unknown }[] = [
   ...[{}, { requestId: 1 }, { requestId: '?' }, { requestId: 'valid', extra: true }].map(input => ({ name: 'get_sms_code_request' as const, input })),
   ...[{ purpose: '  ', idempotencyKey: 'short' }, { purpose: ' Text ', idempotencyKey: 'valid-key', extra: true }].map(input => ({ name: 'request_sms_code' as const, input })),
@@ -78,11 +83,33 @@ const toolCases: { name: keyof typeof toolSchemas; input: unknown }[] = [
     { ...basicForm, steps: [{ id: 'one', title: 'One', fieldIds: [], when: { fieldId: 'f', equals: null } }] },
   ].map(input => ({ name: 'create_request' as const, input })),
   { name: 'poll_request_events', input: { cursor: '😀'.repeat(65) } },
+  // Zod selects a single non-aborted union branch and retains its own paths.
+  ...[
+    { fieldId: 'f', contains: '?' },
+    { fieldId: '?', contains: '?' },
+    { fieldId: 'f', equals: 'x'.repeat(4001) },
+    { fieldId: 'f', contains: 1 },
+    { fieldId: 'f', contains: 'valid', unexpected: true },
+    { fieldId: 'f', equals: null },
+    // Both strict-object alternatives continue on their unrecognized key:
+    // two non-aborted branches retain the outer invalid_union diagnostic.
+    { fieldId: 'f', equals: 'valid', contains: 'valid' },
+    { fieldId: 'f', equals: 1e20 }, // finite equals values do not require safe integers
+  ].map(when => ({ name: 'create_request' as const, input: whenForm(when) })),
+  ...[1.5, 1e20, -1e20].map(maxLength => ({ name: 'create_request' as const,
+    input: { ...basicForm, fields: [{ id: 'f', label: 'Field', type: 'text', maxLength }] } })),
 ];
-save('tool-validation.json', toolCases.map(({ name, input }) => {
+const toolValidation = toolCases.map(({ name, input }) => {
   const result = toolSchemas[name].safeParse(input);
-  return { name, input, ...(result.success ? { value: result.data } : { error: `MCP error -32602: Input validation error: Invalid arguments for tool ${name}: ${getParseErrorMessage(result.error)}` }) };
-}));
+  return { name, input, ...(result.success ? { value: result.data } : { error: `MCP error -32602: Input validation error: Invalid arguments for tool ${name}: ${getParseErrorMessage(result.error)}`, issues: result.error.issues }) };
+});
+const envelopeValidation = [1e20, -1e20, 1.5, false].map(progressToken => {
+  const input = { jsonrpc: '2.0', id: 1, method: 'tools/list', params: { _meta: { progressToken } } };
+  const result = ListToolsRequestSchema.safeParse(input);
+  if (result.success) throw Error('Expected invalid SDK progress token');
+  return { envelope: 'list', input, issues: result.error.issues };
+});
+save('tool-validation.json', [...toolValidation, ...envelopeValidation]);
 const server = app({ forms: {}, checkAgent: async () => {} } as unknown as Relay, { verifyOwner: async () => ({ uid: 'fixture', authTime: 0 }), verifyScheduler: async () => {}, deleteIdentity: async () => {} }).listen(0, '127.0.0.1');
 const client = new Client({ name: 'schema-export', version: '1' });
 try {
