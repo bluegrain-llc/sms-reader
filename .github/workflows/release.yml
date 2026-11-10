@@ -83,6 +83,11 @@ jobs:
           log-accepted-android-sdk-licenses: false
       - uses: gradle/actions/setup-gradle@v4
       - run: sdkmanager 'platforms;android-36' 'build-tools;36.0.0'
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_RELEASE_SERVICE_ACCOUNT }}
+      - uses: google-github-actions/setup-gcloud@v2
       - name: Build and verify signed release artifacts
         env:
           RELAY_KEYSTORE_BASE64: ${{ secrets.RELAY_KEYSTORE_BASE64 }}
@@ -101,13 +106,9 @@ jobs:
           export RELAY_KEYSTORE="$RUNNER_TEMP/release-upload.jks"
           printf '%s' "$RELAY_KEYSTORE_BASE64" | base64 --decode > "$RELAY_KEYSTORE"
           test -s "$RELAY_KEYSTORE"
+          python3 scripts/verify-cloud-config.py
           scripts/build-pilot.sh
           python3 scripts/verify-release.py
-      - uses: google-github-actions/auth@v2
-        with:
-          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
-          service_account: ${{ vars.GCP_RELEASE_SERVICE_ACCOUNT }}
-      - uses: google-github-actions/setup-gcloud@v2
       - name: Publish tested image to Artifact Registry
         id: image
         env:

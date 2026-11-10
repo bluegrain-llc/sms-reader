@@ -18,7 +18,7 @@ actual = re.search(r'Signer #1 certificate SHA-256 digest: ([a-fA-F0-9]+)', cert
 if not actual or actual[1].upper() != expected:
     raise SystemExit('APK signer mismatch')
 jar = subprocess.run(['jarsigner', '-verify', str(aab)], check=True, capture_output=True, text=True).stdout
-if 'jar verified.' not in jar or 'jar is unsigned' in jar:
+if 'jar verified.' not in jar or 'jar is unsigned' in jar or 'unsigned entries' in jar.lower():
     raise SystemExit('AAB signature verification failed')
 # Verify the AAB uses the same upload identity; integrity alone does not bind its signer.
 key = subprocess.run(['keytool', '-printcert', '-jarfile', str(aab)], check=True, capture_output=True, text=True).stdout

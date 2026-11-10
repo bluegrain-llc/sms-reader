@@ -16,7 +16,7 @@ Initial staging bootstrap is separate from production rollout: create a fully co
 
 Create a GitHub environment named `production`, restrict deployments to protected `main`, and configure required human reviewers. GitHub environment protection is a repository setting, not something a workflow file can enforce by itself. Do not enable the release workflow for production until these controls are verified.
 
-Configure Workload Identity Federation to accept only this repository's `production` environment subject. No downloaded service-account JSON keys are used. The release service account needs Artifact Registry write, Cloud Run deployment, act-as on the server identity, Firestore index/rules deployment and Cloud Logging read access. Use repository-specific/project-scoped bindings; no project Owner role is needed. Provisioning IAM is a separate operator duty.
+Configure Workload Identity Federation to accept only this repository's `production` environment subject. No downloaded service-account JSON keys are used. The release service account needs Artifact Registry write, Cloud Run deployment, act-as on the server identity, Firestore index/rules deployment, Firebase Android app config read access and Cloud Logging read access. Use repository-specific/project-scoped bindings; no project Owner role is needed. Provisioning IAM is a separate operator duty.
 
 Environment variables:
 
@@ -32,7 +32,7 @@ Environment secrets: `RELAY_KEYSTORE_BASE64`, `RELAY_STORE_PASSWORD`, `RELAY_KEY
 
 1. Wait for the `CI and delivery` push run on `main` to succeed. Its tested container archive includes a SHA-256 checksum and an OCI commit label.
 2. Dispatch `Protected production release` from `main`, supplying that CI run ID. The workflow rejects incomplete, failed, non-main, fork or unrelated workflow runs.
-3. The workflow verifies the archive/commit label, builds release lint/R8/APK/AAB with complete configuration, verifies both signatures against the upload certificate and copies the tested container into Artifact Registry.
+3. The workflow verifies the archive/commit label, builds release lint/R8/APK/AAB with complete configuration, verifies the Android configuration against the registered Firebase app and canonical Cloud Run URL, then verifies both signatures against the upload certificate and copies the tested container into Artifact Registry.
 4. Deployment consumes the Artifact Registry digest, deploys additive indexes and waits for READY. It creates one fully configured revision with zero traffic and tag `candidate`.
 5. The tagged URL must pass health, unauthenticated rejection, App Links certificate matching, authenticated REST and MCP tool-list checks before receiving traffic.
 6. Traffic progresses through 5%, 25%, then 100%, each with at least 60 seconds of observation, repeat smoke checks and a candidate HTTP 5xx log check. No traffic-stage advances after failed checks.
@@ -52,7 +52,7 @@ Deploy indexes/additive backend changes before phones. Preserve existing request
 
 ## Android and privacy
 
-Use JDK 17+ (JDK 21 in CI), SDK 36 and the pinned Gradle wrapper. `scripts/build-pilot.sh` validates public configuration formats, rejects known placeholders and checks Firebase project-number consistency and creates a private pilot signing key only when the chosen path does not already exist. Back up signing keys outside the repository. For Play builds, use a separate upload key and register the certificates of the APKs Play actually signs.
+Use JDK 17+ (JDK 21 in CI), SDK 36 and the pinned Gradle wrapper. `scripts/build-pilot.sh` validates the exact Gradle-property-preferred public settings, rejects known placeholders and checks Firebase project-number consistency and creates a private pilot signing key only when the chosen path does not already exist. Back up signing keys outside the repository. For Play builds, use a separate upload key and register the certificates of the APKs Play actually signs.
 
 The backend accepts `ANDROID_SIGNING_SHA256S` as a JSON array and continues to accept legacy `ANDROID_SIGNING_SHA256`. Asset Links contains the deduplicated union; malformed fingerprints fail closed. Do not drop an active certificate until its installed clients have migrated.
 
