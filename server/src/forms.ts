@@ -26,6 +26,14 @@ export class Forms {
     ensure((grant as FormGrant).formsApproved, 403, 'forms_approval_required'); return { grant: grant as FormGrant, account };
   }
   async approve(uid: string, id: string, approved: boolean) {
+    if (!approved) {
+      await this.db.runTransaction(async tx => {
+        await this.relay.account(tx, uid);
+        const g = (await tx.get(this.ref('grants', id))).data();
+        ensure(g?.ownerId === uid, 404, 'grant_not_found');
+      });
+      await this.relay.recordSecurity({ ownerId: uid, kind: 'forms.deny', target: id });
+    }
     await this.db.runTransaction(async tx => {
       await this.relay.account(tx, uid);
       const g = (await tx.get(this.ref('grants', id))).data() as FormGrant | undefined;
@@ -200,6 +208,10 @@ export class Forms {
     return hook;
   }
   async webhooks(secret: string, remove?: string) {
+    if (remove) {
+      const { grant } = await this.db.runTransaction(tx => this.agent(tx, secret));
+      await this.relay.recordSecurity({ ownerId: grant.ownerId, kind: 'webhook.delete', target: remove, grantId: grant.id });
+    }
     return this.db.runTransaction(async tx => { const { grant: g } = await this.agent(tx, secret);
       if (remove) tx.update(this.ref('grants', g.id), { webhooks: (g.webhooks ?? []).filter(h => h.id !== remove) });
       return (g.webhooks ?? []).filter(h => h.id !== remove).map(({ secret: _secret, ...h }) => h);
@@ -256,35 +268,32 @@ export class Forms {
     if (!snap.empty) await this.kick();
   }
   async dispatch() {
-    // Fifty 10-second callbacks in batches of ten fit below Cloud Run's 120-second deadline.
-    const jobs = await this.db.collection('deliveryOutbox').where('nextAt', '<=', this.now()).limit(50).get();
-    for (let i = 0; i < jobs.size; i += 10) await Promise.all(jobs.docs.slice(i, i + 10).map(d => this.deliver(d.id)));
-    if (jobs.size === 50) await this.kick();
+    const count = await this.relay.pages.run('form-delivery', this.db.collection('deliveryOutbox').where('nextAt', '<=', this.now()),
+      'nextAt', 50, id => this.deliver(id), 10);
+    if (count === 50) await this.kick();
   }
   async maintenance() {
-    // Recover a process that stopped after changing a grant but before cancelling its forms.
-    const revoked = await this.db.collection('grants').where('formsCancellationPending', '==', true).limit(250).get();
-    for (const grant of revoked.docs) await this.cancelGrant(grant.id);
-    const helpers = await this.db.collection('formRequests').where('status', '==', 'pending').where('helperNextAt', '<=', this.now()).limit(250).get();
-    for (const doc of helpers.docs) await this.db.runTransaction(async tx => {
-      const r = (await tx.get(doc.ref)).data() as FormRequest;
+    await this.relay.pages.run('revoked-forms', this.db.collection('grants').where('formsCancellationPending', '==', true),
+      null, 250, id => this.cancelGrant(id));
+    await this.relay.pages.run('helper-timeouts', this.db.collection('formRequests').where('status', '==', 'pending').where('helperNextAt', '<=', this.now()),
+      'helperNextAt', 250, id => this.db.runTransaction(async tx => {
+      const ref = this.ref('formRequests', id), r = (await tx.get(ref)).data() as FormRequest | undefined;
+      if (!r) return;
       const g = (await tx.get(this.ref('grants', r.grantId))).data() as FormGrant;
       if (!g || r.status !== 'pending') return;
       for (const [deviceId, helper] of Object.entries(r.helpers)) if (helper.until <= this.now() && !helper.timedOut) {
         helper.timedOut = true; this.event(tx, r, g, 'input.timeout', { deviceId, fieldId: helper.fieldId });
       }
-      tx.update(doc.ref, { helperNextAt: Math.min(...Object.values(r.helpers).filter(h => !h.timedOut).map(h => h.until), Number.MAX_SAFE_INTEGER) });
-    });
-    const expired = await this.db.collection('formRequests').where('status', '==', 'pending').where('nextCheckAt', '<=', this.now()).limit(250).get();
-    for (const doc of expired.docs) await this.db.runTransaction(async tx => {
-      const r = (await tx.get(doc.ref)).data() as FormRequest;
+      tx.update(ref, { helperNextAt: Math.min(...Object.values(r.helpers).filter(h => !h.timedOut).map(h => h.until), Number.MAX_SAFE_INTEGER) });
+    }));
+    await this.relay.pages.run('form-expiry', this.db.collection('formRequests').where('status', '==', 'pending').where('nextCheckAt', '<=', this.now()),
+      'nextCheckAt', 250, id => this.db.runTransaction(async tx => {
+      const r = (await tx.get(this.ref('formRequests', id))).data() as FormRequest | undefined;
+      if (!r) return;
       const g = (await tx.get(this.ref('grants', r.grantId))).data() as FormGrant;
       if (r.status === 'pending' && g) await this.expire(tx, r, g, !!g.formsApproved && await this.relay.validGrant(tx, g));
-    });
+    }));
     await this.dispatch();
-    for (const collection of ['formResults', 'formRequests', 'requestEvents', 'deliveryOutbox']) {
-      const expired = await this.db.collection(collection).where('purgeAt', '<=', new Date(this.now())).limit(400).get();
-      const batch = this.db.batch(); expired.docs.forEach(d => batch.delete(d.ref)); await batch.commit();
-    }
+    for (const collection of ['formResults', 'formRequests', 'requestEvents', 'deliveryOutbox']) await this.relay.pages.purge(collection, this.now());
   }
 }

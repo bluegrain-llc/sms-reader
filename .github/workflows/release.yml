@@ -126,6 +126,7 @@ jobs:
         env:
           IMAGE_URI: ${{ steps.image.outputs.uri }}
           COMMIT_SHA: ${{ steps.source.outputs.sha }}
+          SECURITY_LEDGER_BUCKET: ${{ vars.SECURITY_LEDGER_BUCKET }}
         run: scripts/deploy.sh
       - name: Remove private signing material
         if: always()
