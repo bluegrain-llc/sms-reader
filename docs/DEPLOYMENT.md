@@ -77,3 +77,7 @@ Before running the deployment script, export the public `ANDROID_SIGNING_SHA256`
 Deploy Firestore retention/index overrides for `connections` (seven days), `connectionCodes` (ten-minute approval window), and `connectionRates` (ten-minute quota window). All use `purgeAt`, scheduled cleanup, and TTL backstops. No additional composite indexes are required beyond the five existing SMS indexes. Verify the public asset-links response against the APK signer before upgrading phones.
 
 Manager creation/provisioning APIs are retired and their child credentials are rejected. Direct pairing creates owner-bound caller grants without a parent credential. Existing ordinary pilot grants remain compatible. Configure an ingress proxy hop only for a trusted proxy deployment; production Cloud Run uses one hop, while direct local servers use zero. Verify source/global creation quotas and owner decision quotas before exposing pairing outside the private pilot.
+
+## Rust migration candidates
+
+`BACKEND=typescript` remains the default. `BACKEND=rust` selects `server-rust/Dockerfile` and defaults `TRAFFIC_MODE` to `stage`: a tagged candidate revision receives no production traffic. Set `TRAFFIC_MODE=live` only after the isolated staging and production-candidate acceptance steps in [RUST_MIGRATION.md](RUST_MIGRATION.md). Promote a verified exact revision rather than an unverified latest revision. Keep the TypeScript source and prior Cloud Run revision for seven days of observation before making Rust the default.

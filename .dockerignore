@@ -6,3 +6,11 @@
 !server/tsconfig.json
 !server/src/
 !server/src/**
+!server-rust/
+!server-rust/Cargo.toml
+!server-rust/Cargo.lock
+!server-rust/rust-toolchain.toml
+!server-rust/src/
+!server-rust/src/**
+!server-rust/compat/
+!server-rust/compat/**

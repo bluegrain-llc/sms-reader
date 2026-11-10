@@ -1,0 +1,190 @@
+[
+  {
+    "input": null,
+    "canonical": false,
+    "json": "null",
+    "hash": "74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b"
+  },
+  {
+    "input": null,
+    "canonical": true,
+    "json": "null",
+    "hash": "74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b"
+  },
+  {
+    "input": [
+      "Sign in",
+      null
+    ],
+    "canonical": false,
+    "json": "[\"Sign in\",null]",
+    "hash": "9b11be63dd022fe9e1f45b94e1dd846b1e3707bb8a3a14634741a4b5f4b53baa"
+  },
+  {
+    "input": [
+      "Sign in",
+      null
+    ],
+    "canonical": true,
+    "json": "[\"Sign in\",null]",
+    "hash": "9b11be63dd022fe9e1f45b94e1dd846b1e3707bb8a3a14634741a4b5f4b53baa"
+  },
+  {
+    "input": [
+      "Sign in",
+      null,
+      "Title"
+    ],
+    "canonical": false,
+    "json": "[\"Sign in\",null,\"Title\"]",
+    "hash": "8155e32b622d38e1b1f1c39871fbc9986e0d93f038481bdf61456cfaea208ac6"
+  },
+  {
+    "input": [
+      "Sign in",
+      null,
+      "Title"
+    ],
+    "canonical": true,
+    "json": "[\"Sign in\",null,\"Title\"]",
+    "hash": "8155e32b622d38e1b1f1c39871fbc9986e0d93f038481bdf61456cfaea208ac6"
+  },
+  {
+    "input": {
+      "2": 1e+21,
+      "10": 1e-7,
+      "4294967294": 0,
+      "é": "😀",
+      "z": 1,
+      "01": 0.000001,
+      "4294967295": 1.2345678901234567
+    },
+    "canonical": false,
+    "json": "{\"2\":1e+21,\"10\":1e-7,\"4294967294\":0,\"é\":\"😀\",\"z\":1,\"01\":0.000001,\"4294967295\":1.2345678901234567}",
+    "hash": "2f128835ee9db46ad1945151bf209c65550ac2d527242379fa34b4ec8aeeb8f2"
+  },
+  {
+    "input": {
+      "2": 1e+21,
+      "10": 1e-7,
+      "4294967294": 0,
+      "é": "😀",
+      "z": 1,
+      "01": 0.000001,
+      "4294967295": 1.2345678901234567
+    },
+    "canonical": true,
+    "json": "{\"2\":1e+21,\"10\":1e-7,\"4294967294\":0,\"01\":0.000001,\"4294967295\":1.2345678901234567,\"z\":1,\"é\":\"😀\"}",
+    "hash": "742c2d3d5c60e17044c3d8836183c5c21adce7caff2cdc54fda756c54e4aa384"
+  },
+  {
+    "input": [
+      1e-7,
+      0.000001,
+      100000000000000000000,
+      1e+21,
+      0,
+      333333333.3333333
+    ],
+    "canonical": false,
+    "json": "[1e-7,0.000001,100000000000000000000,1e+21,0,333333333.3333333]",
+    "hash": "e0aeb4a96debadc5111b6f9e7acd1517a4f6e80f6f89d7b2bcd25660bb2fd132"
+  },
+  {
+    "input": [
+      1e-7,
+      0.000001,
+      100000000000000000000,
+      1e+21,
+      0,
+      333333333.3333333
+    ],
+    "canonical": true,
+    "json": "[1e-7,0.000001,100000000000000000000,1e+21,0,333333333.3333333]",
+    "hash": "e0aeb4a96debadc5111b6f9e7acd1517a4f6e80f6f89d7b2bcd25660bb2fd132"
+  },
+  {
+    "input": {
+      "a": null
+    },
+    "canonical": false,
+    "json": "{\"a\":null}",
+    "hash": "d091f9c83c091f79652fe8786375b3fe4ce0861a56f5bfbafedbe431877ff0e8"
+  },
+  {
+    "input": {
+      "a": null
+    },
+    "canonical": true,
+    "json": "{\"a\":null}",
+    "hash": "d091f9c83c091f79652fe8786375b3fe4ce0861a56f5bfbafedbe431877ff0e8"
+  },
+  {
+    "input": {},
+    "canonical": false,
+    "json": "{}",
+    "hash": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+  },
+  {
+    "input": {},
+    "canonical": true,
+    "json": "{}",
+    "hash": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+  },
+  {
+    "input": {
+      "title": "Test",
+      "body": "Body",
+      "fields": [
+        {
+          "id": "code",
+          "label": "Code",
+          "required": false,
+          "type": "text",
+          "maxLength": 1000,
+          "input": "sms_code"
+        }
+      ],
+      "actions": [
+        {
+          "id": "yes",
+          "label": "Yes",
+          "type": "submit"
+        }
+      ],
+      "expiresInSeconds": 86400,
+      "idempotencyKey": "hash-fixture"
+    },
+    "canonical": false,
+    "json": "{\"title\":\"Test\",\"body\":\"Body\",\"fields\":[{\"id\":\"code\",\"label\":\"Code\",\"required\":false,\"type\":\"text\",\"maxLength\":1000,\"input\":\"sms_code\"}],\"actions\":[{\"id\":\"yes\",\"label\":\"Yes\",\"type\":\"submit\"}],\"expiresInSeconds\":86400,\"idempotencyKey\":\"hash-fixture\"}",
+    "hash": "b3a8bd717e6328b41ececef66a49be0af93268c12791d42f07f2c39d6123d9f6"
+  },
+  {
+    "input": {
+      "title": "Test",
+      "body": "Body",
+      "fields": [
+        {
+          "id": "code",
+          "label": "Code",
+          "required": false,
+          "type": "text",
+          "maxLength": 1000,
+          "input": "sms_code"
+        }
+      ],
+      "actions": [
+        {
+          "id": "yes",
+          "label": "Yes",
+          "type": "submit"
+        }
+      ],
+      "expiresInSeconds": 86400,
+      "idempotencyKey": "hash-fixture"
+    },
+    "canonical": true,
+    "json": "{\"actions\":[{\"id\":\"yes\",\"label\":\"Yes\",\"type\":\"submit\"}],\"body\":\"Body\",\"expiresInSeconds\":86400,\"fields\":[{\"id\":\"code\",\"input\":\"sms_code\",\"label\":\"Code\",\"maxLength\":1000,\"required\":false,\"type\":\"text\"}],\"idempotencyKey\":\"hash-fixture\",\"title\":\"Test\"}",
+    "hash": "c8d1239831e1b1d88fe25abb2bd9645e27eef56344c536251bb903903eb4c2d9"
+  }
+]

@@ -5,8 +5,12 @@ import { getFirestore } from 'firebase-admin/firestore';
 import { getAuth } from 'firebase-admin/auth';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-import { Relay } from '../src/relay.js';
-import { app } from '../src/http.js';
+import { Relay as TypeScriptRelay } from '../src/relay.js';
+type Relay = TypeScriptRelay;
+const rust = process.env.RELAY_BACKEND === 'rust' ? await import('./rust-adapter.js') : undefined;
+const Relay: typeof TypeScriptRelay = rust ? rust.RustRelay as unknown as typeof TypeScriptRelay : TypeScriptRelay;
+import { app as typescriptApp } from '../src/http.js';
+const app: typeof typescriptApp = rust ? rust.rustApp as unknown as typeof typescriptApp : typescriptApp;
 import { hash, MINUTE, RelayError } from '../src/model.js';
 import type { Server } from 'node:http';
 
@@ -474,7 +478,8 @@ integration('SMS helper readiness and timeout are independent of the form deadli
 });
 integration('transactional outbox leases tolerate duplicate workers, failures and a lost wakeup', async () => {
   await allowForms();
-  const { Forms } = await import('../src/forms.js');
+  const { Forms: TypeScriptForms } = await import('../src/forms.js');
+  const Forms = rust ? rust.RustForms as unknown as typeof TypeScriptForms : TypeScriptForms;
   let callbacks: { id: string; type: string }[] = [], fail = true;
   const forms = new Forms(relay, async () => { throw Error('tasks temporarily down'); }, async (_url, _secret, event) => {
     callbacks.push(event as { id: string; type: string }); if (fail) { fail = false; throw Error('timeout'); }

@@ -6,6 +6,19 @@ cd "$(dirname "$0")/.."
 : "${REGION:=us-central1}"
 : "${SERVICE:=sms-code-relay}"
 : "${REPOSITORY:=sms-relay}"
+: "${BACKEND:=typescript}"
+case "$BACKEND" in
+  typescript) dockerfile=server/Dockerfile; default_traffic=live ;;
+  rust) dockerfile=server-rust/Dockerfile; default_traffic=stage ;;
+  *) echo 'BACKEND must be typescript or rust' >&2; exit 1 ;;
+esac
+: "${TRAFFIC_MODE:=$default_traffic}"
+revision_args=()
+case "$TRAFFIC_MODE" in
+  live) ;;
+  stage) revision_args=(--no-traffic --tag "${BACKEND}-candidate") ;;
+  *) echo 'TRAFFIC_MODE must be stage or live' >&2; exit 1 ;;
+esac
 export GOOGLE_CLOUD_QUOTA_PROJECT="${GOOGLE_CLOUD_QUOTA_PROJECT:-$PROJECT_ID}"
 server_account="sms-relay-server@${PROJECT_ID}.iam.gserviceaccount.com"
 scheduler_account="sms-relay-scheduler@${PROJECT_ID}.iam.gserviceaccount.com"
@@ -36,12 +49,12 @@ trap 'rm -f "$config_file"' EXIT
 cat > "$config_file" <<'YAML'
 steps:
   - name: gcr.io/cloud-builders/docker
-    args: ['build', '-f', 'server/Dockerfile', '-t', '${_IMAGE}', '.']
+    args: ['build', '-f', '${_DOCKERFILE}', '-t', '${_IMAGE}', '.']
 images: ['${_IMAGE}']
 options:
   logging: CLOUD_LOGGING_ONLY
 YAML
-gcloud builds submit . --config "$config_file" --substitutions "_IMAGE=$image" --service-account "projects/$PROJECT_ID/serviceAccounts/$build_account" --project "$PROJECT_ID"
+gcloud builds submit . --config "$config_file" --substitutions "_IMAGE=$image,_DOCKERFILE=$dockerfile" --service-account "projects/$PROJECT_ID/serviceAccounts/$build_account" --project "$PROJECT_ID"
 # Public ingress is required for device Firebase ID tokens and independent agent grants.
 # Every application endpoint except healthz still authenticates requests itself.
 # Build indexes before the new revision starts using the v2 queries.
@@ -53,11 +66,11 @@ for attempt in {1..120}; do
   sleep 5
 done
 if [[ "$states" =~ NEEDS_REPAIR ]]; then echo "Firestore index needs repair" >&2; exit 1; fi
-gcloud run deploy "$SERVICE" --image "$image" --region "$REGION" --project "$PROJECT_ID" \
+gcloud run deploy "$SERVICE" "${revision_args[@]}" --image "$image" --region "$REGION" --project "$PROJECT_ID" \
   --service-account "$server_account" --allow-unauthenticated --port 8080 --memory 512Mi \
   --timeout 120 --max-instances 10 --update-env-vars "GOOGLE_CLOUD_PROJECT=$PROJECT_ID,ANDROID_SIGNING_SHA256=$ANDROID_SIGNING_SHA256"
 service_url="$(gcloud run services describe "$SERVICE" --region "$REGION" --project "$PROJECT_ID" --format='value(status.url)')"
-gcloud run services update "$SERVICE" --region "$REGION" --project "$PROJECT_ID" \
+gcloud run services update "$SERVICE" "${revision_args[@]}" --region "$REGION" --project "$PROJECT_ID" \
   --update-env-vars "SERVICE_URL=$service_url,SCHEDULER_EMAIL=$scheduler_account,DELIVERY_QUEUE=projects/$PROJECT_ID/locations/$REGION/queues/relay-delivery"
 job_args=(--location "$REGION" --project "$PROJECT_ID" --schedule '* * * * *' \
   --uri "$service_url/internal/maintenance" --http-method POST \
@@ -67,5 +80,9 @@ if gcloud scheduler jobs describe sms-relay-maintenance --location "$REGION" --p
 else
   gcloud scheduler jobs create http sms-relay-maintenance "${job_args[@]}"
 fi
-gcloud run services update-traffic "$SERVICE" --region "$REGION" --project "$PROJECT_ID" --to-latest --quiet
+if [ "$TRAFFIC_MODE" = live ]; then
+  gcloud run services update-traffic "$SERVICE" --region "$REGION" --project "$PROJECT_ID" --to-latest --quiet
+else
+  echo 'Candidate staged with no traffic. Run staging acceptance before promoting its exact revision.'
+fi
 printf 'RELAY_URL=%s\n' "$service_url"

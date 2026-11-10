@@ -47,7 +47,16 @@ jobs:
           distribution: temurin
           java-version: 21
       - run: npm ci
-      - run: npm run test:integration
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: server-rust
+      - run: npx tsc --noEmit --target ES2023 --module NodeNext --moduleResolution NodeNext --esModuleInterop --strict --skipLibCheck --allowJs server/test/*.ts scripts/capture-compat.mts
+      - run: node --import tsx scripts/capture-compat.mts
+      - run: git diff --exit-code -- server-rust/compat
+      - run: npm run test:contract
       - uses: actions/upload-artifact@v4
         if: failure()
         with:
@@ -69,6 +78,27 @@ jobs:
           name: relay-container
           path: /tmp/relay-image.tar.gz
           retention-days: 7
+
+  rust:
+    name: Rust format, Clippy, tests, dependency audit and container
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: server-rust
+      - run: cargo fmt --manifest-path server-rust/Cargo.toml --check
+      - run: cargo clippy --manifest-path server-rust/Cargo.toml --locked --all-targets -- -D warnings
+      - run: cargo test --manifest-path server-rust/Cargo.toml --locked
+      - uses: taiki-e/install-action@cargo-audit
+      - run: cargo audit --file server-rust/Cargo.lock
+      - run: docker build -f server-rust/Dockerfile -t sms-code-relay:rust .
+      - run: IMAGE=sms-code-relay:rust scripts/container-smoke.sh
 
   android-unit:
     name: Android unit tests, lint and build
@@ -151,7 +181,7 @@ jobs:
 
   deliver:
     name: Publish tested container
-    needs: [server-unit, server-integration, container, android-unit, android-integration]
+    needs: [server-unit, server-integration, container, rust, android-unit, android-integration]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 15
