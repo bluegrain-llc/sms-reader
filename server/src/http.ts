@@ -1,9 +1,11 @@
+import { telemetry, category } from './telemetry.js';
 import express, { Request, Response, NextFunction } from 'express';
 import { z, ZodError } from 'zod';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { mountAccountPages, WebConfig } from './account-pages.js';
 import { mountForms } from './forms-http.js';
+import { signingFingerprints } from './signing.js';
 import { formSchema } from './forms-model.js';
 import { Relay } from './relay.js';
 import { connectionSchema, userCodeSchema } from './connections.js';
@@ -18,6 +20,7 @@ export interface HttpOptions {
   origins?: string[];
   publicUrl?: string;
   androidCertSha256?: string;
+  androidCertSha256s?: string[];
   trustProxyHops?: number;
   sseDurationMs?: number;
   firebaseWebConfig?: WebConfig;
@@ -30,25 +33,26 @@ function bearer(req: Request) {
 export function app(relay: Relay, options: HttpOptions) {
   const app = express();
   app.disable('x-powered-by');
+  app.use(telemetry.http);
   app.set('trust proxy', options.trustProxyHops ?? 0);
   app.use((_req, res, next) => { res.set('Cache-Control', 'no-store'); res.set('X-Content-Type-Options', 'nosniff'); next(); });
   app.use((req, _res, next) => {
     const origin = req.get('origin');
     const accountOrigin = options.publicUrl ? new URL(options.publicUrl).origin : undefined;
-    const accountRoute = req.path === '/v1/account' || req.path === '/v1/account-deletion';
+    const accountRoute = /^\/v1\/account(?:-deletion)?\/?$/i.test(req.path);
     ensure(!origin || (accountRoute && origin === accountOrigin) || (options.origins ?? []).includes(origin), 403, 'origin_not_allowed'); next();
   });
   app.use(express.json({ limit: '256kb', strict: true }));
   app.get(['/health', '/healthz'], (_req, res) => { res.json({ ok: true }); });
   app.use((req, _res, next) => {
-    if (req.get('authorization') || (req.method === 'POST' && req.path === '/v1/connections')) options.assertServing?.();
+    if (req.get('authorization') || (req.method === 'POST' && /^\/v1\/connections\/?$/i.test(req.path))) options.assertServing?.();
     next();
   });
-  const owner = async (req: Request) => {
+  const owner = async (req: Request, allowDeleted = false) => {
     let identity: Identity;
     try { identity = await options.verifyOwner(bearer(req)); } catch { throw new RelayError(401, 'invalid_owner_session'); }
-    if (!(req.method === 'DELETE' && req.path === '/v1/account')) await relay.db.runTransaction(tx => relay.account(tx, identity.uid));
-    if (req.method === 'GET') await relay.access.read(identity.uid);
+    if (!allowDeleted) await relay.db.runTransaction(tx => relay.account(tx, identity.uid));
+    if (req.method === 'GET' || req.method === 'HEAD') await relay.access.read(identity.uid);
     return identity;
   };
   const agentRead = async (req: Request) => {
@@ -75,10 +79,9 @@ export function app(relay: Relay, options: HttpOptions) {
     await relay.changeDevice((await owner(req)).uid, device(req), true, true); res.json({ ok: true });
   });
   app.get('/.well-known/assetlinks.json', (_req, res) => {
-    const fingerprint = options.androidCertSha256;
-    ensure(fingerprint && /^(?:[A-Fa-f0-9]{2}:){31}[A-Fa-f0-9]{2}$/.test(fingerprint), 503, 'app_links_not_configured');
+    const fingerprints = signingFingerprints(options.androidCertSha256, options.androidCertSha256s);
     res.json([{ relation: ['delegate_permission/common.handle_all_urls'], target: {
-      namespace: 'android_app', package_name: 'com.bluegrain.smsrelay', sha256_cert_fingerprints: [fingerprint.toUpperCase()],
+      namespace: 'android_app', package_name: 'com.bluegrain.smsrelay', sha256_cert_fingerprints: fingerprints,
     } }]);
   });
   app.get('/connect', (req, res) => {
@@ -120,7 +123,7 @@ export function app(relay: Relay, options: HttpOptions) {
     await relay.revoke((await owner(req)).uid, idSchema.parse(req.params.grantId)); res.json({ ok: true });
   });
   app.delete('/v1/account', async (req, res) => {
-    const identity = await owner(req);
+    const identity = await owner(req, true);
     ensure(relay.now() / 1000 - identity.authTime < 300 && identity.authTime <= relay.now() / 1000 + 30, 401, 'recent_sign_in_required');
     await relay.access.read(identity.uid);
     res.status(202).json(await relay.deletions.request(identity.uid));
@@ -156,17 +159,24 @@ export function app(relay: Relay, options: HttpOptions) {
   });
   app.post('/internal/maintenance', async (req, res) => {
     try { await options.verifyScheduler(bearer(req)); } catch { throw new RelayError(401, 'invalid_scheduler_identity'); }
-    await relay.deletions.dispatch(options.deleteIdentity);
-    await relay.maintenance(); res.json({ ok: true });
+    await telemetry.maintenance(async () => {
+      await relay.deletions.dispatch(options.deleteIdentity);
+      await relay.maintenance();
+    }, relay.db); res.json({ ok: true });
   });
   app.post('/mcp', async (req, res) => {
     const secret = bearer(req); await relay.checkAgent(secret);
-    if (req.body?.method === 'tools/call' && ['get_sms_code_request', 'inspect_request', 'get_request_result', 'poll_request_events'].includes(req.body?.params?.name)) await agentRead(req);
+    for (const message of Array.isArray(req.body) ? req.body : [req.body]) {
+      if (message?.method === 'tools/call' && ['get_sms_code_request', 'inspect_request', 'get_request_result', 'poll_request_events'].includes(message?.params?.name)) await agentRead(req);
+    }
     // New stateless server per HTTP request; identity is never shared between clients.
     const server = new McpServer({ name: 'sms-code-relay', version: '0.6.0' });
     const tool = (fn: () => Promise<unknown>) => fn().then(result => ({
       content: [{ type: 'text' as const, text: JSON.stringify(result) }], structuredContent: result as Record<string, unknown>,
-    })).catch(error => ({ isError: true, content: [{ type: 'text' as const, text: JSON.stringify({ error: error instanceof RelayError ? error.reason : 'internal_error' }) }] }));
+    })).catch(error => {
+      if (!(error instanceof RelayError)) telemetry.emit({ event: 'mcp_tool_failed', category: category(error) });
+      return { isError: true, content: [{ type: 'text' as const, text: JSON.stringify({ error: error instanceof RelayError ? error.reason : 'internal_error' }) }] };
+    });
     server.registerTool('request_sms_code', {
       description: 'Notify the owner’s registered phones about an upcoming SMS, queuing behind another caller if needed. Wait for ready before triggering SMS in a separate system. First approved response wins. Never triggers SMS.',
       inputSchema: requestSchema.shape,
@@ -193,7 +203,7 @@ export function app(relay: Relay, options: HttpOptions) {
     if (err instanceof RelayError) { if (err.status === 429) res.set('Retry-After', '60'); res.status(err.status).json({ error: err.reason }); }
     else if (err instanceof ZodError || err instanceof SyntaxError) res.status(400).json({ error: 'invalid_input' });
     else if ((err as { type?: string })?.type === 'entity.too.large') res.status(413).json({ error: 'payload_too_large' });
-    else { console.error('request_failed'); res.status(500).json({ error: 'internal_error' }); }
+    else { telemetry.emit({ event: 'request_failed', category: category(err) }); res.status(500).json({ error: 'internal_error' }); }
   });
   return app;
 }

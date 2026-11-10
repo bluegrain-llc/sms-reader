@@ -1,3 +1,4 @@
+import { telemetry, category } from './telemetry.js';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { Transaction } from 'firebase-admin/firestore';
 import { z } from 'zod';
@@ -19,7 +20,7 @@ export class Forms {
   retained(value: Date) {
     return ((value as unknown as { toMillis?: () => number }).toMillis?.() ?? new Date(value).getTime()) > this.now();
   }
-  async kick() { try { await this.wake(); } catch { /* durable outbox + scheduled recovery */ } }
+  async kick() { try { await this.wake(); } catch (error) { telemetry.emit({ event: 'wakeup_failed', category: category(error) }); } }
   async agent(tx: Transaction, secret: string) {
     const { grant, account } = await this.relay.agent(tx, secret);
     ensure((grant as FormGrant).formsApproved, 403, 'forms_approval_required'); return { grant: grant as FormGrant, account };
@@ -239,7 +240,8 @@ export class Forms {
       if (claim.j.kind === 'push') await this.relay.notify(claim.token!, claim.r.id, claim.r.expiresAt - this.now(), 'form');
       else await this.callback(claim.hook!.url, claim.hook!.secret, publicEvent(claim.e));
       sent = true;
-    } catch { /* no request bodies, credentials or answers in logs */ }
+    } catch (error) { telemetry.delivery(claim.j.kind === 'push' ? 'form' : 'webhook', claim.r.createdAt, 'failed', error); }
+    if (sent) telemetry.delivery(claim.j.kind === 'push' ? 'form' : 'webhook', claim.r.createdAt, 'accepted');
     await this.db.runTransaction(async tx => {
       const j = (await tx.get(this.ref('deliveryOutbox', id))).data() as Job | undefined;
       if (!j || j.lease !== lease) return;

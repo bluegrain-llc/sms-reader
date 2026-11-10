@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { applyDenials, digestRows, selectMetadata, type Snapshot } from '../src/recovery.js';
-import { securityLedger } from '../src/security-ledger.js';
+import { securityLedger, validateLedger, type RecoveryObjects } from '../src/security-ledger.js';
 const now = 1800000000000;
 function snapshot(): Snapshot {
  const rows: Snapshot['rows'] = [
@@ -34,4 +34,17 @@ test('restore rejects malformed ledger, corrupt snapshots and orphan owner metad
 });
 test('missing independent ledger configuration fails closed', async () => {
  await assert.rejects(securityLedger(undefined)({ownerId:'owner',kind:'account.delete',target:'owner'}), /security_ledger_not_configured/);
+});
+test('ledger preflight requires source binding, locked retention, and private bucket access', async () => {
+ const marker={version:1,project:'synthetic-source',createdAt:now};
+ const policy={retentionPolicy:{isLocked:true,retentionPeriod:'604800'},iamConfiguration:{uniformBucketLevelAccess:{enabled:true},publicAccessPrevention:'enforced'}};
+ const objects=(m:unknown,p:unknown)=>({get:async()=>m,info:async()=>p}) as unknown as RecoveryObjects;
+ await validateLedger(objects(marker,policy),'synthetic-source');
+ await assert.rejects(validateLedger(objects({...marker,project:'other-source'},policy),'synthetic-source'),/ledger_project_mismatch/);
+ for(const invalid of [
+   {...policy,retentionPolicy:{isLocked:false,retentionPeriod:'604800'}},
+   {...policy,retentionPolicy:{isLocked:true,retentionPeriod:'86400'}},
+   {...policy,iamConfiguration:{...policy.iamConfiguration,publicAccessPrevention:'inherited'}},
+   {...policy,iamConfiguration:{...policy.iamConfiguration,uniformBucketLevelAccess:{enabled:false}}},
+ ]) await assert.rejects(validateLedger(objects(marker,invalid),'synthetic-source'));
 });

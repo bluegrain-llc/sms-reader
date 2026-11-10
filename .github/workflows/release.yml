@@ -1,0 +1,144 @@
+name: Protected production release
+
+on:
+  workflow_dispatch:
+    inputs:
+      ci_run_id:
+        description: Successful main push CI run containing the tested image
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+  packages: read
+  id-token: write
+
+concurrency:
+  group: production-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: github.ref == 'refs/heads/main'
+    environment: production
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      GH_TOKEN: ${{ github.token }}
+      PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+      REGION: ${{ vars.GCP_REGION || 'us-central1' }}
+      SERVICE: ${{ vars.GCP_SERVICE || 'sms-code-relay' }}
+      ANDROID_SIGNING_SHA256S: ${{ vars.ANDROID_SIGNING_SHA256S }}
+      RELAY_SMOKE_TOKEN: ${{ secrets.RELAY_SMOKE_TOKEN }}
+    steps:
+      - name: Pin successful main CI run
+        id: source
+        env:
+          RUN_ID: ${{ inputs.ci_run_id }}
+        run: |
+          [[ "$RUN_ID" =~ ^[0-9]+$ ]] || exit 1
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID" > "$RUNNER_TEMP/source.json"
+          python3 - <<'PY'
+          import json, os, re
+          from pathlib import Path
+          r = json.loads(Path(os.environ['RUNNER_TEMP'], 'source.json').read_text())
+          assert r['status'] == 'completed' and r['conclusion'] == 'success'
+          assert r['event'] == 'push' and r['head_branch'] == 'main'
+          assert r['path'] == '.github/workflows/check.yml'
+          assert r['head_repository']['full_name'] == os.environ['GITHUB_REPOSITORY']
+          assert re.fullmatch('[a-f0-9]{40}', r['head_sha'])
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              f.write('sha=' + r['head_sha'] + '\n')
+          PY
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.source.outputs.sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - uses: actions/download-artifact@v4
+        with:
+          name: relay-container
+          run-id: ${{ inputs.ci_run_id }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/tested-container
+      - name: Verify tested archive and commit label
+        env:
+          COMMIT_SHA: ${{ steps.source.outputs.sha }}
+        run: |
+          cd "$RUNNER_TEMP/tested-container"
+          sha256sum -c relay-image.sha256
+          gzip -dc relay-image.tar.gz | docker load
+          test "$(docker image inspect sms-code-relay:local --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')" = "$COMMIT_SHA"
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+          log-accepted-android-sdk-licenses: false
+      - uses: gradle/actions/setup-gradle@v4
+      - run: sdkmanager 'platforms;android-36' 'build-tools;36.0.0'
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_RELEASE_SERVICE_ACCOUNT }}
+      - uses: google-github-actions/setup-gcloud@v2
+      - name: Build and verify signed release artifacts
+        env:
+          RELAY_KEYSTORE_BASE64: ${{ secrets.RELAY_KEYSTORE_BASE64 }}
+          RELAY_STORE_PASSWORD: ${{ secrets.RELAY_STORE_PASSWORD }}
+          RELAY_KEY_PASSWORD: ${{ secrets.RELAY_KEY_PASSWORD }}
+          RELAY_KEY_ALIAS: ${{ vars.RELAY_KEY_ALIAS }}
+          RELAY_URL: ${{ vars.RELAY_URL }}
+          FIREBASE_APP_ID: ${{ vars.FIREBASE_APP_ID }}
+          FIREBASE_API_KEY: ${{ vars.FIREBASE_API_KEY }}
+          FIREBASE_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+          FIREBASE_SENDER_ID: ${{ vars.FIREBASE_SENDER_ID }}
+          GOOGLE_WEB_CLIENT_ID: ${{ vars.GOOGLE_WEB_CLIENT_ID }}
+          ANDROID_UPLOAD_SHA256: ${{ vars.ANDROID_UPLOAD_SHA256 }}
+        run: |
+          umask 077
+          export RELAY_KEYSTORE="$RUNNER_TEMP/release-upload.jks"
+          printf '%s' "$RELAY_KEYSTORE_BASE64" | base64 --decode > "$RELAY_KEYSTORE"
+          test -s "$RELAY_KEYSTORE"
+          python3 scripts/verify-cloud-config.py
+          scripts/build-pilot.sh
+          python3 scripts/verify-release.py
+      - name: Publish tested image to Artifact Registry
+        id: image
+        env:
+          COMMIT_SHA: ${{ steps.source.outputs.sha }}
+        run: |
+          : "${PROJECT_ID:?Set production GCP_PROJECT_ID}"
+          image="$REGION-docker.pkg.dev/$PROJECT_ID/sms-relay/$SERVICE"
+          gcloud auth configure-docker "$REGION-docker.pkg.dev" --quiet
+          docker tag sms-code-relay:local "$image:$COMMIT_SHA"
+          docker push "$image:$COMMIT_SHA"
+          digest="$(gcloud artifacts docker images describe "$image:$COMMIT_SHA" --project "$PROJECT_ID" --format='value(image_summary.digest)')"
+          [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]] || exit 1
+          echo "uri=$image@$digest" >> "$GITHUB_OUTPUT"
+      - name: Stage, verify and promote
+        env:
+          IMAGE_URI: ${{ steps.image.outputs.uri }}
+          COMMIT_SHA: ${{ steps.source.outputs.sha }}
+          SECURITY_LEDGER_BUCKET: ${{ vars.SECURITY_LEDGER_BUCKET }}
+        run: scripts/deploy.sh
+      - name: Remove private signing material
+        if: always()
+        run: rm -f "$RUNNER_TEMP/release-upload.jks"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: release-evidence
+          path: |
+            artifacts/deployment.json
+            artifacts/SHA256SUMS
+            artifacts/release-verification.json
+            artifacts/*.aab
+            artifacts/*.apk
+          retention-days: 7

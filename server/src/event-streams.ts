@@ -12,8 +12,10 @@ export class EventStreams {
   private feeds = new Map<string, Feed>();
   constructor(readonly forms: Forms, readonly db: Firestore = forms.db) {}
   get activeFeeds() { return this.feeds.size; }
-  async subscribe(secret: string, subscriber: Subscriber) {
+  async subscribe(secret: string, subscriber: Subscriber, signal?: AbortSignal) {
+    ensure(!signal?.aborted, 499, 'stream_closed');
     const { grant } = await this.db.runTransaction(tx => this.forms.agent(tx, secret));
+    ensure(!signal?.aborted, 499, 'stream_closed');
     const key = hash(secret);
     let feed = this.feeds.get(key);
     if (!feed) {
@@ -55,15 +57,22 @@ export class EventStreams {
     const current = feed;
     current.subscribers.add(subscriber);
     let stopped = false;
+    let abort: () => void = () => {};
     const stop = () => {
       if (stopped) return; stopped = true;
+      signal?.removeEventListener('abort', abort);
       current.subscribers.delete(subscriber);
       if (!current.subscribers.size) {
         for (const unsubscribe of current.stops.splice(0)) unsubscribe();
         if (this.feeds.get(key) === current) this.feeds.delete(key);
       }
     };
-    try { await current.ready; ensure(!current.failed, 503, 'event_watch_unavailable'); }
+    const aborted = new Promise<never>((_resolve, reject) => {
+      abort = () => { stop(); reject(Error('stream_closed')); };
+      signal?.addEventListener('abort', abort, { once: true });
+      if (signal?.aborted) abort();
+    });
+    try { await Promise.race([current.ready, aborted]); ensure(!current.failed, 503, 'event_watch_unavailable'); }
     catch (e) { stop(); throw e; }
     return {
       stop, revision: () => current.revision,

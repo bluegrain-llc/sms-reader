@@ -1,3 +1,5 @@
+import { Access } from '../src/access.js';
+import { Telemetry, telemetry } from '../src/telemetry.js';
 import { after, before, beforeEach, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { initializeApp, deleteApp } from 'firebase-admin/app';
@@ -13,7 +15,7 @@ import type { Server } from 'node:http';
 const enabled = !!process.env.FIRESTORE_EMULATOR_HOST && !!process.env.FIREBASE_AUTH_EMULATOR_HOST;
 if (!enabled) throw new Error('Integration tests require Firestore and Auth emulators. Run npm run test:integration from the repository root.');
 const integration = test;
-const collections = ['maintenancePages', 'deletionJobs', 'deletionReceipts', 'accessRates', 'streamLimits', 'devices', 'grants', 'managers', 'managerCallers', 'connections', 'connectionCodes', 'connectionRates', 'requests', 'results', 'audit', 'accounts', 'formRequests', 'formResults', 'requestEvents', 'deliveryOutbox'];
+const collections = ['maintenancePages', 'deletionAttempts', 'deletionJobs', 'deletionReceipts', 'accessRates', 'streamLimits', 'devices', 'grants', 'managers', 'managerCallers', 'connections', 'connectionCodes', 'connectionRates', 'requests', 'results', 'audit', 'accounts', 'formRequests', 'formResults', 'requestEvents', 'deliveryOutbox'];
 let firebase: ReturnType<typeof initializeApp>, db: ReturnType<typeof getFirestore>, relay: Relay;
 let time: number, sends: string[], token: string, grantId: string;
 const uid = 'owner', did = 'installation', second = 'second-phone';
@@ -276,7 +278,7 @@ integration('REST role separation and bearer-authenticated MCP, including queued
   let server: Server | undefined;
   const client = new Client({ name: 'test', version: '1' });
   try {
-    server = app(relay, { publicUrl: 'https://relay.example.test', androidCertSha256: Array(32).fill('AA').join(':'), verifyOwner: async token => { const u = await auth.verifyIdToken(token); return { uid: u.uid, authTime: u.auth_time }; },
+    server = app(relay, { publicUrl: 'https://relay.example.test', androidCertSha256: Array(32).fill('AA').join(':'), androidCertSha256s: [Array(32).fill('BB').join(':'), Array(32).fill('AA').join(':')], verifyOwner: async token => { const u = await auth.verifyIdToken(token); return { uid: u.uid, authTime: u.auth_time }; },
       verifyScheduler: async () => { throw Error('not scheduler'); }, deleteIdentity: uid => auth.deleteUser(uid) }).listen(0, '127.0.0.1');
     await new Promise<void>(resolve => server!.once('listening', resolve));
     const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
@@ -298,6 +300,7 @@ integration('REST role separation and bearer-authenticated MCP, including queued
     const page = await fetch(base + '/connect?code=' + c.userCode);
     assert.equal(page.status, 200); assert.ok((await page.text()).includes('smsrelay://connect?code='));
     const links = await fetch(base + '/.well-known/assetlinks.json'); assert.equal(links.status, 200);
+    assert.deepEqual((await links.json() as { target: { sha256_cert_fingerprints: string[] } }[])[0]!.target.sha256_cert_fingerprints, [Array(32).fill('BB').join(':'), Array(32).fill('AA').join(':')]);
     await client.connect(new StreamableHTTPClientTransport(new URL(base + '/mcp'), { requestInit: { headers: { authorization: `Bearer ${child.token}` } } }));
     assert.equal((await client.listTools()).tools.length, 8);
     const tool = async (name: string, args: Record<string, unknown>) => {
@@ -707,6 +710,40 @@ integration('independent ledger failure prevents acknowledging grant revocation'
   await assert.rejects(guarded.revoke(uid,grantId));assert.equal(attempted,true);
   assert.equal((await db.collection('grants').doc(grantId).get()).data()!.revoked,false);
 });
+integration('legacy deletion migration records its independent denial before committing recovery work', { timeout: 30000 }, async () => {
+  const attempt = db.collection('deletionAttempts').doc(hash(uid));
+  await attempt.set({ ownerId: uid, nextAt: time - MINUTE });
+  let writes = 0, unavailable = true;
+  const worker = new Relay(db, async () => {}, () => time, undefined, async action => {
+    assert.deepEqual(action, { ownerId: uid, kind: 'account.delete', target: uid });
+    writes++; if (unavailable) throw Error('synthetic ledger unavailable');
+  });
+  await assert.rejects(worker.deletions.migrateLegacy(), /synthetic ledger unavailable/);
+  assert.equal((await attempt.get()).exists, true);
+  assert.equal((await db.collection('accounts').doc(uid).get()).data()?.deleting, undefined);
+  assert.equal((await db.collection('deletionJobs').doc(hash(uid)).get()).exists, false);
+  unavailable = false; await worker.deletions.migrateLegacy();
+  assert.equal(writes, 2); assert.equal((await attempt.get()).exists, false);
+  assert.equal((await db.collection('accounts').doc(uid).get()).data()?.deleting, true);
+  assert.equal((await db.collection('deletionJobs').doc(hash(uid)).get()).exists, true);
+});
+integration('recovery gate blocks public pairing route aliases and authenticated traffic', { timeout: 15000 }, async t => {
+  const server = app(relay, { assertServing: () => { throw new RelayError(503, 'recovery_in_progress'); },
+    verifyOwner: async () => { assert.fail('identity verification must not run while recovery is blocked'); },
+    verifyScheduler: async () => {}, deleteIdentity: async () => {} }).listen(0, '127.0.0.1');
+  try {
+    await new Promise<void>(resolve => server.once('listening', resolve));
+    const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+    const request = (path: string, init: RequestInit = {}) => fetch(base + path, { ...init, signal: AbortSignal.any([t.signal, AbortSignal.timeout(5000)]) });
+    for (const path of ['/v1/connections', '/V1/CONNECTIONS/']) {
+      const response = await request(path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+      assert.equal(response.status, 503); await response.text();
+    }
+    assert.equal((await request('/v1/devices', { headers: { authorization: 'Bearer synthetic' } })).status, 503);
+    assert.equal((await request('/v1/devices')).status, 401);
+    assert.equal((await request('/health')).status, 200);
+  } finally { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); }
+});
 integration('durable deletion tombstones before acknowledgement and resumes expired leases without retaining receipts', { timeout: 60000 }, async () => {
   const request = await relay.deletions.request(uid);
   const duplicate = await relay.deletions.request(uid);
@@ -774,7 +811,7 @@ integration('distributed read counters and stream leases cannot be bypassed thro
   await other.access.stream(uid, grantId, 100000);
   await other.access.read(uid, grantId);
 });
-integration('account HTTP deletion requires recent owner identity and same-origin browser requests', { timeout: 60000 }, async () => {
+integration('account HTTP deletion requires recent owner identity and same-origin browser requests', { timeout: 60000 }, async t => {
   let recent = false, deleted = 0;
   const server = app(relay, { publicUrl: 'https://relay.example.test',
     verifyOwner: async secret => { if (secret !== 'owner-session') throw Error(); return { uid, authTime: time / 1000 - (recent ? 0 : 301) }; },
@@ -783,7 +820,8 @@ integration('account HTTP deletion requires recent owner identity and same-origi
   try {
     await new Promise<void>(resolve => server.once('listening', resolve));
     const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
-    const remove = (secret: string, origin?: string) => fetch(base + '/v1/account', { method: 'DELETE', headers: { authorization: `Bearer ${secret}`, ...(origin ? { origin } : {}) } });
+    const request = (path: string, init: RequestInit = {}) => fetch(base + path, { ...init, signal: AbortSignal.any([t.signal, AbortSignal.timeout(10000)]) });
+    const remove = (secret: string, origin?: string) => request('/v1/account', { method: 'DELETE', headers: { authorization: `Bearer ${secret}`, ...(origin ? { origin } : {}) } });
     assert.equal((await remove(token)).status, 401);
     assert.equal((await remove('owner-session')).status, 401);
     recent = true;
@@ -791,18 +829,22 @@ integration('account HTTP deletion requires recent owner identity and same-origi
     const accepted = await remove('owner-session', 'https://relay.example.test');
     assert.equal(accepted.status, 202);
     const result = await accepted.json() as { receipt: string };
-    const status = () => fetch(base + '/v1/account-deletion', { headers: { authorization: `Bearer ${result.receipt}`, origin: 'https://relay.example.test' } });
+    for (const path of ['/V1/ACCOUNT/', '/v1/account/']) {
+      const repeated = await request(path, { method: 'DELETE', headers: { authorization: 'Bearer owner-session', origin: 'https://relay.example.test' } });
+      assert.equal(repeated.status, 202); await repeated.text();
+    }
+    const status = () => request('/v1/account-deletion', { headers: { authorization: `Bearer ${result.receipt}`, origin: 'https://relay.example.test' } });
     assert.equal((await status()).status, 200);
-    assert.equal((await fetch(base + '/v1/devices', { headers: { authorization: `Bearer ${result.receipt}` } })).status, 401);
-    assert.equal((await fetch(base + '/internal/delivery', { method: 'POST', headers: { authorization: 'Bearer worker-session' } })).status, 200);
+    assert.equal((await request('/v1/devices', { headers: { authorization: `Bearer ${result.receipt}` } })).status, 401);
+    assert.equal((await request('/internal/delivery', { method: 'POST', headers: { authorization: 'Bearer worker-session' } })).status, 200);
     assert.equal(deleted, 1);
     assert.deepEqual(await (await status()).json(), { status: 'completed' });
-    assert.equal((await fetch(base + '/v1/devices', { headers: { authorization: 'Bearer owner-session' } })).status, 403);
-    assert.equal((await fetch(base + '/v1/account-deletion', { headers: { authorization: 'Bearer owner-session' } })).status, 401);
+    assert.equal((await request('/v1/devices', { headers: { authorization: 'Bearer owner-session' } })).status, 403);
+    assert.equal((await request('/v1/account-deletion', { headers: { authorization: 'Bearer owner-session' } })).status, 401);
     const rateKey = hash(`owner:${uid}:${Math.floor(time / MINUTE)}`);
     await db.collection('accessRates').doc(rateKey).set({ count: 600, purgeAt: new Date(time + 2 * MINUTE) });
     const limited = await status(); assert.equal(limited.status, 429); assert.equal(limited.headers.get('retry-after'), '60');
-    const page = await fetch(base + '/account/delete'); assert.equal(page.status, 200);
+    const page = await request('/account/delete'); assert.equal(page.status, 200);
     const html = await page.text(); assert.ok(html.includes('reauthenticateWithPopup')); assert.ok(!html.includes('localStorage'));
     assert.ok(page.headers.get('content-security-policy')?.includes("frame-ancestors 'none'"));
   } finally { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); }
@@ -814,4 +856,165 @@ integration('token refresh preserves paused devices and cannot revive unregister
   assert.equal((await db.collection('devices').doc(did).get()).data()?.paused, true);
   await relay.changeDevice(uid, did, true, true);
   await assert.rejects(relay.register(uid, did, 'Renamed phone', 'new-fcm'), reason('installation_id_unavailable'));
+});
+
+integration('monitoring samples real due queues and timestamp expiries without emitting document data', { timeout: 30_000 }, async () => {
+  await db.collection('requests').doc('sample-a').set({ status: 'pending_phone', notificationSent: false, nextNotificationAt: time - 200_000, purpose: 'private-code' });
+  await db.collection('requests').doc('sample-b').set({ status: 'ready', notificationSent: false, nextNotificationAt: time - 300_000 });
+  await db.collection('requests').doc('not-due').set({ status: 'pending_phone', notificationSent: false, nextNotificationAt: time + 1 });
+  await db.collection('deliveryOutbox').doc('sample').set({ nextAt: time - 181_000, secret: 'private-token' });
+  await db.collection('results').doc('sample').set({ purgeAt: new Date(time - 301_000), code: 'private-answer' });
+  await db.collection('formResults').doc('sample').set({ purgeAt: new Date(time - 2_000), values: { field: 'private-answer' } });
+  await db.collection('deletionJobs').doc('sample').set({ nextAt: time + MINUTE, backlogAt: time - 400_000, ownerId: 'private-owner' });
+  await db.collection('deletionJobs').doc('complete').set({ nextAt: Number.MAX_SAFE_INTEGER, backlogAt: Number.MAX_SAFE_INTEGER });
+  const entries: unknown[] = [];
+  await new Telemetry(entry => entries.push(entry), () => time).backlogs(db);
+  const samples = entries as { kind: string; count: number; oldest_due_age_s: number }[];
+  assert.equal(samples.length, 6);
+  assert.deepEqual(Object.fromEntries(samples.map(s => [s.kind, [s.count, s.oldest_due_age_s]])), {
+    sms: [2, 300], form: [1, 181], results: [1, 301], form_results: [1, 2], deletion: [1, 400], legacy_deletion: [0, 0],
+  });
+  assert.ok(!JSON.stringify(samples).includes('private'));
+});
+
+
+
+integration('legacy deletion attempts migrate atomically, resume identity retries and leave truthful backlog metrics', { timeout: 60000 }, async () => {
+  await db.collection('accounts').doc(uid).set({ hasWork: true, activeRequestId: 'old', queueIds: ['old'] });
+  const attempt = db.collection('deletionAttempts').doc(hash(uid));
+  await attempt.set({ ownerId: uid, nextAt: time - MINUTE });
+  await relay.deletions.migrateLegacy();
+  assert.equal((await attempt.get()).exists, false);
+  assert.deepEqual((await db.collection('accounts').doc(uid).get()).data(), { deleting: true });
+  let fail = true;
+  await relay.deletions.dispatch(async () => { if (fail) throw Error('identity unavailable'); });
+  let rows: { kind?: string; count?: number }[] = [];
+  await new Telemetry(row => rows.push(row), () => time + MINUTE).backlogs(db);
+  assert.equal(rows.find(row => row.kind === 'legacy_deletion')?.count, 0);
+  assert.equal(rows.find(row => row.kind === 'deletion')?.count, 1);
+  fail = false; time += MINUTE;
+  await relay.deletions.dispatch(async () => {});
+  rows = [];
+  await new Telemetry(row => rows.push(row), () => time).backlogs(db);
+  assert.equal(rows.find(row => row.kind === 'deletion')?.count, 0);
+  assert.equal((await db.collection('deletionJobs').doc(hash(uid)).get()).data()?.status, 'completed');
+  // A legacy completed marker must not create another job or retain stale queue fields.
+  await db.collection('accounts').doc('finished').set({ deleting: true, hasWork: true, deletionTelemetryComplete: true });
+  await db.collection('deletionAttempts').doc(hash('finished')).set({ ownerId: 'finished', nextAt: time });
+  await relay.deletions.migrateLegacy();
+  assert.equal((await db.collection('deletionJobs').doc(hash('finished')).get()).exists, false);
+  assert.equal((await db.collection('deletionAttempts').get()).size, 0);
+  assert.deepEqual((await db.collection('accounts').doc('finished').get()).data(), { deleting: true });
+});
+
+
+integration('durable account tombstones release all obsolete maintenance queue fields', async () => {
+  await db.collection('accounts').doc(uid).set({ hasWork: true, queueIds: ['old'], activeRequestId: 'old', deletionTelemetryComplete: true });
+  await relay.deletions.request(uid);
+  const account = (await db.collection('accounts').doc(uid).get()).data()!;
+  assert.equal(account.deleting, true);
+  assert.deepEqual(account, { deleting: true });
+  assert.equal((await db.collection('accounts').where('hasWork', '==', true).get()).size, 0);
+});
+
+
+integration('HEAD and batched MCP reads consume shared owner and caller budgets', { timeout: 30000 }, async t => {
+  await relay.forms.approve(uid, grantId, true);
+  const server = app(relay, { verifyOwner: async () => ({ uid, authTime: time / 1000 }), verifyScheduler: async () => {}, deleteIdentity: async () => {} }).listen(0, '127.0.0.1');
+  try {
+    await new Promise<void>(resolve => server.once('listening', resolve));
+    const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+    const call = (path: string, init: RequestInit) => fetch(base + path, { ...init, signal: AbortSignal.any([t.signal, AbortSignal.timeout(10000)]) });
+    const ownerKey = db.collection('accessRates').doc(hash(`owner:${uid}:${Math.floor(time / MINUTE)}`));
+    const callerKey = db.collection('accessRates').doc(hash(`grant:${grantId}:${Math.floor(time / MINUTE)}`));
+    const head = () => call('/v1/devices', { method: 'HEAD', headers: { authorization: 'Bearer owner' } });
+    await ownerKey.set({ count: 599, purgeAt: new Date(time + 2 * MINUTE) });
+    assert.equal((await head()).status, 200);
+    const rejected = await head(); assert.equal(rejected.status, 429); assert.equal(rejected.headers.get('retry-after'), '60');
+    await ownerKey.delete();
+    const batch = [{ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'poll_request_events', arguments: {} } },
+      { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'poll_request_events', arguments: {} } }];
+    const mcp = () => call('/mcp', { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', accept: 'application/json, text/event-stream' }, body: JSON.stringify(batch) });
+    const accepted = await mcp(); assert.equal(accepted.status, 200); await accepted.text();
+    assert.equal((await callerKey.get()).data()?.count, 2);
+    await callerKey.set({ count: 119, purgeAt: new Date(time + 2 * MINUTE) });
+    const callerLimited = await mcp(); assert.equal(callerLimited.status, 429); assert.equal(callerLimited.headers.get('retry-after'), '60');
+    await callerKey.delete(); await ownerKey.set({ count: 600, purgeAt: new Date(time + 2 * MINUTE) });
+    assert.equal((await mcp()).status, 429);
+  } finally { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); }
+});
+
+integration('stream admission keeps its committed deadline and slow event reads cannot hold responses open', { timeout: 15000 }, async t => {
+  const delayed = Object.create(db) as typeof db;
+  delayed.runTransaction = (async (fn: Parameters<typeof db.runTransaction>[0]) => {
+    const result = await db.runTransaction(fn); time += 20000; return result;
+  }) as typeof db.runTransaction;
+  const release = await new Access(delayed, () => time).stream(uid, grantId, 100000);
+  assert.equal(release.deadline - time, 80000);
+  await release();
+  await relay.forms.approve(uid, grantId, true);
+  // A full retained page forces a durable replay read even with shared watches.
+  const replay = db.batch();
+  for (let sequence = 1; sequence <= 100; sequence++) {
+    const id = `${grantId}_${String(sequence).padStart(16, '0')}`;
+    replay.set(db.collection('requestEvents').doc(id), { id, ownerId: uid, grantId, requestId: 'synthetic-replay',
+      type: 'request.created', sequence, requestSequence: sequence, at: time, purgeAt: new Date(time + MINUTE) });
+  }
+  replay.update(db.collection('grants').doc(grantId), { eventSequence: 100 }); await replay.commit();
+  const events = relay.forms.events.bind(relay.forms); let reads = 0, unblock: (() => void) | undefined;
+  const pending = new Promise<void>(resolve => { unblock = resolve; });
+  relay.forms.events = async (...args) => { if (++reads > 1) { await pending; return { events: [], cursor: null }; } return events(...args); };
+  const server = app(relay, { sseDurationMs: 1500, verifyOwner: async () => ({ uid, authTime: time / 1000 }), verifyScheduler: async () => {}, deleteIdentity: async () => {} }).listen(0, '127.0.0.1');
+  try {
+    await new Promise<void>(resolve => server.once('listening', resolve));
+    const response = await fetch(`http://127.0.0.1:${(server.address() as { port: number }).port}/v2/events/stream`, { headers: { authorization: `Bearer ${token}` }, signal: AbortSignal.any([t.signal, AbortSignal.timeout(5000)]) });
+    assert.equal(response.status, 200);
+    const text = await response.text(); assert.ok(text.includes('request.created')); assert.equal(reads, 2);
+    // The second database read is still pending when the response ends.
+    const replacement = await relay.access.stream(uid, grantId, 1000); await replacement();
+  } finally { unblock?.(); relay.forms.events = events; server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); }
+});
+
+integration('deletion failures remain observable and retain backlog age across retries', { timeout: 30000 }, async () => {
+  const rows: Parameters<typeof telemetry.emit>[0][] = [], emit = telemetry.emit;
+  telemetry.emit = row => { rows.push(row); };
+  try {
+    const worker = new Relay(db, async () => {}, () => time, async () => { throw { code: 'unavailable' }; });
+    await worker.deletions.request(uid);
+    assert.equal(rows.filter(row => row.event === 'wakeup_failed').length, 1);
+    time += 6 * MINUTE;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await worker.deletions.dispatch(async () => { throw { code: 'permission-denied' }; });
+      const snapshots: { kind?: string; count?: number; oldest_due_age_s?: number }[] = [];
+      await new Telemetry(row => snapshots.push(row), () => time).backlogs(db);
+      const backlog = snapshots.find(row => row.kind === 'deletion'); assert.equal(backlog?.count, 1); assert.ok(backlog!.oldest_due_age_s! >= 360);
+      time += MINUTE;
+    }
+    assert.equal(rows.filter(row => row.event === 'deletion_failed').length, 2);
+    // Remaining due work requests another task, with the same safe failure signal.
+    worker.deletions.step = async () => true;
+    await worker.deletions.dispatch(async () => {});
+    assert.equal(rows.filter(row => row.event === 'wakeup_failed').length, 2);
+  } finally { telemetry.emit = emit; }
+});
+
+integration('ordinary maintenance cancels tombstoned SMS while deletion remains incomplete', { timeout: 30000 }, async () => {
+  const r = await relay.create(token, input('deleting-pending'));
+  const other = 'other-owner'; await relay.register(other, 'other-installation', 'Other', 'other-fcm');
+  const g = await relay.createGrant(other, 'other-installation', 'Other caller');
+  const otherRequest = await relay.create(g.token, input('other-pending'));
+  await db.collection('requests').doc(otherRequest.requestId).update({ notificationSent: false, nextNotificationAt: time });
+  await relay.deletions.request(uid);
+  const job = db.collection('deletionJobs').doc(hash(uid));
+  // A full grants page persists the same collection index, leaving the SMS record for normal maintenance.
+  await job.update({ collectionIndex: 1 });
+  const batch = db.batch(); for (let i = 0; i < 100; i++) batch.set(db.collection('grants').doc(`history-${i}`), { ownerId: uid }); await batch.commit();
+  await relay.deletions.step(hash(uid), async () => { assert.fail('identity must be last'); });
+  assert.equal((await job.get()).data()?.collectionIndex, 1);
+  await db.collection('requests').doc(r.requestId).update({ notificationSent: false, nextNotificationAt: time });
+  await db.collection('formResults').doc('expired-other').set({ purgeAt: new Date(time - 1) });
+  await relay.maintenance();
+  assert.equal((await db.collection('requests').doc(r.requestId).get()).data()?.status, 'cancelled');
+  assert.equal((await db.collection('requests').doc(otherRequest.requestId).get()).data()?.notificationSent, true);
+  assert.equal((await db.collection('formResults').doc('expired-other').get()).exists, false);
 });

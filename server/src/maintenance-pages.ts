@@ -1,4 +1,5 @@
 import { FieldPath, Firestore, Query } from 'firebase-admin/firestore';
+import { telemetry, category } from './telemetry.js';
 
 /** Persisted cursors advance past failed items, wrapping each scan so retries cannot starve later owners. */
 export class MaintenancePages {
@@ -13,7 +14,7 @@ export class MaintenancePages {
     for (let offset = 0; offset < page.size; offset += concurrency) {
       // Each item owns its transactional correctness. One malformed record cannot stop another owner.
       const settled = await Promise.allSettled(page.docs.slice(offset, offset + concurrency).map(doc => handle(doc.id)));
-      if (settled.some(result => result.status === 'rejected')) console.error('maintenance_item_failed');
+      for (const result of settled) if (result.status === 'rejected') telemetry.emit({ event: 'maintenance_failed', category: category(result.reason) });
     }
     const last = page.docs.at(-1);
     await this.db.runTransaction(async tx => {

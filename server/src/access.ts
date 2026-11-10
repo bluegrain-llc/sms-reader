@@ -17,22 +17,24 @@ export class Access {
   }
   private streamRef(scope: string) { return this.db.collection('streamLimits').doc(hash(scope)); }
   async stream(ownerId: string, grantId: string, lifetimeMs: number) {
-    const id = randomUUID(), expiresAt = this.now() + Math.min(lifetimeMs, 100_000) + 10_000;
+    const id = randomUUID(); let expiresAt = 0;
     const refs = [this.streamRef(`owner:${ownerId}`), this.streamRef(`grant:${grantId}`)];
     await this.db.runTransaction(async tx => {
       const docs = await Promise.all(refs.map(r => tx.get(r)));
+      expiresAt = this.now() + Math.min(lifetimeMs, 100_000) + 10_000;
       const leases = docs.map(d => Object.fromEntries(Object.entries(d.data()?.leases ?? {}).filter(([, until]) => Number(until) > this.now())));
       ensure(Object.keys(leases[0]!).length < 4 && Object.keys(leases[1]!).length < 2, 429, 'stream_limit_reached');
       refs.forEach((ref, i) => tx.set(ref, { leases: { ...leases[i], [id]: expiresAt }, purgeAt: new Date(Math.max(expiresAt, ...Object.values(leases[i]!).map(Number)) + MINUTE) }));
     });
     let released = false;
-    return async () => {
+    const release = async () => {
       if (released) return; released = true;
       await this.db.runTransaction(async tx => {
         const docs = await Promise.all(refs.map(r => tx.get(r)));
         docs.forEach((doc, i) => { if (doc.exists) { const leases = { ...doc.data()!.leases }; delete leases[id]; tx.update(refs[i]!, { leases }); } });
       });
     };
+    return Object.assign(release, { deadline: expiresAt - 10_000 });
   }
   async cleanup() {
     for (const name of ['accessRates', 'streamLimits']) {
