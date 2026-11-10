@@ -9,12 +9,12 @@ Application telemetry emits fixed-schema JSON with `component: relay`. It never 
 | Signal | Target / alert | Interpretation |
 | --- | --- | --- |
 | Valid routed HTTP availability | Internal target 99.5% over 30 days; alert on server-error ratio >1% for 5 minutes | Excludes expected 4xx, health, internal jobs, unmatched paths and SSE. Low-volume ratio alerts can be noisy. |
-| Warm API latency | p95 <2 seconds; alert after 5 minutes above target | Application timing excludes platform cold-start time. Cloud Run request latency supplies that separate view. |
+| Warm API latency | p95 <2 seconds; alert after any revision p95 stays above target for 5 minutes | The alert uses maximum revision p95, not fleet p95; even a low-traffic canary can alert. Application timing excludes platform cold-start time. Cloud Run request latency supplies that separate view. |
 | Maintenance completion | Completion every minute; absence for 3 minutes | Bootstrap a successful completion after provisioning. An absence alert cannot establish initial installation health without a series. Allow additional Monitoring ingestion/notification delay. |
 | Due delivery | Oldest due job <=3 minutes | Samples after cleanup/maintenance; does not promise notification display. |
 | Sensitive-result cleanup | Nothing remains >5 minutes past purge deadline | API retrieval deadlines remain strict even when physical deletion is delayed. |
 | Deletion backlog | No due deletion job >5 minutes overdue | Pending/running jobs use `nextAt`; completed jobs must move `nextAt` beyond current time. |
-| Provider acceptance | v2 notification p95 <30 seconds; SMS p95 <120 seconds | Age is measured from request creation at each accepted attempt, including queue wait; this target includes queueing. FCM acceptance proves neither delivery, display nor owner action. |
+| Provider acceptance | v2 notification p95 <30 seconds; SMS p95 <120 seconds | Age is measured from request creation at each accepted attempt, including queue wait; this target includes queueing. Alert aggregation uses maximum revision p95, deliberately stricter than fleet p95 during rollouts. FCM acceptance proves neither delivery, display nor owner action. |
 | Worker/tool failures | Any maintenance, sampling, task-wakeup or unexpected MCP tool failure | Wakeup failure is recoverable through Scheduler but should remain visible. |
 | Production budget | USD 100/month; email at 50/80/100% actual spend | Alerts-only budget; no automatic billing/service shutdown. Cost projection and capacity acceptance belong to the load/recovery gate. |
 

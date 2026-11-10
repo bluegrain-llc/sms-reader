@@ -55,12 +55,12 @@ def resources(project, service, channels, number, billing):
            'denominatorFilter': metric_filter('http_requests'), 'aggregations': aggregation(), 'denominatorAggregations': aggregation(),
            'comparison': 'COMPARISON_GT', 'thresholdValue': 0.01, 'duration': '300s', 'trigger': {'count': 1}}},
            'Server errors exceed 1% for five minutes among valid routed requests. Compare revision and dependency health; consider rollback. Low traffic can make this ratio noisy.')
-    for name, metric_name, threshold, extra in [('API p95 latency', 'http_latency_ms', 2000, ''),
-                                               ('form notification p95 acceptance', 'delivery_acceptance_age_ms', 30000, ' metric.labels.kind="form"'),
-                                               ('SMS notification p95 acceptance', 'delivery_acceptance_age_ms', 120000, ' metric.labels.kind="sms"')]:
+    for name, metric_name, threshold, extra in [('worst revision API p95 latency', 'http_latency_ms', 2000, ''),
+                                               ('worst revision form notification p95 acceptance', 'delivery_acceptance_age_ms', 30000, ' metric.labels.kind="form"'),
+                                               ('worst revision SMS notification p95 acceptance', 'delivery_acceptance_age_ms', 120000, ' metric.labels.kind="sms"')]:
         policy(name, {'conditionThreshold': {'filter': metric_filter(metric_name) + extra, 'comparison': 'COMPARISON_GT', 'thresholdValue': threshold,
                'duration': '300s', 'aggregations': aggregation('ALIGN_PERCENTILE_95', 'REDUCE_MAX'), 'trigger': {'count': 1}}},
-               'Latency target exceeded. Provider acceptance is not device display, opening or user approval. Check backlog, cold starts and provider failures.')
+               'Maximum revision p95 exceeds target; this is deliberately stricter than fleet p95 during rollouts. Provider acceptance is not device display, opening or user approval. Check backlog, cold starts and provider failures.')
     budget = {'displayName': f'SMS relay {project}: monthly budget',
               'budgetFilter': {'projects': [f'projects/{number}'], 'calendarPeriod': 'MONTH'},
               'amount': {'specifiedAmount': {'currencyCode': 'USD', 'units': '100'}},

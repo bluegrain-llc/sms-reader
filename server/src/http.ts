@@ -107,10 +107,20 @@ export function app(relay: Relay, options: HttpOptions) {
     ensure(Date.now() / 1000 - identity.authTime < 300, 401, 'recent_sign_in_required');
     const attempt = relay.ref('deletionAttempts', hash(identity.uid));
     // A failed synchronous deletion remains observable until its identity cleanup succeeds.
-    const existing = await attempt.get();
-    if (!existing.exists) await attempt.set({ nextAt: Date.now() });
+    const account = relay.ref('accounts', identity.uid);
+    const started = await relay.db.runTransaction(async tx => {
+      const [owner, existing] = await Promise.all([tx.get(account), tx.get(attempt)]);
+      if (owner.data()?.deletionTelemetryComplete) return false;
+      if (!existing.exists) tx.set(attempt, { nextAt: Date.now() });
+      return true;
+    });
+    if (!started) { res.json({ ok: true }); return; }
     await relay.deleteAccount(identity.uid); await options.deleteIdentity(identity.uid);
-    await attempt.delete(); res.json({ ok: true });
+    await relay.db.runTransaction(async tx => {
+      tx.set(account, { deleting: true, deletionTelemetryComplete: true }, { merge: true });
+      tx.delete(attempt);
+    });
+    res.json({ ok: true });
   });
   app.get('/v1/devices/:deviceId/history', async (req, res) => {
     res.json(await relay.history((await owner(req)).uid, device(req)));

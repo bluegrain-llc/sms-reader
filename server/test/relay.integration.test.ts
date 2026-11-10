@@ -711,6 +711,12 @@ integration('failed synchronous identity deletion remains visible until successf
     rows.length = 0;
     await new Telemetry(row => rows.push(row)).backlogs(db);
     assert.equal(rows.find(row => row.kind === 'legacy_deletion')?.count, 0);
+    // A previously authenticated overlapping request must not recreate a completed marker.
+    failIdentity = true;
+    const repeated = await fetch(`http://127.0.0.1:${address.port}/v1/account`, { method: 'DELETE', headers: { Authorization: 'Bearer owner' }, signal: AbortSignal.timeout(10_000) });
+    assert.equal(repeated.status, 200); await repeated.text();
+    assert.equal((await attempt.ref.get()).exists, false);
+    assert.equal((await db.collection('accounts').doc(uid).get()).data()?.deletionTelemetryComplete, true);
   } finally {
     server.closeAllConnections();
     await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
