@@ -5,8 +5,26 @@ use crate::{
     relay::{Auth, Relay},
     store::{Query, Tx},
 };
+use futures::{StreamExt, TryStreamExt};
 use serde_json::{Value, json};
 use uuid::Uuid;
+
+async fn pending_inbox<F, Fut>(ids: Vec<String>, get: F) -> Result<Value>
+where
+    F: FnMut(String) -> Fut,
+    Fut: std::future::Future<Output = Result<Value>>,
+{
+    // Keep Firestore latency bounded without starting all 100 transactions at once.
+    // buffered preserves query order for equal createdAt values, like Promise.all.
+    let mut out = futures::stream::iter(ids)
+        .map(get)
+        .buffered(8)
+        .try_filter(|r| futures::future::ready(text(r, "status") == "pending"))
+        .try_collect::<Vec<_>>()
+        .await?;
+    out.sort_by_key(|r| std::cmp::Reverse(num(r, "createdAt")));
+    Ok(json!(out.into_iter().map(|r|json!({"requestId":r["requestId"],"callerName":r["callerName"],"title":r["title"],"status":r["status"],"expiresAt":r["expiresAt"],"createdAt":r["createdAt"]})).collect::<Vec<_>>()))
+}
 pub struct FormContext {
     pub r: Value,
     pub g: Value,
@@ -14,6 +32,7 @@ pub struct FormContext {
     pub valid: bool,
     pub a: Value,
 }
+
 impl Relay {
     pub async fn form_agent(&self, tx: &Tx, secret: &str) -> Result<(Value, Value)> {
         let (g, a) = self.agent(tx, secret).await?;
@@ -230,23 +249,16 @@ impl Relay {
                 })
             })
             .await?;
-        let mut out = vec![];
-        for id in ids {
-            let r = self
-                .form_get(
-                    Auth::Phone {
-                        uid: uid.clone(),
-                        device: device.clone(),
-                    },
-                    id,
-                )
-                .await?;
-            if text(&r, "status") == "pending" {
-                out.push(r);
-            }
-        }
-        out.sort_by_key(|r| std::cmp::Reverse(num(r, "createdAt")));
-        Ok(json!(out.into_iter().map(|r|json!({"requestId":r["requestId"],"callerName":r["callerName"],"title":r["title"],"status":r["status"],"expiresAt":r["expiresAt"],"createdAt":r["createdAt"]})).collect::<Vec<_>>()))
+        pending_inbox(ids, |id| {
+            self.form_get(
+                Auth::Phone {
+                    uid: uid.clone(),
+                    device: device.clone(),
+                },
+                id,
+            )
+        })
+        .await
     }
     pub async fn form_cancel(&self, secret: String, id: String) -> Result<Value> {
         let s = self.clone();
@@ -473,5 +485,58 @@ if text(r,"status")!="pending"{return Ok(form_view(r));}ensure(!flag(&c.d,"pause
             self.kick().await;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod inbox_tests {
+    use super::*;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    #[tokio::test]
+    async fn inbox_runs_bounded_concurrent_reads_and_preserves_tied_order() {
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            let (entered, mut entries) = tokio::sync::mpsc::unbounded_channel();
+            let permits = Arc::new(tokio::sync::Semaphore::new(0));
+            let active = Arc::new(AtomicUsize::new(0));
+            let peak = Arc::new(AtomicUsize::new(0));
+            let (p, a, m) = (permits.clone(), active.clone(), peak.clone());
+            let task = tokio::spawn(async move {
+                pending_inbox((0..10).map(|i| i.to_string()).collect(), |id| {
+                    let (p, a, m, entered) = (p.clone(), a.clone(), m.clone(), entered.clone());
+                    async move {
+                        m.fetch_max(a.fetch_add(1, Ordering::SeqCst) + 1, Ordering::SeqCst);
+                        entered.send(id.clone()).unwrap();
+                        p.acquire().await.unwrap().forget();
+                        a.fetch_sub(1, Ordering::SeqCst);
+                        Ok(json!({"requestId":id,"callerName":"Synthetic","title":"Inbox","status":if id=="3" {"cancelled"} else {"pending"},"expiresAt":1000,"createdAt":if id=="9" {2} else {1}}))
+                    }
+                }).await.unwrap()
+            });
+            let mut first = Vec::new();
+            for _ in 0..8 { first.push(entries.recv().await.unwrap()); }
+            assert_eq!(first, (0..8).map(|i| i.to_string()).collect::<Vec<_>>());
+            assert!(entries.try_recv().is_err());
+            assert_eq!(active.load(Ordering::SeqCst), 8);
+            permits.add_permits(10);
+            let out = task.await.unwrap();
+            assert_eq!(peak.load(Ordering::SeqCst), 8);
+            assert_eq!(active.load(Ordering::SeqCst), 0);
+            assert_eq!(out.as_array().unwrap().iter().map(|r| text(r,"requestId")).collect::<Vec<_>>(), ["9","0","1","2","4","5","6","7","8"]);
+        }).await.expect("inbox must start eight reads before any is released");
+    }
+    #[tokio::test]
+    async fn inbox_propagates_form_read_failure() {
+        let error = pending_inbox(vec!["gone".into()], |_| async {
+            Err(crate::error::Error::Api(404, "request_not_found"))
+        })
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            crate::error::Error::Api(404, "request_not_found")
+        ));
     }
 }
