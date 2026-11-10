@@ -469,9 +469,13 @@ impl Tx {
         field: Option<&str>,
     ) -> Result<()> {
         use firestore::gcloud_sdk::google::firestore::v1::{Write, write};
-        let id = last.map(|doc| doc.name.rsplit('/').next().unwrap());
+        let id = last.map(|doc| crate::js_string::encode(doc.name.rsplit('/').next().unwrap()));
         let mut doc = FirestoreDb::serialize_to_doc(
-            format!("{}/maintenancePages/{name}", self.db.get_documents_path()),
+            format!(
+                "{}/maintenancePages/{}",
+                self.db.get_documents_path(),
+                crate::js_string::utf8(name)
+            ),
             &Document::from_value(json!({"version":version,"id":id})),
         )?;
         if let (Some(last), Some(field)) = (last, field)

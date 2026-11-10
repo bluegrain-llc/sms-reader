@@ -707,7 +707,7 @@ integration('TypeScript shared grant watches deliver event tails and close on ac
     a.stop();assert.equal(streams.activeFeeds,1);b.stop();assert.equal(streams.activeFeeds,0);
   } finally { a?.stop();b?.stop(); }
 });
-integration('maintenance cursors move past poison records beyond page limits and wrap for retry', async () => {
+integration('TypeScript maintenance cursors move past poison records beyond page limits and wrap for retry', async () => {
   const { MaintenancePages } = await import('../src/maintenance-pages.js');
   const collection='capacityMaintenanceFixture', pages=new MaintenancePages(db), processed=new Set<string>();
   try {
@@ -721,7 +721,7 @@ integration('maintenance cursors move past poison records beyond page limits and
     assert.equal(processed.size,501);
   } finally { await db.recursiveDelete(db.collection(collection));await db.collection('maintenancePages').doc('capacity-fixture').delete(); }
 });
-integration('expired cleanup batches 400 unchanged records without per-document read transactions', { timeout: 30000 }, async () => {
+integration('TypeScript expired cleanup batches 400 unchanged records without per-document read transactions', { timeout: 30000 }, async () => {
   const { MaintenancePages } = await import('../src/maintenance-pages.js');
   const collection = 'capacityPurgeFixture', seed = db.batch();
   for (let i = 0; i < 400; i++) seed.set(db.collection(collection).doc(String(i)), { purgeAt: new Date(time - 1) });
@@ -744,7 +744,7 @@ integration('expired cleanup batches 400 unchanged records without per-document 
     await db.recursiveDelete(db.collection(collection)); await db.collection('maintenancePages').doc(`purge-${collection}`).delete();
   }
 });
-integration('conditional purge preserves a concurrently renewed record and cleans unaffected records', { timeout: 15000 }, async () => {
+integration('TypeScript conditional purge preserves a concurrently renewed record and cleans unaffected records', { timeout: 15000 }, async () => {
   const { MaintenancePages } = await import('../src/maintenance-pages.js');
   const collection = 'capacityRenewalFixture', renewed = db.collection(collection).doc('renewed');
   const seed = db.batch();
@@ -1160,14 +1160,17 @@ integration('repeated deletion adopts the original legacy acceptance age without
 });
 
 
-integration('large valid form deletion shrinks failed transaction pages until cleanup completes', { timeout: 60000 }, async () => {
-  await relay.forms.approve(uid, grantId, true);
+integration('TypeScript deletion shrinks failed transaction pages for large valid form records', { timeout: 60000 }, async () => {
+  // The failure injector below wraps the TypeScript Firestore transaction.
+  // Prepare its large fixture with that runtime under either backend selection.
+  const fixture = new TypeScriptRelay(db, async () => {}, () => time);
+  await fixture.forms.approve(uid, grantId, true);
   const definition = { ...formInput('large-delete-first'), fields: Array.from({ length: 30 }, (_, i) => ({ id: `field${i}`, label: 'Choose', type: 'single_choice' as const,
     options: Array.from({ length: 40 }, (_, j) => ({ id: `option${j}`, label: 'x'.repeat(160) })) })) };
   assert.ok(Buffer.byteLength(JSON.stringify(definition)) < 256 * 1024);
-  const secondCaller = await relay.createGrant(uid, did, 'Second large-form caller', 30);
-  await relay.forms.approve(uid, secondCaller.grantId, true);
-  for (let i = 0; i < 60; i++) await relay.forms.create(i < 30 ? token : secondCaller.token, { ...definition, idempotencyKey: `large-delete-${i}` });
+  const secondCaller = await fixture.createGrant(uid, did, 'Second large-form caller', 30);
+  await fixture.forms.approve(uid, secondCaller.grantId, true);
+  for (let i = 0; i < 60; i++) await fixture.forms.create(i < 30 ? token : secondCaller.token, { ...definition, idempotencyKey: `large-delete-${i}` });
   const records = await db.collection('formRequests').where('ownerId', '==', uid).get();
   assert.equal(records.size, 60);
   const sizes = new Map(records.docs.map(doc => [doc.ref.path, Buffer.byteLength(JSON.stringify(doc.data()))]));

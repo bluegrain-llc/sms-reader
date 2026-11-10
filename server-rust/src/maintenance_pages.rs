@@ -36,7 +36,7 @@ impl Relay {
         self.maintenance_scan(name, query, field, size, |docs| async move {
             for chunk in docs.chunks(concurrency.max(1)) {
                 let results = futures::future::join_all(chunk.iter().map(|doc| {
-                    let id = doc.name.rsplit('/').next().unwrap().to_owned();
+                    let id = crate::js_string::encode(doc.name.rsplit('/').next().unwrap());
                     let handle = &handle;
                     AssertUnwindSafe(async move { handle(id).await }).catch_unwind()
                 }))
@@ -85,6 +85,7 @@ impl Relay {
             .filter(|id| !id.is_empty());
         let mut start = query.clone();
         if let Some(id) = cursor_id {
+            let id = crate::js_string::utf8(id);
             let mut values = Vec::new();
             if let Some(_field) = field {
                 let value = state
