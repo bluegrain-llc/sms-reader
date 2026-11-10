@@ -107,6 +107,12 @@ impl StreamDeadline {
             deadline: self,
         })
     }
+    /// HEAD has completed logically even when Hyper never polls its empty body.
+    /// The connection still retains the watchdog until the headers flush.
+    pub fn head_body(self) -> Body {
+        self.complete();
+        self.body(Body::empty())
+    }
 }
 struct DeadlineBody {
     body: Body,

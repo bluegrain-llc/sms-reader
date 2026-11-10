@@ -341,68 +341,29 @@ mod tests {
     use super::*;
     #[tokio::test]
     async fn recovery_gate_runs_real_watch_reconnects_and_only_reopens_at_current() {
-        use crate::event_streams::{ListenStream, watch_with_connector};
-        use firestore::gcloud_sdk::{
-            google::firestore::v1::{ListenResponse, TargetChange},
-            tonic::Status,
-        };
-        use firestore::{FirestoreListenEvent, FirestoreListenerTargetChangeType};
-        let (attempts, mut connections) = tokio::sync::mpsc::unbounded_channel();
-        let watch = watch_with_connector(
-            move || {
-                let attempts = attempts.clone();
-                Box::pin(async move {
-                    let (writer, reader) = tokio::sync::mpsc::unbounded_channel();
-                    attempts.send(writer).unwrap();
-                    Ok(
-                        Box::pin(tokio_stream::wrappers::UnboundedReceiverStream::new(reader))
-                            as ListenStream,
-                    )
-                })
-            },
-            1,
-            Duration::from_millis(1),
-        );
+        use crate::event_streams::scripted::*;
+        use firestore::FirestoreListenerTargetChangeType as Change;
+        use firestore::gcloud_sdk::tonic::Status;
+        let (watch, mut connections) = watch(1, false);
         let gate = Arc::new(RecoveryGate::waiting());
         let weak = Arc::downgrade(&gate);
         let observer = tokio::spawn(async move { RecoveryGate::observe_watch(weak, watch).await });
-        let current = || {
-            Ok(ListenResponse {
-                response_type: Some(FirestoreListenEvent::TargetChange(TargetChange {
-                    target_change_type: FirestoreListenerTargetChangeType::Current as i32,
-                    ..Default::default()
-                })),
-            })
-        };
-        let first = tokio::time::timeout(Duration::from_secs(1), connections.recv())
-            .await
-            .unwrap()
-            .unwrap();
+        let first = next(&mut connections).await;
         assert!(gate.assert_open().is_err());
-        first.send(current()).unwrap();
+        first.processed(change(Change::Current)).await;
         wait_gate(&gate, true).await;
-        first.send(Err(Status::unavailable("transient"))).unwrap();
+        first.send(Err(Status::unavailable("transient")));
         wait_gate(&gate, false).await;
-        let second = tokio::time::timeout(Duration::from_secs(1), connections.recv())
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(gate.assert_open().is_err());
-        // NO_CHANGE without CURRENT cannot reopen a fresh transport.
+        let second = next(&mut connections).await;
         second
-            .send(Ok(ListenResponse {
-                response_type: Some(FirestoreListenEvent::TargetChange(TargetChange {
-                    target_change_type: FirestoreListenerTargetChangeType::NoChange as i32,
-                    ..Default::default()
-                })),
-            }))
-            .unwrap();
+            .processed(doc("recoveryControl", "state", json!({"blocked":false})))
+            .await;
+        second.processed(change(Change::NoChange)).await;
+        // Both updates have been consumed, yet neither supplies a CURRENT barrier.
         assert!(gate.assert_open().is_err());
-        second.send(current()).unwrap();
+        second.processed(change(Change::Current)).await;
         wait_gate(&gate, true).await;
-        second
-            .send(Err(Status::permission_denied("permanent")))
-            .unwrap();
+        second.send(Err(Status::permission_denied("permanent")));
         assert!(
             tokio::time::timeout(Duration::from_secs(1), observer)
                 .await
@@ -419,45 +380,30 @@ mod tests {
         );
     }
     #[tokio::test]
-    async fn recovery_gate_close_cancels_transport_and_pending_reconnect() {
-        use crate::event_streams::{ListenStream, watch_with_connector};
+    async fn recovery_gate_close_cancels_both_rpc_directions_and_pending_reconnect() {
+        use crate::event_streams::scripted::*;
         use firestore::gcloud_sdk::tonic::Status;
         for during_backoff in [false, true] {
-            let (attempts, mut connections) = tokio::sync::mpsc::unbounded_channel();
-            let watch = watch_with_connector(
-                move || {
-                    let attempts = attempts.clone();
-                    Box::pin(async move {
-                        let (writer, reader) = tokio::sync::mpsc::unbounded_channel();
-                        attempts.send(writer).unwrap();
-                        Ok(
-                            Box::pin(tokio_stream::wrappers::UnboundedReceiverStream::new(reader))
-                                as ListenStream,
-                        )
-                    })
-                },
-                1,
-                Duration::from_secs(30),
-            );
+            let (watch, mut connections) = watch_with_backoff(1, false, Duration::from_secs(30));
             let gate = Arc::new(RecoveryGate::waiting());
             let weak = Arc::downgrade(&gate);
-            let task = tokio::spawn(async move {
+            *gate.task.lock().unwrap() = Some(tokio::spawn(async move {
                 let _ = RecoveryGate::observe_watch(weak, watch).await;
-            });
-            *gate.task.lock().unwrap() = Some(task);
-            let writer = tokio::time::timeout(Duration::from_secs(1), connections.recv())
-                .await
-                .unwrap()
-                .unwrap();
+            }));
+            let mut connection = next(&mut connections).await;
+            assert!(matches!(
+                connection.requests_closed.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+            ));
             if during_backoff {
-                writer.send(Err(Status::unavailable("transient"))).unwrap();
-                tokio::time::timeout(Duration::from_secs(1), writer.closed())
-                    .await
-                    .unwrap();
+                connection.send(Err(Status::unavailable("transient")));
+                connection.response_closed().await;
             }
             gate.close();
-            tokio::time::timeout(Duration::from_secs(1), writer.closed())
+            connection.response_closed().await;
+            tokio::time::timeout(Duration::from_secs(1), &mut connection.requests_closed)
                 .await
+                .unwrap()
                 .unwrap();
             assert!(gate.assert_open().is_err());
             assert!(

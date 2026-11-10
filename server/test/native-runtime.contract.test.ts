@@ -74,6 +74,30 @@ test('native grant feed shares watches, bounds its tail, delivers changes and cl
   } finally { for (const id of subscriptions) await bridge.call('streamStop', [id]); }
 });
 
+test('native public subscriptions stay live when last detach races replacement attachment', { timeout: 30_000 }, async t => {
+  const grant = await readyGrant();
+  let live = await bridge.call('streamSubscribe', [grant.token]) as Subscription;
+  try {
+    for (let iteration = 0; iteration < 12; iteration++) {
+      const [, replacement] = await Promise.all([
+        bridge.call('streamStop', [live.subscriptionId]),
+        bridge.call('streamSubscribe', [grant.token]) as Promise<Subscription>,
+      ]);
+      live = replacement;
+      const state = await bridge.call('streamSnapshot', [live.subscriptionId]) as Snapshot;
+      assert.equal(state.activeFeeds, 1); assert.equal(state.failed, false);
+    }
+    await relay.forms.create(grant.token, form('concurrent-replacement'));
+    await until(() => bridge.call('streamSnapshot', [live.subscriptionId]) as Promise<Snapshot>,
+      state => state.events.some(event => event.type === 'request.created'), t.signal);
+    await relay.revoke(uid, grant.grantId);
+    await until(() => bridge.call('streamSnapshot', [live.subscriptionId]) as Promise<Snapshot>, state => state.failed, t.signal);
+  } finally {
+    const state = await bridge.call('streamStop', [live.subscriptionId]) as { activeFeeds: number };
+    assert.equal(state.activeFeeds, 0);
+  }
+});
+
 test('native account deletion closes every subscriber sharing its authorization watches', { timeout: 30_000 }, async t => {
   const grant = await readyGrant(), subscriptions: string[] = [];
   try {

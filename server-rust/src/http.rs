@@ -174,7 +174,16 @@ async fn common(State(s): State<App>, mut request: Request, next: Next) -> Respo
             .insert("Cache-Control", "no-store".parse().unwrap());
     }
     if is_head {
-        *response.body_mut() = Body::empty();
+        // Dropping the producer releases admission. Preserve the response's
+        // deadline token on the empty HEAD body so its actual flush completes it.
+        let body = Body::empty();
+        *response.body_mut() = match response
+            .extensions_mut()
+            .remove::<crate::newtransport::StreamDeadline>()
+        {
+            Some(deadline) => deadline.head_body(),
+            None => body,
+        };
     }
     measured_response(response, s.relay.delivery, &method, &path, started)
 }
@@ -1119,12 +1128,13 @@ async fn stream(
     };
     let end = tokio::time::Instant::now() + Duration::from_millis(remaining);
     let transport = connection.map(|connection| connection.stream_deadline(end));
+    let response_deadline = transport.clone();
     let feed = tokio::select! {
         feed = s.streams.subscribe(secret.clone()) => match feed {
             Ok(feed) => feed,
-            Err(_) => { admission.release().await; return Ok(Response::new(finish_stream(Body::empty(), transport))); }
+            Err(_) => { admission.release().await; return Ok(stream_response(Response::new(finish_stream(Body::empty(), transport)), response_deadline)); }
         },
-        _ = tokio::time::sleep_until(end) => { admission.release().await; return Ok(Response::new(finish_stream(Body::empty(), transport))); },
+        _ = tokio::time::sleep_until(end) => { admission.release().await; return Ok(stream_response(Response::new(finish_stream(Body::empty(), transport)), response_deadline)); },
     };
     let body = event_body(
         page,
@@ -1138,15 +1148,27 @@ async fn stream(
         admission.release(),
         transport,
     );
-    Ok((
-        [
-            ("Content-Type", "text/event-stream"),
-            ("Cache-Control", "no-cache, no-store"),
-            ("X-Accel-Buffering", "no"),
-        ],
-        body,
-    )
-        .into_response())
+    Ok(stream_response(
+        (
+            [
+                ("Content-Type", "text/event-stream"),
+                ("Cache-Control", "no-cache, no-store"),
+                ("X-Accel-Buffering", "no"),
+            ],
+            body,
+        )
+            .into_response(),
+        response_deadline,
+    ))
+}
+fn stream_response(
+    mut response: Response,
+    deadline: Option<crate::newtransport::StreamDeadline>,
+) -> Response {
+    if let Some(deadline) = deadline {
+        response.extensions_mut().insert(deadline);
+    }
+    response
 }
 async fn feed_page(
     feed: &crate::event_streams::FeedSubscription,
@@ -1168,6 +1190,8 @@ async fn feed_page(
 }
 trait EventFeed: Send + 'static {
     fn failed(&self) -> bool;
+    fn ready(&self) -> bool;
+    fn wait_ready(&self) -> futures::future::BoxFuture<'_, Result<()>>;
     fn revision(&self) -> u64;
     fn closed(&self) -> futures::future::BoxFuture<'static, ()>;
     fn changed(&mut self) -> futures::future::BoxFuture<'_, Result<()>>;
@@ -1185,6 +1209,12 @@ struct SharedFeed {
 impl EventFeed for SharedFeed {
     fn failed(&self) -> bool {
         self.feed.failed()
+    }
+    fn ready(&self) -> bool {
+        self.feed.ready()
+    }
+    fn wait_ready(&self) -> futures::future::BoxFuture<'_, Result<()>> {
+        Box::pin(self.feed.wait_ready())
     }
     fn revision(&self) -> u64 {
         self.feed.revision()
@@ -1238,16 +1268,18 @@ where
     let supervisor_transport = transport.clone();
     tokio::spawn(async move {
         let pump = async {
-            if feed.failed() || tx.try_send(Ok("retry: 1000\n\n".into())).is_err() {
+            if feed.wait_ready().await.is_err()
+                || tx.try_send(Ok("retry: 1000\n\n".into())).is_err()
+            {
                 return;
             }
             loop {
-                if feed.failed() {
+                if !feed.ready() && feed.wait_ready().await.is_err() {
                     return;
                 }
                 let revision = feed.revision();
                 for event in arr(&page, "events") {
-                    if feed.failed() {
+                    if feed.failed() || (!feed.ready() && feed.wait_ready().await.is_err()) {
                         return;
                     }
                     let frame = format!(
@@ -1275,7 +1307,9 @@ where
                 if !arr(&page, "events").is_empty() {
                     continue;
                 }
-                if tx.try_send(Ok(": heartbeat\n\n".into())).is_err() {
+                if (!feed.ready() && feed.wait_ready().await.is_err())
+                    || tx.try_send(Ok(": heartbeat\n\n".into())).is_err()
+                {
                     return;
                 }
                 if feed.revision() == revision {
@@ -1322,6 +1356,12 @@ mod tests {
         fn failed(&self) -> bool {
             false
         }
+        fn ready(&self) -> bool {
+            true
+        }
+        fn wait_ready(&self) -> futures::future::BoxFuture<'_, Result<()>> {
+            Box::pin(async { Ok(()) })
+        }
         fn revision(&self) -> u64 {
             0
         }
@@ -1345,6 +1385,154 @@ mod tests {
                 }
             })
         }
+    }
+
+    struct RecoveringFeed {
+        readiness: tokio::sync::watch::Receiver<bool>,
+        replay: tokio::sync::watch::Receiver<Option<Value>>,
+        reads: Arc<AtomicUsize>,
+    }
+    impl EventFeed for RecoveringFeed {
+        fn failed(&self) -> bool {
+            false
+        }
+        fn ready(&self) -> bool {
+            *self.readiness.borrow()
+        }
+        fn wait_ready(&self) -> futures::future::BoxFuture<'_, Result<()>> {
+            let mut readiness = self.readiness.clone();
+            Box::pin(async move {
+                loop {
+                    if *readiness.borrow_and_update() {
+                        return Ok(());
+                    }
+                    readiness.changed().await.map_err(|_| Error::External)?;
+                }
+            })
+        }
+        fn revision(&self) -> u64 {
+            0
+        }
+        fn closed(&self) -> futures::future::BoxFuture<'static, ()> {
+            Box::pin(std::future::pending())
+        }
+        fn changed(&mut self) -> futures::future::BoxFuture<'_, Result<()>> {
+            Box::pin(std::future::pending())
+        }
+        fn page(
+            &self,
+            _: Option<String>,
+            replay: bool,
+        ) -> futures::future::BoxFuture<'_, Result<Value>> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            let mut result = self.replay.clone();
+            Box::pin(async move {
+                if !replay {
+                    return Ok(json!({"events":[]}));
+                }
+                loop {
+                    if let Some(page) = result.borrow_and_update().clone() {
+                        return Ok(page);
+                    }
+                    result.changed().await.map_err(|_| Error::External)?;
+                }
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn stream_withholds_pending_replay_until_authorization_watch_is_current_again() {
+        use http_body_util::BodyExt;
+        let (ready, readiness) = tokio::sync::watch::channel(true);
+        let (replay, result) = tokio::sync::watch::channel(None);
+        let reads = Arc::new(AtomicUsize::new(0));
+        let (released, release_seen) = tokio::sync::oneshot::channel();
+        let events = (0..100)
+            .map(|id| json!({"id":id.to_string(),"type":"request.created"}))
+            .collect::<Vec<_>>();
+        let mut body = event_body(
+            json!({"events":events}),
+            None,
+            tokio::time::Instant::now() + Duration::from_secs(60),
+            RecoveringFeed {
+                readiness,
+                replay: result,
+                reads: reads.clone(),
+            },
+            async move {
+                let _ = released.send(());
+            },
+            None,
+        );
+        // Drain the initial retry and durable page through the real supervisor.
+        for _ in 0..101 {
+            tokio::time::timeout(Duration::from_secs(1), body.frame())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+        }
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while reads.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        ready.send_replace(false);
+        replay.send_replace(Some(
+            json!({"events":[{"id":"resumed","type":"request.created"}]}),
+        ));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), body.frame())
+                .await
+                .is_err(),
+            "a completed durable read must not bypass a disconnected authorization watch"
+        );
+        ready.send_replace(true);
+        let frame = tokio::time::timeout(Duration::from_secs(1), body.frame())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(String::from_utf8_lossy(frame.data_ref().unwrap()).contains("id: resumed\n"));
+        drop(body);
+        tokio::time::timeout(Duration::from_secs(1), release_seen)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn stream_deadline_remains_independent_while_authorization_watch_is_not_current() {
+        let (_ready, readiness) = tokio::sync::watch::channel(false);
+        let (_replay, replay) = tokio::sync::watch::channel(None);
+        let reads = Arc::new(AtomicUsize::new(0));
+        let (released, release_seen) = tokio::sync::oneshot::channel();
+        let body = event_body(
+            json!({"events":[{"id":"withheld","type":"request.created"}]}),
+            None,
+            tokio::time::Instant::now() + Duration::from_millis(50),
+            RecoveringFeed {
+                readiness,
+                replay,
+                reads: reads.clone(),
+            },
+            async move {
+                let _ = released.send(());
+            },
+            None,
+        );
+        let bytes = tokio::time::timeout(Duration::from_secs(1), axum::body::to_bytes(body, 1024))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(bytes.is_empty());
+        assert_eq!(reads.load(Ordering::SeqCst), 0);
+        tokio::time::timeout(Duration::from_secs(1), release_seen)
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     struct Capture(tokio::sync::mpsc::UnboundedSender<Value>);
@@ -1596,7 +1784,10 @@ mod tests {
             .write_all(b"GET /stream HTTP/1.1\r\nHost: localhost\r\n\r\n")
             .await
             .unwrap();
-        let connection = connection_received.await.unwrap();
+        let connection = tokio::time::timeout(Duration::from_secs(2), connection_received)
+            .await
+            .expect("TCP request must reach the stream handler before testing its deadline")
+            .unwrap();
         let mut closed = connection.socket_closed();
         // No client reads until the actual server-side TCP IO has been dropped.
         tokio::time::timeout(Duration::from_millis(700), release_seen)
