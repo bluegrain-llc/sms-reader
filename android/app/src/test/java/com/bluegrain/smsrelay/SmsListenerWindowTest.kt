@@ -27,7 +27,7 @@ class SmsListenerWindowTest {
 
     @Test(timeout = 5000) fun callbacksWaitingForReadyRecheckCancellationAndRebinding() = runBlocking {
         for (timeout in listOf(false, true)) {
-            val window = SmsListenerWindow(0) { 300_000 }
+            val window = SmsListenerWindow(0) { if (timeout) 300_000 else 378 }
             var current = true
             val decision = async(start = CoroutineStart.UNDISPATCHED) { window.accepts(timeout) { current } }
             try {
@@ -58,4 +58,18 @@ class SmsListenerWindowTest {
             assertTrue(window.accepts(true) { true })
         } finally { window.close(); decision.cancel() }
     }
+    @Test(timeout = 5000) fun earlierRequestDeadlineCanShortenButNeverRenewWindow() = runBlocking {
+        var elapsed = 1_000L
+        val window = SmsListenerWindow(elapsed, 30_000) { elapsed }
+        window.ready.complete(true)
+        window.shortenTo(20_000)
+        window.shortenTo(300_000)
+        elapsed = 20_999
+        assertFalse(window.expired())
+        elapsed++
+        assertTrue(window.expired())
+        assertFalse(window.accepts(false) { true })
+        assertTrue(window.accepts(true) { true })
+    }
+
 }

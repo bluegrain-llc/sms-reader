@@ -190,9 +190,9 @@ class InboxViewModel(application: Application) : AndroidViewModel(application) {
         if (repo.listenerUntil > System.currentTimeMillis()) throw ApiFailure("sms_listener_busy", 409)
         stopHelper(null)
         helperRequest = form.id; helperField = field.id
-        val window = SmsListenerWindow(SystemClock.elapsedRealtime(), SystemClock::elapsedRealtime)
-        listenerWindow = window
         val started = System.currentTimeMillis()
+        val window = SmsListenerWindow(SystemClock.elapsedRealtime(), form.expiresAt - started, SystemClock::elapsedRealtime)
+        listenerWindow = window
         receiver = object : BroadcastReceiver() {
             override fun onReceive(context: Context, intent: Intent) {
                 if (intent.action != SmsRetriever.SMS_RETRIEVED_ACTION || helperRequest != form.id) return

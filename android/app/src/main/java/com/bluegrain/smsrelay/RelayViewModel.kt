@@ -237,7 +237,7 @@ class RelayViewModel @JvmOverloads constructor(application: Application, private
         if (reason != null) { repo.event(r.id, "failed", reason); sync(r.id); return }
         boundId = r.id; blocked = false; repo.inFlight = r.id; gate.bind(r.id)
         val started = System.currentTimeMillis()
-        val window = SmsListenerWindow(SystemClock.elapsedRealtime(), SystemClock::elapsedRealtime)
+        val window = SmsListenerWindow(SystemClock.elapsedRealtime(), minOf(r.expiresAt, r.listeningDeadline ?: Long.MAX_VALUE) - started, SystemClock::elapsedRealtime)
         listenerWindow = window
         receiver = object : BroadcastReceiver() {
             override fun onReceive(context: Context, intent: Intent) {
@@ -255,6 +255,7 @@ class RelayViewModel @JvmOverloads constructor(application: Application, private
             val ready = retry(r.id) { repo.event(r.id, "ready", startedAt = started) }
             if (listenerWindow !== window || blocked || boundId != r.id) return
             if (ready.getString("status") != "ready") { window.close(); sync(r.id); return }
+            window.shortenTo(minOf(r.expiresAt, ready.optLong("expiresAt", r.expiresAt), ready.optLong("listeningDeadline", Long.MAX_VALUE)) - started)
             window.ready.complete(true)
             sync(r.id); startPoll(r.id)
         } catch (e: CancellationException) { window.close(); throw e }
@@ -300,16 +301,18 @@ class RelayViewModel @JvmOverloads constructor(application: Application, private
                     if (e.status in setOf(401, 403, 404, 409)) { clearLocal(); error("This request is no longer available."); return@launch }
                 } catch (_: IOException) { error("Offline. Approval will stop when the listening window ends.") }
                 val r = state.value.request
-                if (listenerWindow?.expired() == true && !blocked && boundId == id && r?.id == id && r.active) {
-                    fail(id, "listener_timeout")
-                    return@launch
-                }
-                if (r != null && System.currentTimeMillis() >= (r.listeningDeadline ?: r.expiresAt)) {
+                if (!blocked && boundId == id && r?.id == id && r.active && listeningWindowEnded(System.currentTimeMillis())) {
+                    if (listenerWindow != null) {
+                        fail(id, "listener_timeout")
+                        return@launch
+                    }
                     clearSensitive(); error("Listening window ended. Ask the caller to start a new request.")
                 }
             }
         }
     }
+    private fun listeningWindowEnded(now: Long): Boolean = listenerWindow?.expired()
+        ?: state.value.request?.let { now >= (it.listeningDeadline ?: it.expiresAt) } ?: false
     private suspend fun sync(id: String) {
         applyRequest(repo.request(id))
     }
