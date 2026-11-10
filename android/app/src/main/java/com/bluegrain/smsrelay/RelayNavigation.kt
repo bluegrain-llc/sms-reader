@@ -39,6 +39,10 @@ internal suspend fun loadResponseWhenReady(
     onFormEntry: () -> Unit = {},
 ): Boolean {
     session.first { it.configured && it.signedIn && it.registered && !it.busy }
+    // A retained outcome needs no network fetch; active SMS still requires explicit opening.
+    if (target.kind == RequestKind.Sms && session.value.request?.let {
+            it.id == target.id && it.status in setOf("completed", "cancelled", "failed", "expired", "denied")
+        } == true) return true
     // Rotation keeps the current form, draft and confirmation in the same ViewModel.
     if (target.kind == RequestKind.Form && inbox.value.form?.id == target.id) {
         onFormEntry()

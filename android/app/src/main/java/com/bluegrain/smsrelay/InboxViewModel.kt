@@ -32,11 +32,11 @@ class InboxViewModel(application: Application) : AndroidViewModel(application) {
     private var helperField: String? = null
     private var submitBody: JSONObject? = null
     private var ready = CompletableDeferred<Boolean>()
-    private data class Draft(val values: Map<String, Any>, val stepId: String?, val reviewing: Boolean, val submission: JSONObject?)
+    private data class Draft(val values: Map<String, Any>, val stepId: String?, val reviewing: Boolean, val submission: JSONObject?, val expiresAt: Long)
     private val drafts = mutableMapOf<String, Draft>()
     private fun saveDraft() {
         val s = state.value
-        s.form?.takeIf { it.status == "pending" && s.now < it.expiresAt }?.let { drafts[it.id] = Draft(s.values, s.stepId, s.reviewing, submitBody) }
+        s.form?.takeIf { it.status == "pending" && s.now < it.expiresAt }?.let { drafts[it.id] = Draft(s.values, s.stepId, s.reviewing, submitBody, it.expiresAt) }
     }
     init {
         viewModelScope.launch {
@@ -44,6 +44,11 @@ class InboxViewModel(application: Application) : AndroidViewModel(application) {
             while (true) {
                 delay(1_000)
                 mutable.update { it.copy(now = System.currentTimeMillis()) }
+                drafts.entries.removeAll { it.value.expiresAt <= state.value.now }
+                state.value.let { s ->
+                    s.form?.takeIf { s.now >= it.expiresAt && (s.values.isNotEmpty() || s.stepId != null || s.reviewing ||
+                        s.fieldErrors.isNotEmpty() || submitBody != null || helperRequest == it.id) }?.let(::showLoaded)
+                }
                 if (state.value.helperUntil in 1..System.currentTimeMillis()) stopHelper("SMS listening ended. You can still enter the code manually.")
                 if (++tick % 5 == 0 && state.value.foreground && app.configured && repo.signedIn && repo.registered && !state.value.busy) refresh()
             }

@@ -192,4 +192,129 @@ class NotificationNavigationTest {
             compose.onNodeWithText("Inbox").assertIsDisplayed()
         }
     }
+    @Test fun expiredFormCloseAndBackClearAnswersFromBothEntryOriginsWithoutServiceAccess() {
+        isolatedBuild()
+        val id = "d".repeat(64)
+        val field = FormField("note", "Note", "text", false, 1000, null, null, emptyList(), false)
+        for (origin in RequestOrigin.entries) for (back in listOf(false, true)) {
+            val intent = if (origin == RequestOrigin.Notification) notification(id = id) else Intent(context, MainActivity::class.java)
+            ActivityScenario.launch<MainActivity>(intent).use { scenario ->
+                lateinit var expiring: RequestForm
+                lateinit var retained: InboxViewModel
+                scenario.onActivity { activity ->
+                    val vm = androidx.lifecycle.ViewModelProvider(activity)[RelayViewModel::class.java]
+                    @Suppress("UNCHECKED_CAST")
+                    val state = RelayViewModel::class.java.getDeclaredField("mutable").apply { isAccessible = true }
+                        .get(vm) as kotlinx.coroutines.flow.MutableStateFlow<RelayUiState>
+                    state.value = state.value.copy(configured = true, signedIn = true, registered = true)
+                    retained = androidx.lifecycle.ViewModelProvider(activity)[InboxViewModel::class.java]
+                    expiring = RequestForm(id, "Demo assistant", "Review", "", "pending", System.currentTimeMillis() + 2_000,
+                        listOf(field), emptyList(), null, steps = listOf(FormStep("details", "Details", "", listOf("note"))))
+                    retained.showLoaded(expiring); retained.change("note", "Expired answer"); retained.next(); retained.close()
+                    assertTrue(retained.state.value.reviewing)
+                    assertEquals("Expired answer", retained.state.value.values["note"])
+                    if (origin == RequestOrigin.Inbox) MainActivity::class.java
+                        .getDeclaredMethod("openFromInbox", String::class.java, RequestKind::class.java)
+                        .apply { isAccessible = true }.invoke(activity, id, RequestKind.Form)
+                }
+                compose.waitUntil(5_000) { retained.state.value.now >= expiring.expiresAt }
+                compose.onNodeWithText("This request has expired.").assertIsDisplayed()
+                if (back) scenario.onActivity { it.onBackPressedDispatcher.onBackPressed() }
+                else compose.onNodeWithText("Close").performClick()
+                if (origin == RequestOrigin.Notification) compose.waitUntil(5_000) { scenario.state == Lifecycle.State.CREATED }
+                else compose.onNodeWithText("Inbox").assertIsDisplayed()
+                scenario.onActivity { activity ->
+                    assertFalse(activity.isFinishing)
+                    assertSame(retained, androidx.lifecycle.ViewModelProvider(activity)[InboxViewModel::class.java])
+                    assertTrue(retained.state.value.values.isEmpty())
+                    assertNull(retained.state.value.stepId)
+                    assertFalse(retained.state.value.reviewing)
+                    retained.showLoaded(expiring.copy(expiresAt = Long.MAX_VALUE))
+                    assertTrue(retained.state.value.values.isEmpty())
+                }
+            }
+        }
+    }
+    @Test fun terminalSmsOutcomesStayVisibleAcrossRecreationWithoutServiceAccess() {
+        isolatedBuild()
+        val id = "e".repeat(64)
+        val outcomes = listOf("cancelled" to "Request cancelled", "failed" to "Request could not finish",
+            "expired" to "Request expired", "completed" to "Handled on another phone")
+        for (origin in RequestOrigin.entries) {
+            val intent = if (origin == RequestOrigin.Notification) notification("sms", id) else Intent(context, MainActivity::class.java)
+            ActivityScenario.launch<MainActivity>(intent).use { scenario ->
+                lateinit var retained: RelayViewModel
+                for ((status, message) in outcomes) {
+                    scenario.onActivity { activity ->
+                        val vm = androidx.lifecycle.ViewModelProvider(activity)[RelayViewModel::class.java]
+                        retained = vm
+                        @Suppress("UNCHECKED_CAST")
+                        val state = RelayViewModel::class.java.getDeclaredField("mutable").apply { isAccessible = true }
+                            .get(vm) as kotlinx.coroutines.flow.MutableStateFlow<RelayUiState>
+                        state.value = state.value.copy(configured = true, signedIn = true, registered = true,
+                            request = PhoneRequest(id, status, "Demo assistant", "Sign in", null, Long.MAX_VALUE, null,
+                                if (status == "completed") "handled_on_another_device" else null))
+                        if (origin == RequestOrigin.Inbox) MainActivity::class.java
+                            .getDeclaredMethod("openFromInbox", String::class.java, RequestKind::class.java)
+                            .apply { isAccessible = true }.invoke(activity, id, RequestKind.Sms)
+                    }
+                    compose.onNodeWithText(message).assertIsDisplayed()
+                    scenario.recreate()
+                    compose.onNodeWithText(message).assertIsDisplayed()
+                    compose.onNodeWithText("Retry").assertDoesNotExist()
+                    scenario.onActivity { activity ->
+                        assertSame(retained, androidx.lifecycle.ViewModelProvider(activity)[RelayViewModel::class.java])
+                        assertEquals(status, retained.state.value.request?.status)
+                    }
+                    assertEquals(RelayDestination.Response(RequestTarget(id, RequestKind.Sms), origin), destination(scenario))
+                }
+            }
+        }
+    }
+    @Test fun formsClosedWhileLiveLoseCurrentAndCachedAnswersOnLocalExpiry() {
+        isolatedBuild()
+        val id = "f".repeat(64)
+        val field = FormField("note", "Note", "text", false, 1000, null, null, emptyList(), false)
+        for (origin in RequestOrigin.entries) for (switchForm in listOf(false, true)) {
+            val intent = if (origin == RequestOrigin.Notification) notification(id = id) else Intent(context, MainActivity::class.java)
+            ActivityScenario.launch<MainActivity>(intent).use { scenario ->
+                lateinit var expiring: RequestForm
+                lateinit var retained: InboxViewModel
+                scenario.onActivity { activity ->
+                    val vm = androidx.lifecycle.ViewModelProvider(activity)[RelayViewModel::class.java]
+                    @Suppress("UNCHECKED_CAST")
+                    val state = RelayViewModel::class.java.getDeclaredField("mutable").apply { isAccessible = true }
+                        .get(vm) as kotlinx.coroutines.flow.MutableStateFlow<RelayUiState>
+                    state.value = state.value.copy(configured = true, signedIn = true, registered = true)
+                    retained = androidx.lifecycle.ViewModelProvider(activity)[InboxViewModel::class.java]
+                    expiring = RequestForm(id, "Demo assistant", "Review", "", "pending", System.currentTimeMillis() + 3_000,
+                        listOf(field), emptyList(), null, steps = listOf(FormStep("details", "Details", "", listOf("note"))))
+                    retained.showLoaded(expiring); retained.change("note", "Live answer"); retained.next()
+                    if (origin == RequestOrigin.Inbox) MainActivity::class.java
+                        .getDeclaredMethod("openFromInbox", String::class.java, RequestKind::class.java)
+                        .apply { isAccessible = true }.invoke(activity, id, RequestKind.Form)
+                }
+                compose.onNodeWithText("Close").performClick()
+                scenario.onActivity {
+                    assertTrue(retained.state.value.now < expiring.expiresAt)
+                    assertEquals("Live answer", retained.state.value.values["note"])
+                    if (switchForm) {
+                        retained.showLoaded(expiring.copy(id = "other", expiresAt = Long.MAX_VALUE))
+                        retained.change("note", "Other live answer")
+                    }
+                }
+                compose.waitUntil(6_000) { retained.state.value.now >= expiring.expiresAt }
+                scenario.onActivity {
+                    if (switchForm) assertEquals("Other live answer", retained.state.value.values["note"])
+                    else {
+                        assertTrue(retained.state.value.values.isEmpty())
+                        assertNull(retained.state.value.stepId)
+                        assertFalse(retained.state.value.reviewing)
+                    }
+                    retained.showLoaded(expiring.copy(expiresAt = Long.MAX_VALUE))
+                    assertTrue(retained.state.value.values.isEmpty())
+                }
+            }
+        }
+    }
 }

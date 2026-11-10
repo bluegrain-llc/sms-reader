@@ -76,4 +76,26 @@ class RelayNavigationTest {
             session, inbox, ::unavailable, ::unavailable))
         assertEquals(listOf("different"), opened)
     }
+    @Test fun retainedTerminalSmsNeedsNoFetchButActiveAndDifferentTargetsStillOpen() = runBlocking {
+        val request = PhoneRequest("retained", "cancelled", "Assistant", "Sign in", null, Long.MAX_VALUE, null, null)
+        val session = MutableStateFlow(RelayUiState(configured = true, signedIn = true, registered = true, request = request))
+        val inbox = MutableStateFlow(InboxState())
+        val opened = mutableListOf<String>()
+        suspend fun unavailable(id: String): Boolean { opened.add(id); return false }
+        for (status in listOf("cancelled", "failed", "expired", "completed", "denied")) {
+            session.value = session.value.copy(request = request.copy(status = status))
+            assertTrue(withTimeout(1000) { loadResponseWhenReady(RequestTarget(request.id, RequestKind.Sms),
+                session, inbox, ::unavailable, ::unavailable) })
+        }
+        assertTrue(opened.isEmpty())
+        for (status in listOf("queued", "pending_phone", "ready", "awaiting_consent")) {
+            session.value = session.value.copy(request = request.copy(status = status))
+            assertFalse(withTimeout(1000) { loadResponseWhenReady(RequestTarget(request.id, RequestKind.Sms),
+                session, inbox, ::unavailable, ::unavailable) })
+        }
+        session.value = session.value.copy(request = request)
+        assertFalse(withTimeout(1000) { loadResponseWhenReady(RequestTarget("different", RequestKind.Sms),
+            session, inbox, ::unavailable, ::unavailable) })
+        assertEquals(listOf("retained", "retained", "retained", "retained", "different"), opened)
+    }
 }

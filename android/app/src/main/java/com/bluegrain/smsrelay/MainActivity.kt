@@ -140,12 +140,12 @@ class MainActivity : ComponentActivity() {
         destination = RelayDestination.Response(RequestTarget(id, kind), RequestOrigin.Inbox)
     }
     private fun closeDestination() {
+        if ((destination as? RelayDestination.Response)?.target?.kind == RequestKind.Form) inbox.close()
         if (destination.backgroundOnClose()) {
             // Keep the task and ViewModels alive, including drafts and Android listening windows.
             moveTaskToBack(true)
             destination = RelayDestination.Inbox
         } else {
-            if ((destination as? RelayDestination.Response)?.target?.kind == RequestKind.Form) inbox.close()
             destination = RelayDestination.Inbox
         }
     }
