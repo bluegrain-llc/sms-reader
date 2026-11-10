@@ -42,7 +42,7 @@ pub async fn destination(raw: &str) -> Result<(url::Url, SocketAddr)> {
         url.scheme() == "https"
             && url.username().is_empty()
             && url.password().is_none()
-            && url.fragment().is_none()
+            && url.fragment().is_none_or(str::is_empty)
             && url.port_or_known_default() == Some(443),
         400,
         "invalid_webhook_url",

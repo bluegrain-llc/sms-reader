@@ -19,6 +19,10 @@ const uid = 'migration-owner', did = 'migration-device';
 const form = (key: string) => ({ title: ' Review ', body: 'Body', idempotencyKey: key,
   fields: [{ id: 'code', type: 'text' as const, input: 'sms_code' as const, label: ' Code ', required: true }],
   actions: [{ id: 'submit', type: 'submit' as const, label: ' Send ' }] });
+const utf32 = (text: string, be = false) => {
+  const points = [...text].map(c => c.codePointAt(0)!); const bytes = Buffer.alloc(points.length * 4);
+  points.forEach((point, i) => be ? bytes.writeUInt32BE(point, i * 4) : bytes.writeUInt32LE(point, i * 4)); return bytes;
+};
 beforeEach(async () => {
   // Emulator admin clear also removes records left by the other implementation.
   const response = await fetch(`http://${process.env.FIRESTORE_EMULATOR_HOST}/emulator/v1/projects/demo-sms-relay/databases/(default)/documents`, { method: 'DELETE', signal: AbortSignal.timeout(10_000) });
@@ -71,6 +75,8 @@ for (const direction of ['typescript-to-rust', 'rust-to-typescript']) {
     assert.ok(stored.purgeAt instanceof Timestamp);
     await writer.forms.submit(uid, did, request.requestId, { submissionId: 'cross-submit', action: 'submit', values: { code: '001234' } });
     assert.equal((await reader.forms.events(token)).events.filter(e => e.type === 'request.submitted').length, 1);
+    await writer.forms.registerWebhook(token, { url: 'https://8.8.8.8/#', events: ['request.created'] });
+    assert.equal((await reader.forms.webhooks(token))[0]!.url, 'https://8.8.8.8/#');
   });
 }
 const options: HttpOptions = {
@@ -109,6 +115,9 @@ test('HTTP errors, body bounds, auth ordering, headers and protocol negotiation 
       ...[gzipSync, deflateSync, brotliCompressSync].map((compress, i) => ({ path: '/v1/requests', method: 'POST', headers: { 'content-type': 'application/json', 'content-encoding': ['gzip', 'deflate', 'br'][i]!, authorization: `Bearer ${token}` }, body: compress(Buffer.from('{"purpose":"Compressed","idempotencyKey":"encoded-body"}')) })),
       { path: '/v1/requests', method: 'POST', headers: { 'content-type': 'application/json; charset=utf-16le', authorization: `Bearer ${token}` }, body: Buffer.from('{"purpose":"Compressed","idempotencyKey":"encoded-body"}', 'utf16le') },
       { path: '/v1/requests', method: 'POST', headers: { 'content-type': 'application/json; charset=utf-16', authorization: `Bearer ${token}` }, body: Buffer.from('{"purpose":"Compressed","idempotencyKey":"encoded-body"}', 'utf16le').swap16() },
+      ...[['utf-32', false], ['utf-32', true], ['utf-32be', true]].map(([charset, be]) => ({ path: '/v1/requests', method: 'POST', headers: { 'content-type': `application/json; charset=${charset}`, authorization: `Bearer ${token}` }, body: utf32('{"purpose":"Compressed","idempotencyKey":"encoded-body"}', be as boolean) })),
+      ...[1, 2, 3].map(length => ({ path: '/v1/requests', method: 'POST', headers: { 'content-type': 'application/json; charset=utf-32le', authorization: `Bearer ${token}` }, body: Buffer.concat([utf32('{"purpose":"Compressed","idempotencyKey":"encoded-body"}'), Buffer.alloc(length)]) })),
+      { path: '/v1/requests', method: 'POST', headers: { 'content-type': 'application/json; charset=utf8', authorization: `Bearer ${token}` }, body: '{"purpose":"Compressed","idempotencyKey":"encoded-body"}' },
       { path: '/v1/requests', method: 'POST', headers: { 'content-type': 'application/json', 'content-encoding': 'gzip' }, body: gzipSync(Buffer.from(JSON.stringify({ purpose: 'x'.repeat(256 * 1024) }))) },
       { path: '/health', method: 'POST', headers: { 'content-type': 'text/plain' }, body: 'x'.repeat(256 * 1024 + 1) },
     ];
@@ -147,6 +156,8 @@ test('HTTP errors, body bounds, auth ordering, headers and protocol negotiation 
     }
     const rawId = Buffer.from('{"jsonrpc":"2.0","id":"' + '\ud800' + '","method":"tools/list"}', 'utf16le');
     assert.deepEqual(await rpc(bases[1]!, rawId, { 'content-type': 'application/json; charset=utf-16le' }), await rpc(bases[0]!, rawId, { 'content-type': 'application/json; charset=utf-16le' }));
+    const utf32Id = utf32('{"jsonrpc":"2.0","id":"' + '\ud800' + '","method":"tools/list"}');
+    assert.deepEqual(await rpc(bases[1]!, utf32Id, { 'content-type': 'application/json; charset=utf-32le' }), await rpc(bases[0]!, utf32Id, { 'content-type': 'application/json; charset=utf-32le' }));
     for (const [name, args] of [
       ['get_sms_code_request', {}], ['get_sms_code_request', { requestId: 1 }], ['get_sms_code_request', { requestId: '?' }],
       ['request_sms_code', { purpose: '   ', idempotencyKey: 'short' }], ['request_sms_code', { purpose: 'MCP extras', idempotencyKey: 'mcp-extras', ignored: true }],

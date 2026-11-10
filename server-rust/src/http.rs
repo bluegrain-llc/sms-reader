@@ -152,14 +152,22 @@ async fn json_body(body: Body, headers: &HeaderMap) -> Result<Vec<u8>> {
             k.eq_ignore_ascii_case("charset")
                 .then(|| v.trim().trim_matches('"').to_ascii_lowercase())
         })
+        .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "utf-8".into());
+    if !charset.starts_with("utf-") {
+        return Err(Error::External);
+    }
+    let charset = charset
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .collect::<String>();
     let (bytes, charset) = (bytes.as_slice(), charset.as_str());
     let text = match charset {
-        "utf-8" | "utf8" => String::from_utf8_lossy(bytes).into_owned(),
-        "utf-16" | "utf-16le" | "utf-16be" => {
+        "utf8" => String::from_utf8_lossy(bytes).into_owned(),
+        "utf16" | "utf16le" | "utf16be" => {
             let pairs = bytes.as_chunks::<2>().0;
-            let be = charset == "utf-16be"
-                || (charset == "utf-16"
+            let be = charset == "utf16be"
+                || (charset == "utf16"
                     && if bytes.starts_with(&[0xfe, 0xff]) {
                         true
                     } else if bytes.starts_with(&[0xff, 0xfe]) {
@@ -190,22 +198,55 @@ async fn json_body(body: Body, headers: &HeaderMap) -> Result<Vec<u8>> {
                 .collect::<Vec<_>>();
             crate::js_string::utf16_json(&units)?
         }
-        "utf-32" | "utf-32le" | "utf-32be" => {
-            let be = charset == "utf-32be"
-                || (charset == "utf-32" && bytes.starts_with(&[0, 0, 0xfe, 0xff]));
-            bytes
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .map(|c| {
-                    char::from_u32(if be {
-                        u32::from_be_bytes(*c)
-                    } else {
-                        u32::from_le_bytes(*c)
+        "utf32" | "utf32le" | "utf32be" => {
+            let score = |be: bool| {
+                bytes
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .take(100)
+                    .map(|b| {
+                        let n = if be {
+                            u32::from_be_bytes(*b)
+                        } else {
+                            u32::from_le_bytes(*b)
+                        };
+                        i32::from(n > 0 && n <= 0xffff) - i32::from(n > 0x10ffff)
                     })
-                    .unwrap_or('\u{fffd}')
-                })
-                .collect()
+                    .sum::<i32>()
+            };
+            let be = charset == "utf32be"
+                || (charset == "utf32"
+                    && if bytes.starts_with(&[0, 0, 0xfe, 0xff]) {
+                        true
+                    } else if bytes.starts_with(&[0xff, 0xfe, 0, 0]) {
+                        false
+                    } else {
+                        score(true) > score(false)
+                    });
+            let mut units = vec![];
+            for b in bytes.as_chunks::<4>().0 {
+                let n = if be {
+                    u32::from_be_bytes(*b)
+                } else {
+                    u32::from_le_bytes(*b)
+                };
+                if n <= 0xffff {
+                    units.push(n as u16);
+                } else {
+                    units.extend(
+                        char::from_u32(n)
+                            .unwrap_or('\u{fffd}')
+                            .encode_utf16(&mut [0; 2])
+                            .iter()
+                            .copied(),
+                    );
+                }
+            }
+            if bytes.len() % 4 != 0 {
+                units.push(0xfffd);
+            }
+            crate::js_string::utf16_json(&units)?
         }
         _ => return Err(Error::External),
     };

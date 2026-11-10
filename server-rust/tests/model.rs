@@ -141,6 +141,7 @@ fn public_addresses() {
 }
 #[tokio::test]
 async fn webhook_urls() {
+    assert!(destination("https://8.8.8.8/#").await.is_ok());
     for url in [
         "http://8.8.8.8",
         "https://127.0.0.1",
