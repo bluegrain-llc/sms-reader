@@ -1,12 +1,13 @@
 #!/usr/bin/env node
 // Staging-only REST workload. No credentials, form values, or response bodies enter output.
+import { setMaxListeners } from 'node:events';
 import { readFile, writeFile } from 'node:fs/promises';
 import { parseArgs } from 'node:util';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { performance } from 'node:perf_hooks';
 const { values } = parseArgs({ options: { config: { type:'string' }, output: {type:'string'}, quick: {type:'boolean',default:false} } });
-const abort = new AbortController(); let running=true;
+const abort = new AbortController(); setMaxListeners(256, abort.signal); let running=true;
 process.on('SIGTERM',()=>{running=false;abort.abort();});process.on('SIGINT',()=>{running=false;abort.abort();});
 const sleep=ms=>new Promise(resolve=>{const done=()=>{clearTimeout(t);abort.signal.removeEventListener('abort',done);resolve();};const t=setTimeout(done,ms);abort.signal.addEventListener('abort',done,{once:true});if(abort.signal.aborted)done();});
 try {
