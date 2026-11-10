@@ -1,0 +1,16 @@
+{
+  "projectId": "your-relay-staging",
+  "productionProjectId": "your-production-project",
+  "account": "operator@example.com",
+  "region": "us-central1",
+  "service": "sms-code-relay",
+  "serviceUrl": "https://your-staging-service.run.app",
+  "replayUrl": "https://previous---your-staging-service.run.app",
+  "callbackService": "relay-acceptance-callback",
+  "callbackUrl": "https://your-staging-callback.run.app",
+  "callbackAdminTokenFile": "/private/staging-callback-admin-token",
+  "ownerTokenFile": "/private/disposable-owner-google-id-token",
+  "disposableOwnerUid": "dedicated-staging-owner-uid",
+  "fcmTokenFiles": ["/private/first-staging-phone-fcm-token", "/private/second-staging-phone-fcm-token"],
+  "budgetUsd": 10
+}

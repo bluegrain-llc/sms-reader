@@ -30,6 +30,7 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: npm run test:unit
+      - run: npm run test:cloud-harness
       - run: npm audit --omit=dev
 
   server-integration:
@@ -53,6 +54,28 @@ jobs:
         with:
           name: firebase-emulator-logs
           path: '*-debug.log'
+          retention-days: 7
+
+  cloud-probe:
+    name: Staging callback probe container
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -f scripts/cloud-acceptance/Dockerfile -t relay-cloud-probe:local .
+      - run: docker run --rm relay-cloud-probe:local node --check scripts/cloud-acceptance/receiver.mjs
+      - name: Refuse an unconfigured callback probe
+        run: |
+          if docker run --rm relay-cloud-probe:local > /tmp/probe-startup.log 2>&1; then
+            echo 'An unconfigured probe must not start.' >&2
+            exit 1
+          fi
+          grep -q staging_receiver_configuration_required /tmp/probe-startup.log
+      - run: docker save relay-cloud-probe:local | gzip > /tmp/probe-image.tar.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: staging-callback-probe-container
+          path: /tmp/probe-image.tar.gz
           retention-days: 7
 
   container:
@@ -151,7 +174,7 @@ jobs:
 
   deliver:
     name: Publish tested container
-    needs: [server-unit, server-integration, container, android-unit, android-integration]
+    needs: [server-unit, server-integration, cloud-probe, container, android-unit, android-integration]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 15
