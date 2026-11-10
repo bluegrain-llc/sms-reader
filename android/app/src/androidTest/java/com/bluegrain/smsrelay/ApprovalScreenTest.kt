@@ -228,17 +228,28 @@ class ApprovalScreenTest {
         var submissions = 0
         var listened = false
         var ui by androidx.compose.runtime.mutableStateOf(InboxState(form = form(), now = 0, foreground = true))
-        compose.setContent { RelayTheme { RequestFormScreen(ui, "phone", {},
-            { id, value -> ui = ui.copy(values = ui.values + (id to value)) }, { submissions++ }, {}, { listened = true }, {}) } }
+        lateinit var view: android.view.View
+        lateinit var focus: androidx.compose.ui.focus.FocusManager
+        compose.setContent {
+            view = androidx.compose.ui.platform.LocalView.current
+            focus = androidx.compose.ui.platform.LocalFocusManager.current
+            RelayTheme { RequestFormScreen(ui, "phone", {},
+                { id, value -> ui = ui.copy(values = ui.values + (id to value)) }, { submissions++ }, {}, { listened = true }, {}) }
+        }
         compose.onNodeWithText("Invoice details").assertIsDisplayed()
         compose.onNodeWithText("Comment *").performScrollTo().performTextInput("Business lunch")
-        compose.onNodeWithText("Meals").performScrollTo().performClick()
+        hideKeyboard(view, focus)
+        compose.onNodeWithText("Comment *").assertIsNotFocused()
+        compose.onNodeWithText("Meals").performScrollTo().assertIsDisplayed().performClick()
+        compose.runOnIdle { assertEquals("food", ui.values["category"]); assertEquals(0, submissions) }
         compose.onNodeWithText("Autofill from an upcoming SMS").performScrollTo().performClick()
         compose.runOnIdle { assertEquals(true, listened); assertEquals(0, submissions); ui = ui.copy(values = ui.values + ("code" to "123456")) }
         compose.onNodeWithText("Approve invoice").performScrollTo().performClick()
-        assertEquals(1, submissions)
-        assertEquals("Business lunch", ui.values["note"])
-        assertEquals("food", ui.values["category"])
+        compose.runOnIdle {
+            assertEquals(1, submissions)
+            assertEquals("Business lunch", ui.values["note"])
+            assertEquals("food", ui.values["category"])
+        }
     }
     @Test fun formBackLeavesPendingAndOpeningRequiresForegroundRendering() {
         var backs = 0
