@@ -5,3 +5,4 @@ android
 artifacts
 **/*.log
 .env
+server-rust/target

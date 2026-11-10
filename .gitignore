@@ -18,3 +18,5 @@ artifacts/
 .idea/
 
 .kotlin/
+
+server-rust/target/

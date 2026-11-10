@@ -27,7 +27,7 @@ class DeploymentSafety(unittest.TestCase):
             with self.subTest(bucket=bucket), self.assertRaises(ValueError):
                 d.config({**self.env, 'SECURITY_LEDGER_BUCKET': bucket})
 
-    def exercise(self, failure=None):
+    def exercise(self, failure=None, **options):
         calls = []
         smoke_calls = []
         revision = 'sms-code-relay-' + 'a' * 12 + '-1000'
@@ -60,7 +60,7 @@ class DeploymentSafety(unittest.TestCase):
                 if args[0][-1] == 'scripts/release-smoke.mjs':
                     raise RuntimeError('failed')
         with tempfile.TemporaryDirectory() as folder:
-            cfg = d.config({**self.env, 'DEPLOYMENT_MANIFEST_PATH': str(Path(folder) / 'manifest.json')})
+            cfg = d.config({**self.env, **options, 'DEPLOYMENT_MANIFEST_PATH': str(Path(folder) / 'manifest.json')})
             with patch.object(d, 'run', side_effect=fake_run), patch.object(d.subprocess, 'run', side_effect=fake_smoke), patch.object(d.time, 'time', return_value=1000), patch.object(d.time, 'sleep'):
                 try:
                     d.deploy(cfg)
@@ -103,3 +103,21 @@ class DeploymentSafety(unittest.TestCase):
         self.assertEqual(manifest['status'], 'promoted')
         self.assertNotIn('private-fixture', json.dumps(manifest))
         self.assertEqual(set(manifest['previousImages']), {'old-a', 'old-b'})
+
+    def test_rust_defaults_to_zero_traffic_after_verified_smoke(self):
+        _, traffic, manifest, smokes = self.exercise(BACKEND='rust')
+        self.assertEqual(traffic, [])
+        self.assertEqual(len(smokes), 2)
+        self.assertEqual(manifest['status'], 'staged')
+        self.assertEqual(manifest['backend'], 'rust')
+
+    def test_explicit_rust_promotion_keeps_guarded_canary_steps(self):
+        _, traffic, manifest, smokes = self.exercise(BACKEND='rust', TRAFFIC_MODE='live')
+        self.assertEqual(len(traffic), 3)
+        self.assertEqual(len(smokes), 5)
+        self.assertEqual(manifest['status'], 'promoted')
+
+    def test_invalid_migration_selection_fails_before_cloud_calls(self):
+        for options in [{'BACKEND': 'unknown'}, {'TRAFFIC_MODE': 'latest'}]:
+            with self.subTest(options=options), self.assertRaises(ValueError):
+                d.config({**self.env, **options})
