@@ -1,6 +1,6 @@
 # Deployment and release
 
-The production release path deploys a tested image digest. It never builds local source during deployment. Cloud Run keeps scale-to-zero, a 120-second request timeout and at most ten instances. Resource creation and traffic changes remain explicit operator actions against a named project.
+The production release path deploys a tested image digest. It never builds local source during deployment. Cloud Run keeps scale-to-zero, a 120-second request timeout and a per-revision maximum of ten instances (concurrent revisions can exceed ten total during rollout). Resource creation and traffic changes remain explicit operator actions against a named project.
 
 ## One-time infrastructure setup
 
