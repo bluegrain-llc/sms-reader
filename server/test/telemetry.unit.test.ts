@@ -17,7 +17,8 @@ test('provider errors produce bounded categories without serializing payloads or
     { event: 'delivery_attempt', kind: 'sms', outcome: 'failed', category: 'internal', age_ms: 19_000, component: 'relay', severity: 'WARNING' },
   ]);
   assert.ok(!JSON.stringify(records).includes(secret));
-  assert.equal(category({ code: 'messaging/quota-exceeded' }), 'quota');
+  assert.equal(category({ code: 'messaging/message-rate-exceeded' }), 'quota');
+  assert.equal(category({ code: 'messaging/server-unavailable' }), 'unavailable');
   assert.equal(category({ code: 4 }), 'timeout');
   assert.equal(category(Error('webhook_timeout')), 'timeout');
   assert.equal(category(Error('webhook_rejected')), 'rejected');

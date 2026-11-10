@@ -14,7 +14,7 @@ import type { Server } from 'node:http';
 const enabled = !!process.env.FIRESTORE_EMULATOR_HOST && !!process.env.FIREBASE_AUTH_EMULATOR_HOST;
 if (!enabled) throw new Error('Integration tests require Firestore and Auth emulators. Run npm run test:integration from the repository root.');
 const integration = test;
-const collections = ['devices', 'grants', 'managers', 'managerCallers', 'connections', 'connectionCodes', 'connectionRates', 'requests', 'results', 'audit', 'accounts', 'formRequests', 'formResults', 'requestEvents', 'deliveryOutbox', 'deletionJobs'];
+const collections = ['devices', 'grants', 'managers', 'managerCallers', 'connections', 'connectionCodes', 'connectionRates', 'requests', 'results', 'audit', 'accounts', 'formRequests', 'formResults', 'requestEvents', 'deliveryOutbox', 'deletionJobs', 'deletionAttempts'];
 let firebase: ReturnType<typeof initializeApp>, db: ReturnType<typeof getFirestore>, relay: Relay;
 let time: number, sends: string[], token: string, grantId: string;
 const uid = 'owner', did = 'installation', second = 'second-phone';
@@ -683,9 +683,28 @@ integration('monitoring samples real due queues and timestamp expiries without e
   const entries: unknown[] = [];
   await new Telemetry(entry => entries.push(entry), () => time).backlogs(db);
   const samples = entries as { kind: string; count: number; oldest_due_age_s: number }[];
-  assert.equal(samples.length, 5);
+  assert.equal(samples.length, 6);
   assert.deepEqual(Object.fromEntries(samples.map(s => [s.kind, [s.count, s.oldest_due_age_s]])), {
-    sms: [2, 300], form: [1, 181], results: [1, 301], form_results: [1, 2], deletion: [1, 400],
+    sms: [2, 300], form: [1, 181], results: [1, 301], form_results: [1, 2], deletion: [1, 400], legacy_deletion: [0, 0],
   });
   assert.ok(!JSON.stringify(samples).includes('private'));
+});
+
+integration('failed synchronous identity deletion remains visible until successful retry', { timeout: 30_000 }, async () => {
+  const server = app(relay, { verifyOwner: async () => ({ uid, authTime: Date.now() / 1000 }),
+    verifyScheduler: async () => {}, deleteIdentity: async () => { throw Error('auth unavailable'); } }).listen(0, '127.0.0.1');
+  try {
+    await new Promise<void>(resolve => server.once('listening', resolve));
+    const address = server.address(); assert.ok(address && typeof address !== 'string');
+    const response = await fetch(`http://127.0.0.1:${address.port}/v1/account`, { method: 'DELETE', headers: { Authorization: 'Bearer owner' }, signal: AbortSignal.timeout(10_000) });
+    assert.equal(response.status, 500); await response.text();
+    const attempt = await db.collection('deletionAttempts').doc(hash(uid)).get();
+    assert.ok(attempt.exists);
+    const rows: { kind?: string; count?: number }[] = [];
+    await new Telemetry(row => rows.push(row), () => Date.now() + 301_000).backlogs(db);
+    assert.equal(rows.find(row => row.kind === 'legacy_deletion')?.count, 1);
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+  }
 });

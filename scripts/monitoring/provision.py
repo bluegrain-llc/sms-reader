@@ -23,20 +23,20 @@ def resources(project, service, channels, number, billing):
         ('results_overdue', 'jsonPayload.event="backlog_snapshot" (jsonPayload.kind="results" OR jsonPayload.kind="form_results") jsonPayload.oldest_due_age_s>300', None, []),
         ('backlog_depth', 'jsonPayload.event="backlog_snapshot"', 'count', ['kind']),
         ('backlog_oldest_due_age_s', 'jsonPayload.event="backlog_snapshot"', 'oldest_due_age_s', ['kind']),
-        ('deletion_overdue', 'jsonPayload.event="backlog_snapshot" jsonPayload.kind="deletion" jsonPayload.oldest_due_age_s>300', None, []),
+        ('deletion_overdue', 'jsonPayload.event="backlog_snapshot" (jsonPayload.kind="deletion" OR jsonPayload.kind="legacy_deletion") jsonPayload.oldest_due_age_s>300', None, []),
     ]
     metrics = []
     for name, condition, value, labels in definitions:
         descriptor = {'metricKind': 'DELTA', 'valueType': 'DISTRIBUTION' if value else 'INT64', 'unit': 's' if value == 'oldest_due_age_s' else 'ms' if value in ['duration_ms', 'age_ms'] else '1',
                       'labels': [{'key': label, 'valueType': 'STRING'} for label in labels]}
-        metric = {'name': f'sms_relay/{name}', 'description': f'SMS relay {name}; fixed-schema application logs only.',
+        metric = {'name': f'sms_relay/{service}/{name}', 'description': f'SMS relay {name}; fixed-schema application logs only.',
                   'filter': f'{scope} {condition}', 'metricDescriptor': descriptor,
                   'labelExtractors': {label: f'EXTRACT(jsonPayload.{label})' for label in labels}}
         if value:
             metric.update(valueExtractor=f'EXTRACT(jsonPayload.{value})', bucketOptions={'explicitBuckets': {'bounds': [1, 10, 50, 100, 250, 500, 1000, 2000, 5000, 10000, 30000, 60000, 120000, 180000]}})
         metrics.append(metric)
     def metric_filter(name):
-        return f'resource.type="cloud_run_revision" resource.labels.project_id="{project}" resource.labels.service_name="{service}" metric.type="logging.googleapis.com/user/sms_relay/{name}"'
+        return f'resource.type="cloud_run_revision" resource.labels.project_id="{project}" resource.labels.service_name="{service}" metric.type="logging.googleapis.com/user/sms_relay/{service}/{name}"'
     def aggregation(aligner='ALIGN_DELTA', reducer='REDUCE_SUM'):
         return [{'alignmentPeriod': '60s', 'perSeriesAligner': aligner, 'crossSeriesReducer': reducer}]
     policies = []
@@ -91,8 +91,8 @@ def apply(config, account):
         raise ValueError('Selected billing account is not enabled and linked to this project.')
     for channel in config['policies'][0]['notificationChannels']:
         resource = api(token, 'GET', 'https://monitoring.googleapis.com/v3/' + channel)
-        if resource.get('type') != 'email' or resource.get('verificationStatus') != 'VERIFIED':
-            raise ValueError('Use verified email channels; billing budget notification channels must be email.')
+        if resource.get('type') != 'email' or resource.get('verificationStatus') != 'VERIFIED' or resource.get('enabled') is not True:
+            raise ValueError('Use enabled verified email channels; billing budget notification channels must be email.')
     logging = f'https://logging.googleapis.com/v2/projects/{project}/metrics'
     for metric in config['metrics']:
         # PUT is an upsert, so reruns do not create duplicate metrics.

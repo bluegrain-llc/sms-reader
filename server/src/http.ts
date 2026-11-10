@@ -8,7 +8,7 @@ import { signingFingerprints } from './signing.js';
 import { formSchema } from './forms-model.js';
 import { Relay } from './relay.js';
 import { connectionSchema, userCodeSchema } from './connections.js';
-import { codeSchema, ensure, idSchema, RelayError, requestSchema } from './model.js';
+import { codeSchema, ensure, idSchema, RelayError, requestSchema, hash } from './model.js';
 
 export interface Identity { uid: string; authTime: number }
 export interface HttpOptions {
@@ -105,7 +105,12 @@ export function app(relay: Relay, options: HttpOptions) {
   app.delete('/v1/account', async (req, res) => {
     const identity = await owner(req);
     ensure(Date.now() / 1000 - identity.authTime < 300, 401, 'recent_sign_in_required');
-    await relay.deleteAccount(identity.uid); await options.deleteIdentity(identity.uid); res.json({ ok: true });
+    const attempt = relay.ref('deletionAttempts', hash(identity.uid));
+    // A failed synchronous deletion remains observable until its identity cleanup succeeds.
+    const existing = await attempt.get();
+    if (!existing.exists) await attempt.set({ nextAt: Date.now() });
+    await relay.deleteAccount(identity.uid); await options.deleteIdentity(identity.uid);
+    await attempt.delete(); res.json({ ok: true });
   });
   app.get('/v1/devices/:deviceId/history', async (req, res) => {
     res.json(await relay.history((await owner(req)).uid, device(req)));

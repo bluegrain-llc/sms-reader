@@ -9,7 +9,7 @@ type Event =
   | { event: 'wakeup_failed'; category: Category }
   | { event: 'maintenance_completed'; duration_ms: number }
   | { event: 'maintenance_failed' | 'backlog_sampling_failed' | 'request_failed' | 'mcp_tool_failed'; category: Category }
-  | { event: 'backlog_snapshot'; kind: Kind | 'results' | 'form_results' | 'deletion'; count: number; oldest_due_age_s: number };
+  | { event: 'backlog_snapshot'; kind: Kind | 'results' | 'form_results' | 'deletion' | 'legacy_deletion'; count: number; oldest_due_age_s: number };
 export type Sink = (entry: Readonly<Event & { severity: 'INFO' | 'WARNING' | 'ERROR'; component: 'relay' }>) => void;
 const defaultSink: Sink = entry => console.info(JSON.stringify(entry));
 /** Only fixed-schema fields reach logs. Never include raw errors, URLs, headers or document identities. */
@@ -54,6 +54,7 @@ export class Telemetry {
       sample('form', db.collection('deliveryOutbox').where('nextAt', '<=', now), 'nextAt'),
       sample('results', db.collection('results').where('purgeAt', '<=', new Date(now)), 'purgeAt'),
       sample('form_results', db.collection('formResults').where('purgeAt', '<=', new Date(now)), 'purgeAt'),
+      sample('legacy_deletion', db.collection('deletionAttempts').where('nextAt', '<=', now), 'nextAt'),
       sample('deletion', db.collection('deletionJobs').where('nextAt', '<=', now), 'nextAt'),
       ...['pending_phone', 'ready', 'awaiting_consent'].map(status => sample('sms', db.collection('requests')
         .where('status', '==', status).where('notificationSent', '==', false).where('nextNotificationAt', '<=', now), 'nextNotificationAt')),
@@ -74,10 +75,10 @@ export function category(error: unknown): Category {
   if (message === 'webhook_rejected') return 'rejected';
   if (reason === 'private_webhook_destination' || reason === 'invalid_webhook_url') return 'destination';
   const code: unknown = error && typeof error === 'object' ? (error as { code?: unknown }).code : undefined;
-  if (['resource-exhausted', 'messaging/quota-exceeded', 8, 429].includes(code as string | number)) return 'quota';
+  if (['resource-exhausted', 'messaging/quota-exceeded', 'messaging/message-rate-exceeded', 'messaging/device-message-rate-exceeded', 'messaging/topics-message-rate-exceeded', 8, 429].includes(code as string | number)) return 'quota';
   if (['ETIMEDOUT', 'deadline-exceeded', 4].includes(code as string | number)) return 'timeout';
   if (['messaging/registration-token-not-registered', 'messaging/invalid-registration-token'].includes(code as string)) return 'destination';
-  if (['unavailable', 'ECONNRESET', 'ECONNREFUSED', 14, 503].includes(code as string | number)) return 'unavailable';
+  if (['unavailable', 'messaging/server-unavailable', 'ECONNRESET', 'ECONNREFUSED', 14, 503].includes(code as string | number)) return 'unavailable';
   return 'internal';
 }
 export const telemetry = new Telemetry();

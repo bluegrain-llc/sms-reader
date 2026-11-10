@@ -17,8 +17,8 @@ class ProvisionTest(unittest.TestCase):
     def test_retention_and_backlog_alerts_use_fixed_payload_fields(self):
         config = self.config()
         filters = {m['name']: m['filter'] for m in config['metrics']}
-        self.assertIn('oldest_due_age_s>180', filters['sms_relay/delivery_overdue'])
-        self.assertIn('oldest_due_age_s>300', filters['sms_relay/results_overdue'])
+        self.assertIn('oldest_due_age_s>180', filters['sms_relay/sms-code-relay/delivery_overdue'])
+        self.assertIn('oldest_due_age_s>300', filters['sms_relay/sms-code-relay/results_overdue'])
         self.assertTrue(all('resource.labels.project_id="demo-sms-relay"' in f for f in filters.values()))
         self.assertEqual(config['budget']['amount']['specifiedAmount'], {'currencyCode': 'USD', 'units': '100'})
         self.assertEqual([r['thresholdPercent'] for r in config['budget']['thresholdRules']], [0.5, 0.8, 1.0])
@@ -26,6 +26,24 @@ class ProvisionTest(unittest.TestCase):
         self.assertNotIn('spendCap', config['budget'])
         absence = config['policies'][0]['conditions'][0]['conditionAbsent']
         self.assertEqual(absence['duration'], '180s')
+
+    def test_services_have_disjoint_metric_names(self):
+        first = self.config()
+        second = provision.resources('demo-sms-relay', 'other-service', [], '1234', 'ABCDEF-ABCDEF-ABCDEF')
+        self.assertTrue(set(m['name'] for m in first['metrics']).isdisjoint(m['name'] for m in second['metrics']))
+
+    def test_disabled_channel_fails_before_writes(self):
+        calls = []
+        def api(token, method, url, body=None):
+            calls.append(method)
+            if 'cloudresourcemanager' in url:
+                return {'projectNumber': '1234'}
+            if '/billingInfo' in url:
+                return {'billingEnabled': True, 'billingAccountName': 'billingAccounts/ABCDEF-ABCDEF-ABCDEF'}
+            return {'type': 'email', 'verificationStatus': 'VERIFIED', 'enabled': False}
+        with patch.object(provision, 'api', api), patch.object(provision.subprocess, 'check_output', return_value='token'), self.assertRaises(ValueError):
+            provision.apply(self.config(), 'operator@example.test')
+        self.assertTrue(all(method == 'GET' for method in calls))
 
     def test_render_does_not_authenticate_or_write(self):
         args = ['provision.py', '--project', 'demo-sms-relay', '--project-number', '1234', '--billing-account', 'ABCDEF-ABCDEF-ABCDEF', '--channel', 'projects/demo-sms-relay/notificationChannels/1']
@@ -52,7 +70,7 @@ class ProvisionTest(unittest.TestCase):
                 if '/billingInfo' in url:
                     return {'billingEnabled': True, 'billingAccountName': 'billingAccounts/ABCDEF-ABCDEF-ABCDEF'}
                 if '/notificationChannels/' in url:
-                    return {'type': 'email', 'verificationStatus': 'VERIFIED'}
+                    return {'type': 'email', 'verificationStatus': 'VERIFIED', 'enabled': True}
                 if '/alertPolicies' in url:
                     return {'alertPolicies': policies}
                 return {'budgets': [{**config['budget'], 'name': 'billingAccounts/ABCDEF-ABCDEF-ABCDEF/budgets/1', 'etag': 'version-one'}]}
