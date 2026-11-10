@@ -16,7 +16,11 @@ const links = await call('/.well-known/assetlinks.json');
 assert.equal(links.status, 200);
 assert.deepEqual((await links.json())[0].target.sha256_cert_fingerprints.slice().sort(), expected.slice().sort());
 // An impossible ID verifies caller auth without creating a phone notification.
-assert.equal((await call('/v1/requests/' + '0'.repeat(64), { headers: { authorization: `Bearer ${token}` } })).status, 404);
+const absent = '/v1/requests/' + '0'.repeat(64);
+assert.equal((await call(absent)).status, 401);
+const missing = await call(absent, { headers: { authorization: `Bearer ${token}` } });
+assert.equal(missing.status, 404);
+assert.equal((await missing.json()).error, 'request_not_found');
 const client = new Client({ name: 'release-smoke', version: '1' });
 const transport = new StreamableHTTPClientTransport(new URL('/mcp', base), { requestInit: { headers: { authorization: `Bearer ${token}` } } });
 try {

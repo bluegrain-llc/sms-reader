@@ -40,7 +40,7 @@ class DeploymentSafety(unittest.TestCase):
             if args[:4] == ['gcloud', 'firestore', 'indexes', 'composite']:
                 return 'NEEDS_REPAIR' if failure == 'index' else 'READY'
             if args[:4] == ['gcloud', 'run', 'revisions', 'describe']:
-                return self.env['IMAGE_URI'] if failure != 'digest' else 'wrong@sha256:wrong'
+                return self.env['IMAGE_URI'] if failure != 'digest' or args[4] != revision else 'wrong@sha256:wrong'
             if args[:4] == ['gcloud', 'run', 'services', 'update-traffic']:
                 promotions += 1
                 if failure == 'lost-ack' and promotions == 1:
@@ -91,3 +91,4 @@ class DeploymentSafety(unittest.TestCase):
         self.assertEqual(len(smokes), 4)
         self.assertEqual(manifest['status'], 'promoted')
         self.assertNotIn('private-fixture', json.dumps(manifest))
+        self.assertEqual(set(manifest['previousImages']), {'old-a', 'old-b'})

@@ -33,8 +33,6 @@ if ! gcloud tasks queues describe relay-delivery --location "$REGION" --project 
 fi
 npx firebase deploy --only firestore --project "$PROJECT_ID"
 # Scheduler needs the canonical URL; do not guess a first-deployment hostname.
-: "${SERVICE_URL:?Set the canonical HTTPS service URL}"
-[[ "$SERVICE_URL" == https://* ]] || { echo "SERVICE_URL must be HTTPS" >&2; exit 1; }
 job_args=(--location "$REGION" --project "$PROJECT_ID" --schedule '* * * * *' \
   --uri "$SERVICE_URL/internal/maintenance" --http-method POST \
   --oidc-service-account-email "$scheduler_account" --oidc-token-audience "$SERVICE_URL" --attempt-deadline 120s)

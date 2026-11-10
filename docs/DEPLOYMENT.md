@@ -40,7 +40,7 @@ Environment secrets: `RELAY_KEYSTORE_BASE64`, `RELAY_STORE_PASSWORD`, `RELAY_KEY
 
 The release workflow serializes production deploys and does not cancel an in-progress deployment for a later one. Staging may use the same scripts with a separate explicit project and identities. For an operator-run deployment set `PROJECT_ID`, `IMAGE_URI` (`LOCATION-docker.pkg.dev/PROJECT/REPO/IMAGE@sha256:...`), full `COMMIT_SHA`, `RELAY_SMOKE_TOKEN`, and certificate configuration before invoking `scripts/deploy.sh`. The operator must first establish the same successful-CI provenance; the protected workflow automates that check.
 
-`DEPLOYMENT_MANIFEST_PATH` defaults to `artifacts/deployment.json`. Its JSON fields include `projectId`, `region`, `service`, `serviceUrl`, `revision`, `image`, `commit`, `schedulerEmail`, `deliveryQueue`, `candidateUrl`, `previousTraffic` and `status`. No token or signing secret is written. `PROMOTION_HOLD_SECONDS` may extend, but cannot shorten, the 60-second observation period.
+`DEPLOYMENT_MANIFEST_PATH` defaults to `artifacts/deployment.json`. Its JSON fields include `projectId`, `region`, `service`, `serviceUrl`, `revision`, `image`, `commit`, `schedulerEmail`, `deliveryQueue`, `candidateUrl`, `previousTraffic`, `previousImages` and `status`. No token or signing secret is written. `PROMOTION_HOLD_SECONDS` may extend, but cannot shorten, the 60-second observation period.
 
 ## Failure and rollback
 
@@ -52,7 +52,7 @@ Deploy indexes/additive backend changes before phones. Preserve existing request
 
 ## Android and privacy
 
-Use JDK 17+ (JDK 21 in CI), SDK 36 and the pinned Gradle wrapper. `scripts/build-pilot.sh` validates non-placeholder release configuration and creates a private pilot signing key only when the chosen path does not already exist. Back up signing keys outside the repository. For Play builds, use a separate upload key and register the certificates of the APKs Play actually signs.
+Use JDK 17+ (JDK 21 in CI), SDK 36 and the pinned Gradle wrapper. `scripts/build-pilot.sh` validates public configuration formats, rejects known placeholders and checks Firebase project-number consistency and creates a private pilot signing key only when the chosen path does not already exist. Back up signing keys outside the repository. For Play builds, use a separate upload key and register the certificates of the APKs Play actually signs.
 
 The backend accepts `ANDROID_SIGNING_SHA256S` as a JSON array and continues to accept legacy `ANDROID_SIGNING_SHA256`. Asset Links contains the deduplicated union; malformed fingerprints fail closed. Do not drop an active certificate until its installed clients have migrated.
 

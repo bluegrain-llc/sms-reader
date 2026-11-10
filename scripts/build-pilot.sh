@@ -6,6 +6,7 @@ cd "$(dirname "$0")/.."
 : "${RELAY_KEY_PASSWORD:?Set the key password privately}"
 : "${RELAY_KEY_ALIAS:=pilot}"
 export RELAY_KEY_ALIAS
+python3 "$(dirname "$0")/release-config.py"
 if [[ ! -e "$RELAY_KEYSTORE" ]]; then
   umask 077
   mkdir -p "$(dirname "$RELAY_KEYSTORE")"

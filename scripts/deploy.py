@@ -61,7 +61,10 @@ def deploy(c):
         raise ValueError('An existing healthy service with 100% pinned traffic is required; bootstrap staging separately')
     if not url.startswith('https://'):
         raise ValueError('Canonical service URL must be HTTPS')
-    manifest.update(serviceUrl=url, previousTraffic=traffic)
+    previous_images = {revision: run(['gcloud', 'run', 'revisions', 'describe', revision, *scope, '--format=value(status.imageDigest)']) for revision in traffic}
+    if not all(re.search(r'@sha256:[a-f0-9]{64}$', image) for image in previous_images.values()):
+        raise ValueError('Previous revision image digests must be available before deployment')
+    manifest.update(serviceUrl=url, previousTraffic=traffic, previousImages=previous_images)
     scheduler = f'sms-relay-scheduler@{project}.iam.gserviceaccount.com'
     queue = f'projects/{project}/locations/{region}/queues/relay-delivery'
     manifest.update(schedulerEmail=scheduler, deliveryQueue=queue)
