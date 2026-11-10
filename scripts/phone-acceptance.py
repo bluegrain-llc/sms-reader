@@ -65,7 +65,9 @@ def initial_record(apk, commit, signer, aapt, devices, project, region, revision
     if not re.fullmatch(r'[0-9a-f]{40}', commit):
         raise ValueError('Commit must be a full Git SHA')
     manifest = run([aapt, 'dump', 'badging', str(apk)])
-    if "package: name='com.bluegrain.smsrelay'" not in manifest or 'application-debuggable' in manifest:
+    packages = re.findall(r"^package: name='([^']+)'(?:\s|$)", manifest, re.MULTILINE)
+    debuggable = re.search(r'^application-debuggable(?:\s|$)', manifest, re.MULTILINE)
+    if packages != ['com.bluegrain.smsrelay'] or debuggable:
         raise ValueError('Expected non-debuggable relay APK')
     certificate = run([signer, 'verify', '--print-certs', str(apk)])
     digests = re.findall(r'^Signer #\d+ certificate SHA-256 digest: ([0-9a-fA-F]{64})$', certificate, re.MULTILINE)

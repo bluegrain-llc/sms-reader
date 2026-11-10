@@ -194,6 +194,25 @@ class PhoneAcceptanceTest(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     acceptance.initial_record(apk, 'a' * 40, 'signer', 'aapt', [], 'relay-staging', 'us-central1', 'relay-00001-abc')
 
+    def test_artifact_identity_uses_package_header_not_application_labels(self):
+        with tempfile.TemporaryDirectory() as directory:
+            apk = Path(directory) / 'app.apk'
+            apk.write_bytes(b'test fixture')
+            signer = 'Signer #1 certificate SHA-256 digest: ' + 'c' * 64
+            misleading_label = "application-label:'package: name='com.bluegrain.smsrelay''"
+            for badging in ("package: name='example.other'\n" + misleading_label,
+                            misleading_label,
+                            "package: name='com.bluegrain.smsrelay.other'\n" + misleading_label,
+                            "package: name='com.bluegrain.smsrelay'\npackage: name='example.other'"):
+                with self.subTest(badging=badging), patch.object(acceptance, 'run', side_effect=[badging, signer]) as run:
+                    with self.assertRaises(ValueError):
+                        acceptance.initial_record(apk, 'a' * 40, 'signer', 'aapt', [], 'relay-staging', 'us-central1', 'relay-00001-abc')
+                    self.assertEqual(run.call_count, 1)
+            badging = "package: name='com.bluegrain.smsrelay' versionCode='1'\napplication-label:'application-debuggable'"
+            with patch.object(acceptance, 'run', side_effect=[badging, signer]):
+                value = acceptance.initial_record(apk, 'a' * 40, 'signer', 'aapt', [], 'relay-staging', 'us-central1', 'relay-00001-abc')
+            acceptance.validate(value)
+
     def test_summary_gate_fails_until_all_required_observations_pass(self):
         with tempfile.TemporaryDirectory() as directory:
             record = Path(directory) / 'record.json'
