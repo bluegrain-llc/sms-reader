@@ -18,6 +18,18 @@ class CapacityTools(unittest.TestCase):
         m=self.measured();m['usage']['firestore_reads']=100000;self.assertEqual(cost.project_cost(m)['gate'],'BLOCKED')
         m=self.measured();m['usage']['compute_vcpu_seconds']=float('nan')
         with self.assertRaises(ValueError):cost.project_cost(m)
+    def test_cost_rejects_undefined_or_impossible_peak_measurements(self):
+        for value in [float('nan'), float('inf'), -float('inf'), None, True, '1800', [], -1, 1799, 86401, 10**1000]:
+            m=self.measured();m['peak_seconds']=value
+            with self.subTest(peak_seconds=repr(value)), self.assertRaises(ValueError):cost.project_cost(m)
+        for value in [1800, 86400]:
+            m=self.measured();m['peak_seconds']=value;self.assertEqual(cost.project_cost(m)['gate'],'PASS')
+    def test_cost_rejects_arithmetic_overflow_in_components_or_total(self):
+        m=self.measured();m['usage']['compute_vcpu_seconds']=1e308;m['unit_prices']['compute_vcpu_seconds']=1
+        with self.assertRaises(ValueError):cost.project_cost(m)
+        m=self.measured()
+        for key in cost.UNITS:m['usage'][key]=1e307;m['unit_prices'][key]=.1
+        with self.assertRaises(ValueError):cost.project_cost(m)
     def test_provision_rejects_shared_project_or_untested_image(self):
         c=dict(project='source-project',recovery_project='source-project',region='us-central1',backup_bucket='backup-bucket',ledger_bucket='ledger-bucket',runtime_account='runtime@source-project.iam.gserviceaccount.com',backup_account='backup@source-project.iam.gserviceaccount.com',scheduler_account='scheduler@source-project.iam.gserviceaccount.com',image_digest='region-docker.pkg.dev/project/repo/image@sha256:'+'a'*64)
         with self.assertRaises(ValueError):provision.commands(c,Path('/tmp'))
