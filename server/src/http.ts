@@ -38,16 +38,16 @@ export function app(relay: Relay, options: HttpOptions) {
   app.use((req, _res, next) => {
     const origin = req.get('origin');
     const accountOrigin = options.publicUrl ? new URL(options.publicUrl).origin : undefined;
-    const accountRoute = req.path === '/v1/account' || req.path === '/v1/account-deletion';
+    const accountRoute = /^\/v1\/account(?:-deletion)?\/?$/i.test(req.path);
     ensure(!origin || (accountRoute && origin === accountOrigin) || (options.origins ?? []).includes(origin), 403, 'origin_not_allowed'); next();
   });
   app.use(express.json({ limit: '256kb', strict: true }));
   app.get(['/health', '/healthz'], (_req, res) => { res.json({ ok: true }); });
-  const owner = async (req: Request) => {
+  const owner = async (req: Request, allowDeleted = false) => {
     let identity: Identity;
     try { identity = await options.verifyOwner(bearer(req)); } catch { throw new RelayError(401, 'invalid_owner_session'); }
-    if (!(req.method === 'DELETE' && req.path === '/v1/account')) await relay.db.runTransaction(tx => relay.account(tx, identity.uid));
-    if (req.method === 'GET') await relay.access.read(identity.uid);
+    if (!allowDeleted) await relay.db.runTransaction(tx => relay.account(tx, identity.uid));
+    if (req.method === 'GET' || req.method === 'HEAD') await relay.access.read(identity.uid);
     return identity;
   };
   const agentRead = async (req: Request) => {
@@ -118,7 +118,7 @@ export function app(relay: Relay, options: HttpOptions) {
     await relay.revoke((await owner(req)).uid, idSchema.parse(req.params.grantId)); res.json({ ok: true });
   });
   app.delete('/v1/account', async (req, res) => {
-    const identity = await owner(req);
+    const identity = await owner(req, true);
     ensure(relay.now() / 1000 - identity.authTime < 300 && identity.authTime <= relay.now() / 1000 + 30, 401, 'recent_sign_in_required');
     await relay.access.read(identity.uid);
     res.status(202).json(await relay.deletions.request(identity.uid));
@@ -161,7 +161,9 @@ export function app(relay: Relay, options: HttpOptions) {
   });
   app.post('/mcp', async (req, res) => {
     const secret = bearer(req); await relay.checkAgent(secret);
-    if (req.body?.method === 'tools/call' && ['get_sms_code_request', 'inspect_request', 'get_request_result', 'poll_request_events'].includes(req.body?.params?.name)) await agentRead(req);
+    for (const message of Array.isArray(req.body) ? req.body : [req.body]) {
+      if (message?.method === 'tools/call' && ['get_sms_code_request', 'inspect_request', 'get_request_result', 'poll_request_events'].includes(message?.params?.name)) await agentRead(req);
+    }
     // New stateless server per HTTP request; identity is never shared between clients.
     const server = new McpServer({ name: 'sms-code-relay', version: '0.6.0' });
     const tool = (fn: () => Promise<unknown>) => fn().then(result => ({

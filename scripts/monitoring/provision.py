@@ -16,7 +16,7 @@ def resources(project, service, channels, number, billing):
         ('http_requests', valid_http, None, ['status_class']),
         ('http_latency_ms', valid_http, 'duration_ms', []),
         ('maintenance_completed', 'jsonPayload.event="maintenance_completed"', None, []),
-        ('worker_failures', '(jsonPayload.event="maintenance_failed" OR jsonPayload.event="backlog_sampling_failed" OR jsonPayload.event="wakeup_failed" OR jsonPayload.event="mcp_tool_failed")', None, []),
+        ('worker_failures', '(jsonPayload.event="deletion_failed" OR jsonPayload.event="maintenance_failed" OR jsonPayload.event="backlog_sampling_failed" OR jsonPayload.event="wakeup_failed" OR jsonPayload.event="mcp_tool_failed")', None, []),
         ('delivery_attempts', 'jsonPayload.event="delivery_attempt"', None, ['kind', 'outcome', 'category']),
         ('delivery_acceptance_age_ms', 'jsonPayload.event="delivery_attempt" jsonPayload.outcome="accepted" jsonPayload.kind!="webhook"', 'age_ms', ['kind']),
         ('delivery_overdue', 'jsonPayload.event="backlog_snapshot" (jsonPayload.kind="sms" OR jsonPayload.kind="form") jsonPayload.oldest_due_age_s>180', None, []),

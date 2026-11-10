@@ -290,8 +290,13 @@ export class Relay {
       const r = (await tx.get(this.ref('requests', id))).data() as CodeRequest | undefined;
       if (!r || !active(r.status) || r.status === 'queued' || r.notificationSent || r.nextNotificationAt > this.now()) return [];
       const g = (await tx.get(this.ref('grants', r.grantId))).data() as Grant | undefined;
-      const valid = await this.validGrant(tx, g), a = await this.account(tx, r.ownerId), devices = await this.devices(tx, r.ownerId);
-      this.expire(tx, r, a, valid, devices); if (!active(r.status)) return [];
+      const a = (await tx.get(this.ref('accounts', r.ownerId))).data() as Account | undefined;
+      if (a?.deleting) {
+        tx.update(this.ref('requests', id), { status: 'cancelled', reason: 'account_deleted', notificationSent: true });
+        return [];
+      }
+      const valid = await this.validGrant(tx, g), devices = await this.devices(tx, r.ownerId);
+      this.expire(tx, r, a ?? {}, valid, devices); if (!active(r.status)) return [];
       r.phones = this.phones(r); const plans: { deviceId: string; token: string; lease: number; attempts: number; ttl: number; createdAt: number }[] = [];
       for (const [deviceId, p] of Object.entries(r.phones)) {
         const d = devices.find(d => d.id === deviceId);

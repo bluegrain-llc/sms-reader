@@ -1,4 +1,5 @@
 import { randomBytes, randomUUID } from 'node:crypto';
+import { telemetry, category } from './telemetry.js';
 import { Access } from './access.js';
 import { Firestore } from 'firebase-admin/firestore';
 import { ensure, hash, HISTORY, MINUTE } from './model.js';
@@ -7,13 +8,13 @@ const DAY = 24 * 60 * MINUTE;
 export const ownedCollections = ['devices', 'grants', 'managers', 'managerCallers', 'connections', 'connectionCodes', 'requests', 'results', 'audit', 'formRequests', 'formResults', 'requestEvents', 'deliveryOutbox'] as const;
 export interface DeletionJob {
   ownerId: string; status: 'pending' | 'running' | 'completed'; createdAt: number; updatedAt: number;
-  nextAt: number; lease: string | null; leaseUntil: number; collectionIndex: number; attempts: number; purgeAt: Date | null;
+  nextAt: number; backlogAt: number; lease: string | null; leaseUntil: number; collectionIndex: number; attempts: number; purgeAt: Date | null;
 }
 /** The account tombstone survives cleanup. Receipts authorize status only, never account access. */
 export class Deletions {
   constructor(readonly db: Firestore, readonly now: () => number, readonly wake: () => Promise<void>) {}
   private initialJob(uid: string): DeletionJob {
-    return { ownerId: uid, status: 'pending', createdAt: this.now(), updatedAt: this.now(), nextAt: this.now(), lease: null,
+    return { ownerId: uid, status: 'pending', createdAt: this.now(), updatedAt: this.now(), nextAt: this.now(), backlogAt: this.now(), lease: null,
       leaseUntil: 0, collectionIndex: 0, attempts: 0, purgeAt: null };
   }
   /** Adopt interrupted pre-worker deletions before sampling or executing the durable queue. */
@@ -43,7 +44,7 @@ export class Deletions {
       tx.create(this.db.collection('deletionReceipts').doc(hash(receipt)), { jobId, expiresAt, purgeAt: new Date(expiresAt) });
       return old?.status ?? 'pending';
     });
-    try { await this.wake(); } catch { /* Scheduler recovers the committed job. */ }
+    try { await this.wake(); } catch (error) { telemetry.emit({ event: 'wakeup_failed', category: category(error) }); }
     return { ok: true, status, receipt, receiptExpiresAt: expiresAt };
   }
   async status(receipt: string) {
@@ -83,12 +84,13 @@ export class Deletions {
         await this.db.runTransaction(async tx => {
           const current = (await tx.get(ref)).data() as DeletionJob | undefined;
           if (current?.lease !== lease) return;
-          tx.update(ref, { status: 'completed', lease: null, leaseUntil: 0, updatedAt: this.now(), nextAt: Number.MAX_SAFE_INTEGER,
+          tx.update(ref, { status: 'completed', lease: null, leaseUntil: 0, updatedAt: this.now(), nextAt: Number.MAX_SAFE_INTEGER, backlogAt: Number.MAX_SAFE_INTEGER,
             purgeAt: new Date(this.now() + HISTORY) });
         });
       }
       return true;
-    } catch {
+    } catch (error) {
+      telemetry.emit({ event: 'deletion_failed', category: category(error) });
       await this.db.runTransaction(async tx => {
         if ((await tx.get(ref)).data()?.lease === lease) tx.update(ref, { status: 'pending', lease: null, leaseUntil: 0,
           nextAt: this.now() + MINUTE, updatedAt: this.now() });
@@ -106,7 +108,7 @@ export class Deletions {
       await Promise.all(jobs.docs.map(doc => this.step(doc.id, deleteIdentity)));
     }
     const remaining = await this.db.collection('deletionJobs').where('nextAt', '<=', this.now()).limit(1).get();
-    if (!remaining.empty) { try { await this.wake(); } catch { /* minute-based recovery */ } }
+    if (!remaining.empty) { try { await this.wake(); } catch (error) { telemetry.emit({ event: 'wakeup_failed', category: category(error) }); } }
     for (const name of ['deletionReceipts', 'deletionJobs']) {
       const expired = await this.db.collection(name).where('purgeAt', '<=', new Date(this.now())).limit(100).get();
       if (!expired.empty) { const batch = this.db.batch(); for (const d of expired.docs) batch.delete(d.ref); await batch.commit(); }
