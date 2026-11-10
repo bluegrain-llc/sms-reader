@@ -7,10 +7,16 @@ The required jobs check:
 - Server TypeScript compilation, unit tests and production dependency audit.
 - Firestore and Firebase Auth Emulator integration tests, including transactional lifecycle, races, expiry, caller isolation, REST authentication and MCP client requests. Missing emulators fail this suite.
 - A production Docker build with startup, health and unauthenticated-request smoke checks.
+- Cloud-acceptance guard/signature/evidence tests and a separate staging callback
+  probe container build, syntax check and fail-closed unconfigured startup check.
 - Android unit tests, lint, debug APK and instrumentation APK builds.
 - Connected Compose UI tests on an API 36 Android emulator. These cover approval, manual entry, automatic submission, cancellation, expiry and navigation. The separate opt-in `SmsInjectionTest` needs the telephony/Play-services runner in `scripts/test-sms-injection.py` and is not included in this UI suite.
 
 Each run retains Android test/lint reports, debug APKs and the tested container archive as private workflow artifacts. Failed backend integration runs also retain emulator logs. Debug APKs have no production configuration and show the setup screen.
+
+The `staging-callback-probe-container` artifact retains the tested callback image
+for seven days. It is separate from the production relay image and is deployed
+only in an explicitly selected staging project; see [cloud acceptance](CLOUD_ACCEPTANCE.md).
 
 After all jobs pass on a push to `main`, delivery loads the exact container archive that passed its smoke test and publishes it to GitHub Container Registry:
 
