@@ -16,28 +16,46 @@ pub const EVENTS: [&str; 10] = [
     "request.cancelled",
     "request.expired",
 ];
+struct Contract {
+    name: &'static str,
+    schema: Value,
+    validator: jsonschema::Validator,
+}
+fn contract(name: &str) -> &'static Contract {
+    static CONTRACTS: OnceLock<Vec<Contract>> = OnceLock::new();
+    CONTRACTS
+        .get_or_init(|| {
+            [
+                ("form", include_str!("../compat/form.schema.json")),
+                (
+                    "submission",
+                    include_str!("../compat/submission.schema.json"),
+                ),
+                (
+                    "observation",
+                    include_str!("../compat/observation.schema.json"),
+                ),
+                ("webhook", include_str!("../compat/webhook.schema.json")),
+                ("sms", include_str!("../compat/sms.schema.json")),
+            ]
+            .into_iter()
+            .map(|(name, source)| {
+                let schema = serde_json::from_str(source).unwrap();
+                let validator = jsonschema::validator_for(&without_lengths(&schema)).unwrap();
+                Contract {
+                    name,
+                    schema,
+                    validator,
+                }
+            })
+            .collect()
+        })
+        .iter()
+        .find(|c| c.name == name)
+        .unwrap()
+}
 pub fn schema(name: &str) -> &'static Value {
-    static SCHEMAS: OnceLock<Vec<Value>> = OnceLock::new();
-    let all = SCHEMAS.get_or_init(|| {
-        [
-            include_str!("../compat/form.schema.json"),
-            include_str!("../compat/submission.schema.json"),
-            include_str!("../compat/observation.schema.json"),
-            include_str!("../compat/webhook.schema.json"),
-            include_str!("../compat/sms.schema.json"),
-        ]
-        .into_iter()
-        .map(|s| serde_json::from_str(s).unwrap())
-        .collect()
-    });
-    &all[match name {
-        "form" => 0,
-        "submission" => 1,
-        "observation" => 2,
-        "webhook" => 3,
-        "sms" => 4,
-        _ => unreachable!(),
-    }]
+    &contract(name).schema
 }
 fn without_lengths(v: &Value) -> Value {
     match v {
@@ -117,25 +135,11 @@ pub fn validate(name: &str, v: &Value) -> Result<()> {
             _ => true,
         }
     }
-    static VALIDATORS: OnceLock<Vec<jsonschema::Validator>> = OnceLock::new();
-    let all = VALIDATORS.get_or_init(|| {
-        ["form", "submission", "observation", "webhook", "sms"]
-            .iter()
-            .map(|n| jsonschema::validator_for(&without_lengths(schema(n))).unwrap())
-            .collect()
-    });
-    let i = match name {
-        "form" => 0,
-        "submission" => 1,
-        "observation" => 2,
-        "webhook" => 3,
-        "sms" => 4,
-        _ => unreachable!(),
-    };
+    let contract = contract(name);
     ensure(
         finite(v)
-            && all[i].is_valid(v)
-            && lengths(schema(name), v)
+            && contract.validator.is_valid(v)
+            && lengths(&contract.schema, v)
             && (name != "webhook"
                 || v["url"]
                     .as_str()
@@ -143,6 +147,14 @@ pub fn validate(name: &str, v: &Value) -> Result<()> {
         400,
         "invalid_input",
     )
+}
+pub fn submission(mut input: Value) -> Result<Value> {
+    // The legacy Zod record parser discards this own key before validation.
+    if let Some(values) = input.get_mut("values").and_then(Value::as_object_mut) {
+        values.remove("__proto__");
+    }
+    validate("submission", &input)?;
+    Ok(input)
 }
 fn unique(a: &[Value], k: &str) -> bool {
     let mut set = HashSet::new();

@@ -75,6 +75,11 @@ for (const direction of ['typescript-to-rust', 'rust-to-typescript']) {
     assert.ok(stored.purgeAt instanceof Timestamp);
     await writer.forms.submit(uid, did, request.requestId, { submissionId: 'cross-submit', action: 'submit', values: { code: '001234' } });
     assert.equal((await reader.forms.events(token)).events.filter(e => e.type === 'request.submitted').length, 1);
+    const empty = await writer.forms.create(token, { title: 'No fields', body: 'Body', actions: [{ id: 'submit', label: 'Send', type: 'submit' }], idempotencyKey: 'cross-proto-key' });
+    const submission = JSON.parse('{"submissionId":"retry-proto","action":"submit","values":{"__proto__":{"ignored":"even invalid value types are stripped"}}}');
+    const accepted = await writer.forms.submit(uid, did, empty.requestId, submission);
+    assert.deepEqual(JSON.parse(JSON.stringify(await reader.forms.submit(uid, did, empty.requestId, submission))), JSON.parse(JSON.stringify(accepted)));
+    assert.deepEqual((await reader.forms.result(token, empty.requestId)).result?.values, {});
     await writer.forms.registerWebhook(token, { url: 'https://8.8.8.8/#', events: ['request.created'] });
     assert.equal((await reader.forms.webhooks(token))[0]!.url, 'https://8.8.8.8/#');
   });
@@ -153,7 +158,7 @@ test('HTTP errors, body bounds, auth ordering, headers and protocol negotiation 
     ] as [string, Record<string, string>][]) {
       assert.deepEqual(await rpc(bases[1]!, body, headers), await rpc(bases[0]!, body, headers), body.slice(0,150));
     }
-    for (const capabilities of [{ experimental: { '\ud800': 1 } }, { elicitation: {} }, { sampling: { tools: {}, context: {} } }, { experimental: { feature: {} }, extensions: { feature: [] } }, { tasks: { list: {}, cancel: {} } }, { sampling: { tools: null } }, { elicitation: [] }]) {
+    for (const capabilities of [JSON.parse('{"experimental":{"__proto__":1}}'), { experimental: { '\ud800': 1 } }, { elicitation: {} }, { sampling: { tools: {}, context: {} } }, { experimental: { feature: {} }, extensions: { feature: [] } }, { tasks: { list: {}, cancel: {} } }, { sampling: { tools: null } }, { elicitation: [] }]) {
       const body = JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-11-25', capabilities, clientInfo: { name: 'capabilities', version: '1' } } });
       assert.deepEqual(await rpc(bases[1]!, body), await rpc(bases[0]!, body), JSON.stringify(capabilities));
     }

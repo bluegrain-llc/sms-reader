@@ -288,6 +288,7 @@ fn check(s: &Value, v: Option<&Value>, path: &[Value]) -> (Value, Vec<Value>) {
         );
     }
     if kind == "record" {
+        out.as_object_mut().unwrap().remove("__proto__");
         for (key, value) in out.as_object_mut().unwrap() {
             let (_, e) = check(&s["key"], Some(&json!(key)), &child_path(path, json!(key)));
             errors.extend(e);

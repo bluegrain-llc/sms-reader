@@ -284,7 +284,7 @@ impl Relay {
         id: String,
         input: Value,
     ) -> Result<Value> {
-        validate("submission", &input)?;
+        let input = submission(input)?;
         let fp = hash(&js_json(&input, true));
         let s = self.clone();
         let out=self.store.tx(move|tx|{let(s,uid,device,id,input,fp)=(s.clone(),uid.clone(),device.clone(),id.clone(),input.clone(),fp.clone());Box::pin(async move{
