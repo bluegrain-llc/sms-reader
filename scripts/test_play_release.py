@@ -99,26 +99,38 @@ class GateTest(unittest.TestCase):
         (self.base / "aab").write_bytes(b"replacement")
         self.assertIn("aab: missing file or hash mismatch", self.check()["blockers"])
 
-    def test_encrypted_and_unsupported_native_entries_produce_artifact_blockers(self):
+    def test_unreadable_native_entries_produce_artifact_blockers(self):
         originals = {kind: ((self.base / kind).read_bytes(), dict(self.record["artifacts"][kind]))
                      for kind in ("aab", "playApk")}
         for kind in ("aab", "playApk"):
-            for mode in ("encrypted", "unsupported-compression"):
+            for mode in ("encrypted", "unsupported-compression", "corrupt-deflate", "corrupt-bzip2", "corrupt-lzma"):
                 with self.subTest(artifact=kind, mode=mode):
                     for name, (original, reference) in originals.items():
                         (self.base / name).write_bytes(original)
                         self.record["artifacts"][name] = dict(reference)
                     path = self.base / kind
-                    with zipfile.ZipFile(path, "w") as archive:
+                    compression = {"corrupt-deflate": zipfile.ZIP_DEFLATED,
+                                   "corrupt-bzip2": zipfile.ZIP_BZIP2,
+                                   "corrupt-lzma": zipfile.ZIP_LZMA}.get(mode, zipfile.ZIP_STORED)
+                    with zipfile.ZipFile(path, "w", compression=compression) as archive:
                         archive.writestr("lib/arm64-v8a/fixture.so", b"synthetic native entry")
                     data = bytearray(path.read_bytes())
                     central = data.index(b"PK\x01\x02")
                     if mode == "encrypted":
                         struct.pack_into("<H", data, 6, 1)
                         struct.pack_into("<H", data, central + 8, 1)
-                    else:
+                    elif mode == "unsupported-compression":
                         struct.pack_into("<H", data, 8, 99)
                         struct.pack_into("<H", data, central + 10, 99)
+                    else:
+                        name_length, extra_length = struct.unpack_from("<HH", data, 26)
+                        payload = 30 + name_length + extra_length
+                        if mode == "corrupt-deflate":
+                            data[payload] = 0x07
+                        elif mode == "corrupt-bzip2":
+                            data[payload] = 0
+                        else:
+                            data[payload + 4] = 0xFF
                     path.write_bytes(data)
                     self.record["artifacts"][kind]["sha256"] = gate.sha256(path)
                     result = self.check()
