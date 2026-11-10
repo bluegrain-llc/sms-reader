@@ -1,3 +1,4 @@
+import { Deletions } from '../src/deletions.js';
 import { Access } from '../src/access.js';
 import { Telemetry, telemetry } from '../src/telemetry.js';
 import { after, before, beforeEach, test } from 'node:test';
@@ -968,4 +969,38 @@ integration('repeated deletion adopts the original legacy acceptance age without
   assert.equal((await job.get()).data()?.backlogAt, legacyAt - MINUTE);
   await relay.deletions.request(uid);
   assert.equal((await job.get()).data()?.backlogAt, legacyAt - MINUTE);
+});
+
+
+integration('large valid form deletion shrinks failed transaction pages until cleanup completes', { timeout: 60000 }, async () => {
+  await relay.forms.approve(uid, grantId, true);
+  const definition = { ...formInput('large-delete-first'), fields: Array.from({ length: 30 }, (_, i) => ({ id: `field${i}`, label: 'Choose', type: 'single_choice' as const,
+    options: Array.from({ length: 40 }, (_, j) => ({ id: `option${j}`, label: 'x'.repeat(160) })) })) };
+  assert.ok(Buffer.byteLength(JSON.stringify(definition)) < 256 * 1024);
+  const secondCaller = await relay.createGrant(uid, did, 'Second large-form caller');
+  await relay.forms.approve(uid, secondCaller.id, true);
+  for (let i = 0; i < 60; i++) await relay.forms.create(i < 30 ? token : secondCaller.token, { ...definition, idempotencyKey: `large-delete-${i}` });
+  const records = await db.collection('formRequests').where('ownerId', '==', uid).get();
+  assert.equal(records.size, 60);
+  const sizes = new Map(records.docs.map(doc => [doc.ref.path, Buffer.byteLength(JSON.stringify(doc.data()))]));
+  assert.ok([...sizes.values()].reduce((a, b) => a + b, 0) > 10 * 1024 * 1024);
+  const receipt = await relay.deletions.request(uid);
+  const constrained = Object.create(db) as typeof db; let rejected = 0;
+  constrained.runTransaction = (async (fn: Parameters<typeof db.runTransaction>[0]) => db.runTransaction(async tx => {
+    let bytes = 0; const remove = tx.delete.bind(tx);
+    tx.delete = ref => {
+      bytes += sizes.get(ref.path) ?? 0;
+      // Inject the provider's deleted-document byte bound for this emulator regression.
+      if (bytes > 10 * 1024 * 1024) { rejected++; throw Object.assign(Error('transaction size limit'), { code: 3 }); }
+      return remove(ref);
+    };
+    return fn(tx);
+  })) as typeof db.runTransaction;
+  let identities = 0;
+  await new Deletions(constrained, () => time, async () => {}).dispatch(async () => {
+    assert.equal((await db.collection('formRequests').where('ownerId', '==', uid).get()).size, 0); identities++;
+  });
+  assert.ok(rejected > 0); assert.equal(identities, 1);
+  assert.ok((await db.collection('deletionJobs').doc(hash(uid)).get()).data()!.batchSize < 100);
+  assert.deepEqual(await relay.deletions.status(receipt.receipt), { status: 'completed' });
 });

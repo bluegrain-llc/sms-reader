@@ -8,7 +8,7 @@ const DAY = 24 * 60 * MINUTE;
 export const ownedCollections = ['devices', 'grants', 'managers', 'managerCallers', 'connections', 'connectionCodes', 'requests', 'results', 'audit', 'formRequests', 'formResults', 'requestEvents', 'deliveryOutbox'] as const;
 export interface DeletionJob {
   ownerId: string; status: 'pending' | 'running' | 'completed'; createdAt: number; updatedAt: number;
-  nextAt: number; backlogAt: number; lease: string | null; leaseUntil: number; collectionIndex: number; attempts: number; purgeAt: Date | null;
+  nextAt: number; backlogAt: number; lease: string | null; leaseUntil: number; collectionIndex: number; batchSize: number; attempts: number; purgeAt: Date | null;
 }
 /** The account tombstone survives cleanup. Receipts authorize status only, never account access. */
 export class Deletions {
@@ -16,7 +16,7 @@ export class Deletions {
   private initialJob(uid: string, legacyAt?: number): DeletionJob {
     const acceptedAt = Number.isFinite(legacyAt) ? Math.min(legacyAt!, this.now()) : this.now();
     return { ownerId: uid, status: 'pending', createdAt: acceptedAt, updatedAt: this.now(), nextAt: this.now(), backlogAt: acceptedAt, lease: null,
-      leaseUntil: 0, collectionIndex: 0, attempts: 0, purgeAt: null };
+      leaseUntil: 0, collectionIndex: 0, batchSize: 100, attempts: 0, purgeAt: null };
   }
   /** Adopt interrupted pre-worker deletions before sampling or executing the durable queue. */
   async migrateLegacy() {
@@ -78,6 +78,7 @@ export class Deletions {
       tx.set(ref, claim); return claim;
     });
     if (!job) return false;
+    const batchSize = Math.max(1, Math.min(100, job.batchSize ?? 100));
     try {
       const collection = ownedCollections[job.collectionIndex];
       if (collection) {
@@ -85,9 +86,9 @@ export class Deletions {
         await this.db.runTransaction(async tx => {
           const current = (await tx.get(ref)).data() as DeletionJob | undefined;
           if (current?.lease !== lease || current.leaseUntil <= this.now()) return;
-          const page = await tx.get(this.db.collection(collection).where('ownerId', '==', job.ownerId).limit(100));
+          const page = await tx.get(this.db.collection(collection).where('ownerId', '==', job.ownerId).limit(batchSize));
           for (const doc of page.docs) tx.delete(doc.ref);
-          tx.update(ref, { collectionIndex: job.collectionIndex + (page.size < 100 ? 1 : 0), status: 'pending', lease: null,
+          tx.update(ref, { collectionIndex: job.collectionIndex + (page.size < batchSize ? 1 : 0), status: 'pending', lease: null,
             leaseUntil: 0, nextAt: this.now(), updatedAt: this.now() });
         });
       } else {
@@ -103,9 +104,10 @@ export class Deletions {
       return true;
     } catch (error) {
       telemetry.emit({ event: 'deletion_failed', category: category(error) });
+      const reduced = ownedCollections[job.collectionIndex] ? Math.max(1, Math.floor(batchSize / 2)) : batchSize;
       await this.db.runTransaction(async tx => {
         if ((await tx.get(ref)).data()?.lease === lease) tx.update(ref, { status: 'pending', lease: null, leaseUntil: 0,
-          nextAt: this.now() + MINUTE, updatedAt: this.now() });
+          batchSize: reduced, nextAt: this.now() + (reduced < batchSize ? 0 : MINUTE), updatedAt: this.now() });
       });
       return false;
     }
