@@ -101,6 +101,12 @@ impl ServerHandler for Mcp {
                 out
             }
             Err(e) => {
+                if !matches!(&e, Error::Api(_, _)) {
+                    relay
+                        .delivery
+                        .emit("mcp_tool_failed", crate::telemetry::category(&e))
+                        .await;
+                }
                 let reason = match e {
                     Error::Api(_, r) => r,
                     _ => "internal_error",

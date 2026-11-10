@@ -56,7 +56,7 @@ pub async fn destination(raw: &str) -> Result<(url::Url, SocketAddr)> {
     } else {
         tokio::time::timeout(Duration::from_secs(3), tokio::net::lookup_host((host, 443)))
             .await
-            .map_err(|_| Error::External)?
+            .map_err(|_| Error::Api(500, "webhook_dns_timeout"))?
             .map_err(|_| Error::External)?
             .collect::<Vec<_>>()
     };
@@ -97,6 +97,51 @@ pub async fn send(raw: &str, secret: &str, event: &Value) -> Result<()> {
         .body(body)
         .send()
         .await
-        .map_err(|_| Error::External)?;
-    ensure(response.status().is_success(), 500, "internal_error")
+        .map_err(request_error)?;
+    response_status(response.status())
+}
+fn request_error(error: reqwest::Error) -> Error {
+    if error.is_timeout() {
+        Error::Api(500, "webhook_timeout")
+    } else {
+        Error::External
+    }
+}
+fn response_status(status: reqwest::StatusCode) -> Result<()> {
+    ensure(status.is_success(), 500, "webhook_rejected")
+}
+
+#[cfg(test)]
+mod error_tests {
+    use super::*;
+    #[tokio::test]
+    async fn delivery_categories_distinguish_rejection_and_transport_timeout() {
+        for status in [301, 400, 429, 500] {
+            let error =
+                response_status(reqwest::StatusCode::from_u16(status).unwrap()).unwrap_err();
+            assert_eq!(crate::telemetry::category(&error), "rejected");
+        }
+        assert!(response_status(reqwest::StatusCode::NO_CONTENT).is_ok());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (_socket, _) = listener.accept().await.unwrap();
+            futures::future::pending::<()>().await;
+        });
+        let error = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_millis(30))
+            .build()
+            .unwrap()
+            .get(format!("http://{address}"))
+            .send()
+            .await
+            .unwrap_err();
+        server.abort();
+        assert_eq!(crate::telemetry::category(&request_error(error)), "timeout");
+        assert_eq!(
+            crate::telemetry::category(&Error::Api(500, "webhook_dns_timeout")),
+            "timeout"
+        );
+    }
 }
