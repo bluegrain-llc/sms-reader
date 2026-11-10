@@ -12,22 +12,19 @@ class RelayNavigationTest {
             assertEquals(response, restoreDestination(response.metadata()))
             assertEquals(listOf("response", "a".repeat(64), kind.name, origin.name), response.metadata())
         } }
-        SettingsSection.entries.forEach { section ->
-            val settings = RelayDestination.Settings(section)
-            assertEquals(settings, restoreDestination(settings.metadata()))
-        }
+
     }
     @Test fun onlyNotificationResponsesBackgroundOnClose() {
         val target = RequestTarget("a".repeat(64), RequestKind.Form)
         assertTrue(RelayDestination.Response(target, RequestOrigin.Notification).backgroundOnClose())
         assertFalse(RelayDestination.Response(target, RequestOrigin.Inbox).backgroundOnClose())
-        assertFalse(RelayDestination.Settings().backgroundOnClose())
         assertFalse(RelayDestination.Inbox.backgroundOnClose())
     }
     @Test fun missingOrUnrecognizedSavedNavigationReturnsHome() {
         assertEquals(RelayDestination.Inbox, restoreDestination(null))
         assertEquals(RelayDestination.Inbox, restoreDestination(listOf("response")))
         assertEquals(RelayDestination.Inbox, restoreDestination(listOf("settings", "retired")))
+        assertEquals(RelayDestination.Inbox, restoreDestination(listOf("settings", "Access")))
     }
     @Test fun notificationTargetWaitsForRegistrationAndBothBusyOperations() = runBlocking {
         val session = MutableStateFlow(RelayUiState(configured = true, busy = true))

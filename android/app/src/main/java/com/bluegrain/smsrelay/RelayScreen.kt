@@ -5,23 +5,18 @@ import androidx.compose.runtime.Composable
 @Composable
 fun RelayScreen(
     state: RelayUiState, destination: RelayDestination = RelayDestination.Inbox,
-    formState: InboxState = InboxState(), deviceId: String = "", responseReady: Boolean = false, responseLoading: Boolean = false,
-    onSettings: () -> Unit = {}, onSection: (SettingsSection) -> Unit = {}, onBack: () -> Unit = {}, onRetry: () -> Unit = {},
+    formState: InboxState = InboxState(), deviceId: String = "", responseReady: Boolean = false, responseLoading: Boolean = true, openingTarget: RequestTarget? = null, refreshing: Boolean = false,
+    onAdministration: () -> Unit = {}, onBack: () -> Unit = {}, onRetry: () -> Unit = {},
     onSignIn: () -> Unit = {}, onRegister: () -> Unit = {}, onRefresh: () -> Unit = {},
-    onCancel: () -> Unit = {}, onRevoke: (String) -> Unit = {},
+    onCancel: () -> Unit = {},
     onSubmitCode: (String) -> Unit = {}, onCodeChange: (String, String) -> Unit = { _, _ -> },
-    onSelectCandidate: (String, String) -> Unit = { _, _ -> }, onRequestSent: () -> Unit = {}, onDelete: () -> Unit = {},
-    onPauseDevice: (String) -> Unit = {}, onRemoveDevice: (String) -> Unit = {},
-    onOpenForm: (String) -> Unit = {}, onOpenSms: (String) -> Unit = {}, onApproveForms: (String, Boolean) -> Unit = { _, _ -> },
-    onReviewConnection: (String) -> Unit = {}, onConnectionDecision: (String, Boolean) -> Unit = { _, _ -> }, onDismissConnection: () -> Unit = {},
+    onSelectCandidate: (String, String) -> Unit = { _, _ -> }, onRequestSent: () -> Unit = {},
+    onOpenForm: (String) -> Unit = {}, onOpenSms: (String) -> Unit = {},
     onFormChange: (String, Any) -> Unit = { _, _ -> }, onFormSubmit: (FormAction) -> Unit = {}, onFormRendered: (String) -> Unit = {},
     onFormListen: (FormField) -> Unit = {}, onFormCandidate: (String) -> Unit = {}, onFormNext: () -> Unit = {}, onFormPrevious: () -> Unit = {},
 ) {
     when (destination) {
-        RelayDestination.Inbox -> InboxScreen(state, formState.requests, onSettings, onRefresh, onOpenSms, onOpenForm)
-        is RelayDestination.Settings -> SettingsScreen(state, destination.section, onSection, onBack, onSignIn, onRegister,
-            onRefresh, onRevoke, onDelete, onPauseDevice, onRemoveDevice, onApproveForms,
-            onReviewConnection, onConnectionDecision, onDismissConnection)
+        RelayDestination.Inbox -> InboxScreen(state, formState.requests, onAdministration, onRefresh, onOpenSms, onOpenForm, refreshing, openingTarget)
         is RelayDestination.Response -> {
             val target = destination.target
             when {

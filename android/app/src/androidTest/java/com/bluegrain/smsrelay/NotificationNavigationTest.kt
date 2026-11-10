@@ -41,6 +41,67 @@ class NotificationNavigationTest {
         awaitDestination(scenario, RelayDestination.Response(RequestTarget(id, kind), RequestOrigin.Notification))
     }
 
+    @Test fun inboxTapKeepsTheFeedVisibleUntilTheSelectedFormIsReady() {
+        isolatedBuild()
+        val id = "b".repeat(64)
+        val form = RequestForm(id, "Demo assistant", "Review selected request", "Request details", "pending",
+            Long.MAX_VALUE, emptyList(), emptyList(), null)
+        ActivityScenario.launch<MainActivity>(Intent(context, MainActivity::class.java)).use { scenario ->
+            lateinit var inbox: InboxViewModel
+            scenario.onActivity { activity ->
+                val vm = androidx.lifecycle.ViewModelProvider(activity)[RelayViewModel::class.java]
+                @Suppress("UNCHECKED_CAST")
+                val session = RelayViewModel::class.java.getDeclaredField("mutable").apply { isAccessible = true }
+                    .get(vm) as kotlinx.coroutines.flow.MutableStateFlow<RelayUiState>
+                session.value = session.value.copy(configured = true, signedIn = true, registered = true, busy = true)
+                inbox = androidx.lifecycle.ViewModelProvider(activity)[InboxViewModel::class.java]
+                @Suppress("UNCHECKED_CAST")
+                val forms = InboxViewModel::class.java.getDeclaredField("mutable").apply { isAccessible = true }
+                    .get(inbox) as kotlinx.coroutines.flow.MutableStateFlow<InboxState>
+                forms.value = forms.value.copy(requests = listOf(form))
+            }
+            compose.onNodeWithTag("form:$id").performClick()
+            compose.onNodeWithText("Inbox").assertIsDisplayed()
+            compose.onNodeWithText("Opening…").assertIsDisplayed()
+            compose.onNodeWithText("Request response").assertDoesNotExist()
+            compose.onNodeWithText("Could not open this request.").assertDoesNotExist()
+            assertEquals(RelayDestination.Inbox, destination(scenario))
+            scenario.onActivity { inbox.showLoaded(form) }
+            compose.onNodeWithText("Request details").assertIsDisplayed()
+            compose.onNodeWithText("Request response").assertDoesNotExist()
+            compose.onNodeWithText("Opening this request…").assertDoesNotExist()
+            compose.onNodeWithText("Could not open this request.").assertDoesNotExist()
+            compose.onNodeWithText("Close").performClick()
+            compose.onNodeWithTag("form:$id").performClick()
+            compose.onNodeWithText("Request details").assertIsDisplayed()
+            compose.onNodeWithText("Request response").assertDoesNotExist()
+        }
+    }
+
+    @Test fun systemBackAbandonsPendingNavigationWithoutCancellingTheRequest() {
+        isolatedBuild()
+        val id = "c".repeat(64)
+        ActivityScenario.launch<MainActivity>(Intent(context, MainActivity::class.java)).use { scenario ->
+            lateinit var session: kotlinx.coroutines.flow.MutableStateFlow<RelayUiState>
+            scenario.onActivity { activity ->
+                val vm = androidx.lifecycle.ViewModelProvider(activity)[RelayViewModel::class.java]
+                @Suppress("UNCHECKED_CAST")
+                val mutable = RelayViewModel::class.java.getDeclaredField("mutable").apply { isAccessible = true }
+                    .get(vm) as kotlinx.coroutines.flow.MutableStateFlow<RelayUiState>
+                session = mutable
+                session.value = session.value.copy(configured = true, signedIn = true, registered = true, busy = true,
+                    request = PhoneRequest(id, "pending_phone", "Assistant", "Sign in", null, Long.MAX_VALUE, null, null))
+            }
+            compose.onNodeWithTag("sms:$id").performClick()
+            compose.onNodeWithText("Opening…").assertIsDisplayed()
+            scenario.onActivity { it.onBackPressedDispatcher.onBackPressed() }
+            compose.onNodeWithText("Inbox").assertIsDisplayed()
+            compose.onNodeWithText("Opening…").assertDoesNotExist()
+            assertEquals("pending_phone", session.value.request?.status)
+            assertEquals(RelayDestination.Inbox, destination(scenario))
+        }
+    }
+
     @Test fun coldNotificationSurvivesRecreationAndCloseBackgroundsWithoutFinishing() {
         isolatedBuild()
         ActivityScenario.launch<MainActivity>(notification()).use { scenario ->
@@ -57,7 +118,7 @@ class NotificationNavigationTest {
             assertEquals(Lifecycle.State.CREATED, scenario.state)
         }
     }
-    @Test fun notificationFromInboxAndSettingsReplacesOnlyNavigationAndRepeatedTapsKeepTarget() {
+    @Test fun notificationFromInboxReplacesOnlyNavigationAndRepeatedTapsKeepTarget() {
         isolatedBuild()
         ActivityScenario.launch<MainActivity>(Intent(context, MainActivity::class.java)).use { scenario ->
             compose.onNodeWithText("Inbox").assertIsDisplayed()
@@ -66,8 +127,7 @@ class NotificationNavigationTest {
             compose.onNodeWithText("Request response").assertIsDisplayed()
             scenario.onActivity { it.startActivity(Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)) }
             awaitDestination(scenario, RelayDestination.Inbox)
-            compose.onNodeWithText("Settings").performClick()
-            compose.onNodeWithText("Access").assertIsDisplayed()
+            compose.onNodeWithText("Inbox").assertIsDisplayed()
             scenario.onActivity { it.startActivity(notification(id = "b".repeat(64)).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)) }
             assertTarget(scenario, "b".repeat(64), RequestKind.Form)
             compose.onNodeWithText("Request response").assertIsDisplayed()
@@ -170,17 +230,49 @@ class NotificationNavigationTest {
             }
         }
     }
-    @Test fun connectionLinksOpenAccessAndKeepItAcrossRecreation() {
+    @Test fun connectionLinksOpenAdministrationAndKeepItAcrossRecreation() {
         isolatedBuild()
-        val link = Intent(context, MainActivity::class.java).setAction(Intent.ACTION_VIEW)
-            .setData(android.net.Uri.parse("smsrelay://connect?code=ABCDE-FG234"))
-        ActivityScenario.launch<MainActivity>(link).use { scenario ->
-            compose.onNodeWithText("Settings").assertIsDisplayed()
+        val link = Intent(Intent.ACTION_VIEW, android.net.Uri.parse("smsrelay://connect?code=ABCDE-FG234"))
+            .addCategory(Intent.CATEGORY_BROWSABLE).setPackage(context.packageName)
+        assertEquals(AdministrationActivity::class.java.name, context.packageManager.resolveActivity(link, 0)?.activityInfo?.name)
+        ActivityScenario.launch<AdministrationActivity>(link).use { scenario ->
+            compose.onNodeWithText("Administration").assertIsDisplayed()
             compose.onNodeWithText("Access").assertIsDisplayed()
             scenario.recreate()
-            compose.onNodeWithText("Settings").assertIsDisplayed()
-            compose.onNodeWithText("Back").performClick()
-            compose.onNodeWithText("Inbox").assertIsDisplayed()
+            compose.onNodeWithText("Administration").assertIsDisplayed()
+            compose.onNodeWithText("Inbox").assertDoesNotExist()
+            scenario.onActivity { it.onBackPressedDispatcher.onBackPressed() }
+            compose.waitUntil(5_000) { scenario.state == Lifecycle.State.DESTROYED }
+            assertEquals(Lifecycle.State.DESTROYED, scenario.state)
+        }
+    }
+    @Test fun administrationUsesADifferentTaskAndDoesNotReplaceInboxNavigationOrDrafts() {
+        isolatedBuild()
+        ActivityScenario.launch<MainActivity>(Intent(context, MainActivity::class.java)).use { inbox ->
+            var inboxTask = -1
+            lateinit var inboxVm: RelayViewModel
+            inbox.onActivity { activity ->
+                inboxTask = activity.taskId
+                inboxVm = androidx.lifecycle.ViewModelProvider(activity)[RelayViewModel::class.java]
+                @Suppress("UNCHECKED_CAST")
+                val state = RelayViewModel::class.java.getDeclaredField("mutable").apply { isAccessible = true }
+                    .get(inboxVm) as kotlinx.coroutines.flow.MutableStateFlow<RelayUiState>
+                state.value = state.value.copy(request = PhoneRequest("retained", "ready", "Assistant", "Sign in", null, Long.MAX_VALUE, null, null))
+                inboxVm.changeCode("retained", "123456")
+            }
+            ActivityScenario.launch<AdministrationActivity>(Intent(context, AdministrationActivity::class.java)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)).use { admin ->
+                admin.onActivity { activity ->
+                    assertNotEquals(inboxTask, activity.taskId)
+                    val adminVm = androidx.lifecycle.ViewModelProvider(activity)[RelayViewModel::class.java]
+                    assertNotSame(inboxVm, adminVm)
+                    assertNull(adminVm.state.value.request)
+                    assertTrue(RelayViewModel::class.java.getDeclaredField("administrationOnly").apply { isAccessible = true }.getBoolean(adminVm))
+                }
+                compose.onNodeWithText("Administration").assertIsDisplayed()
+                assertEquals("123456", inboxVm.state.value.codeDraft)
+                assertEquals(RelayDestination.Inbox, destination(inbox))
+            }
         }
     }
     @Test fun wizardDraftAndCurrentStepSurviveActivityRotationInTheSameSession() {

@@ -27,9 +27,9 @@ The `bluegrain` named CLI configuration and scoped pilot environment select Blue
 | Scheduler | `sms-relay-maintenance`, enabled every minute with Google OIDC authentication; successful HTTP 200 run verified |
 | Google sign-in | Provider and OAuth configuration verified; physical-phone Google-authenticated registration passed |
 | Android OAuth | Matching Android client and web client verified; release SHA-1/SHA-256 registered |
-| Signed pilot APK/AAB | Version 0.3.0 (3), built with live project settings; signatures verified |
+| Signed pilot APK/AAB | Version 0.7.0 (9), built with live project settings; original signing certificate verified |
 | Release checks | 21 backend tests, 7 unit tests and 7 UI tests passed; release lint: zero errors, 15 warnings; signed release installs/launches on isolated API 36 emulator |
-| Physical phone | Samsung SM-G996B, Android 15/API 35; v0.4.2 installed with sign-in/registration retained. Focused SMS UI and Markdown header/message verified. Real SMS approval, MCP/REST retrieval and expiry passed on v0.3; v0.4.2 real-SMS automatic upload and automatic task closure passed after Android consent. Denial, lifecycle and two-phone acceptance remain pending |
+| Physical phone | Samsung SM-G996B, Android 15/API 35; v0.7.0 installed as an update. Both launcher entries open and notification permission is retained. Three form demo notifications were observed; the SMS demo completed. Earlier real-SMS acceptance records remain below. |
 
 [Live health check](https://sms-code-relay-yettlpkbya-uc.a.run.app/health) · [Firebase console](https://console.firebase.google.com/project/dk-sms-relay-20261108/overview) · [Cloud Run console](https://console.cloud.google.com/run/detail/us-central1/sms-code-relay/metrics?project=dk-sms-relay-20261108).
 

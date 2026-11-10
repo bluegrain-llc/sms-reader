@@ -119,26 +119,25 @@ class ApprovalScreenTest {
         compose.runOnIdle { assertEquals(1, closed) }
     }
 
-    @Test fun relayHidesCredentialSetupAndAdminListsAllPhones() {
-        compose.setContent {
-            RelayTheme {
-                HomeScreen(RelayUiState(configured = true, signedIn = true, registered = true,
-                    email = "owner@example.test", devices = listOf(
-                        DeviceRow("first", "Samsung phone", false, true),
-                        DeviceRow("second", "Pixel phone", true, false))),
-                    )
-            }
-        }
-        compose.onNodeWithText("No pending requests.").assertIsDisplayed()
-        compose.onNodeWithText("Connect an app or bot").assertDoesNotExist()
-        compose.onNodeWithText("Settings").performClick()
-        compose.onNodeWithText("Connect an app or bot").performScrollTo().assertIsDisplayed()
-        compose.onNodeWithText("Copy connection").assertDoesNotExist()
-        compose.onNodeWithText("Devices").performClick()
+    @Test fun inboxContainsNoAdministrationControls() {
+        compose.setContent { RelayTheme { HomeScreen(RelayUiState(configured = true, signedIn = true, registered = true)) } }
+        compose.onNodeWithText("All caught up").assertIsDisplayed()
+        compose.onNodeWithText("Connect app").assertDoesNotExist()
+        compose.onNodeWithText("Administration").assertDoesNotExist()
+        compose.onNodeWithText("Refresh").assertDoesNotExist()
+    }
+    @Test fun administrationListsAllPhones() {
+        compose.setContent { RelayTheme {
+            AdministrationScreen(RelayUiState(configured = true, signedIn = true, registered = true,
+                email = "owner@example.test", devices = listOf(
+                    DeviceRow("first", "Samsung phone", false, true), DeviceRow("second", "Pixel phone", true, false))),
+                AdministrationSection.Devices)
+        } }
         compose.onNodeWithText("Samsung phone").performScrollTo().assertIsDisplayed()
         compose.onNodeWithText("This phone · Receives requests").assertIsDisplayed()
         compose.onNode(hasScrollAction()).performScrollToNode(hasText("Pixel phone"))
         compose.onNodeWithText("Pixel phone").assertIsDisplayed()
+        compose.onNodeWithText("Inbox").assertDoesNotExist()
     }
     @Test fun anotherPhonesApprovalIsClearlyReportedWithoutTheCode() {
         compose.setContent {
@@ -158,7 +157,7 @@ class ApprovalScreenTest {
         var decision: Boolean? = null
         compose.setContent {
             RelayTheme {
-                SettingsTestScreen(RelayUiState(configured = true, signedIn = true, registered = true,
+                AdministrationTestScreen(RelayUiState(configured = true, signedIn = true, registered = true,
                     email = "owner@example.test", now = 0,
                     connection = ConnectionReview("ABCDE-FG234", "Invoice bot", "Receive sign-in codes", "pending", 600_000, 30)),
                     onConnectionDecision = { code, approved -> assertEquals("ABCDE-FG234", code); decision = approved })
@@ -177,7 +176,7 @@ class ApprovalScreenTest {
     @Test fun expiredConnectionCannotBeApproved() {
         compose.setContent {
             RelayTheme {
-                SettingsTestScreen(RelayUiState(configured = true, signedIn = true, registered = true, now = 600_000,
+                AdministrationTestScreen(RelayUiState(configured = true, signedIn = true, registered = true, now = 600_000,
                     connection = ConnectionReview("ABCDE-FG234", "Expired bot", "Sign in", "pending", 600_000, 30)))
             }
         }
@@ -188,7 +187,7 @@ class ApprovalScreenTest {
         var retried: String? = null
         compose.setContent {
             RelayTheme {
-                SettingsTestScreen(RelayUiState(configured = true, signedIn = true, registered = true,
+                AdministrationTestScreen(RelayUiState(configured = true, signedIn = true, registered = true,
                     connectionCode = "ABCDE-FG234", error = "Check your network and retry."),
                     onReviewConnection = { retried = it })
             }
@@ -207,16 +206,12 @@ class ApprovalScreenTest {
             onCodeChange = onCodeChange, onCancel = onCancel, onRequestSent = onRequestSent)
     }
     @androidx.compose.runtime.Composable
-    private fun SettingsTestScreen(state: RelayUiState, onConnectionDecision: (String, Boolean) -> Unit = { _, _ -> }, onReviewConnection: (String) -> Unit = {}) {
-        SettingsScreen(state, SettingsSection.Access, onConnectionDecision = onConnectionDecision, onReviewConnection = onReviewConnection)
+    private fun AdministrationTestScreen(state: RelayUiState, onConnectionDecision: (String, Boolean) -> Unit = { _, _ -> }, onReviewConnection: (String) -> Unit = {}) {
+        AdministrationScreen(state, AdministrationSection.Access, onConnectionDecision = onConnectionDecision, onReviewConnection = onReviewConnection)
     }
     @androidx.compose.runtime.Composable
-    private fun HomeScreen(state: RelayUiState, formState: InboxState = InboxState(),
-        onOpenForm: (String) -> Unit = {}, onApproveForms: (String, Boolean) -> Unit = { _, _ -> }) {
-        var destination by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf<RelayDestination>(RelayDestination.Inbox) }
-        RelayScreen(state, destination, formState, onSettings = { destination = RelayDestination.Settings() },
-            onSection = { destination = RelayDestination.Settings(it) }, onBack = { destination = RelayDestination.Inbox },
-            onOpenForm = onOpenForm, onApproveForms = onApproveForms)
+    private fun HomeScreen(state: RelayUiState, formState: InboxState = InboxState(), onOpenForm: (String) -> Unit = {}) {
+        RelayScreen(state, formState = formState, onOpenForm = onOpenForm)
     }
     private fun form() = RequestForm("form-1", "Expense assistant", "Review invoice", "## Invoice details\n\nChoose a category and approve.",
         "pending", 600_000, listOf(
@@ -260,21 +255,29 @@ class ApprovalScreenTest {
         compose.runOnIdle { ui = ui.copy(form = form().copy(status = "submitted", completedBy = "other-phone")) }
         compose.onNodeWithText("Answered on another phone.").performScrollTo().assertIsDisplayed()
     }
-    @Test fun inboxRemainsAvailableWhileSmsIsListeningAndFormPermissionIsExplicit() {
+    @Test fun inboxRemainsAvailableWhileSmsIsListening() {
         var opened: String? = null
-        var approved = false
         compose.setContent { RelayTheme { HomeScreen(RelayUiState(configured = true, signedIn = true, registered = true,
             request = PhoneRequest("sms", "ready", "SMS bot", "SMS", null, 600_000, 300_000, null), now = 0,
             grants = listOf(GrantRow("grant", "Expense assistant", false, 600_000))),
-            formState = InboxState(requests = listOf(form())), onOpenForm = { opened = it }, onApproveForms = { _, value -> approved = value }) } }
+            formState = InboxState(requests = listOf(form())), onOpenForm = { opened = it }) } }
         compose.onNodeWithText("SMS bot").assertIsDisplayed()
         compose.onNodeWithText("Review invoice").performScrollTo().performClick()
         assertEquals("form-1", opened)
-        compose.onNodeWithText("Settings").performClick()
-        compose.onNode(hasScrollAction()).performScrollToNode(hasText("SMS requests only"))
-        compose.onNodeWithText("SMS requests only").assertIsDisplayed()
+        compose.onNodeWithText("Allow interactive requests").assertDoesNotExist()
+    }
+
+    @Test fun administrationRequiresExplicitInteractiveRequestPermission() {
+        var approved = false
+        compose.setContent { RelayTheme {
+            AdministrationScreen(RelayUiState(configured = true, signedIn = true, registered = true, now = 0,
+                grants = listOf(GrantRow("grant", "Expense assistant", false, 600_000))), AdministrationSection.Access,
+                onApproveForms = { _, value -> approved = value })
+        } }
+        compose.onNodeWithText("SMS requests only").performScrollTo().assertIsDisplayed()
+        assertFalse(approved)
         compose.onNodeWithText("Allow interactive requests").performScrollTo().performClick()
-        assertEquals(true, approved)
+        assertTrue(approved)
     }
 
     @Test fun formRendersNumberCheckboxMultipleChoiceAndNativeDateControl() {
