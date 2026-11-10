@@ -157,6 +157,28 @@ class GateTest(unittest.TestCase):
             return self.tools(args)
         self.assertFalse(self.check(run=run)["ready"])
 
+    def test_source_stamp_is_separate_from_numbered_or_rotated_app_signers(self):
+        rotated, unknown = "D" * 64, "E" * 64
+        self.record["signing"]["playSha256"].append(rotated)
+        numbered = "Signer #1 certificate SHA-256 digest: " + PILOT
+        stamp = "Source Stamp Signer certificate SHA-256 digest: " + unknown
+        rotation = ("Signer (minSdkVersion=28, maxSdkVersion=32) certificate SHA-256 digest: " + PILOT +
+                    "\nSigner (minSdkVersion=33, maxSdkVersion=2147483647) certificate SHA-256 digest: " + rotated)
+        for output, accepted in (
+            (numbered + "\n" + stamp, True),
+            (rotation + "\n" + stamp, True),
+            (stamp.replace(unknown, PILOT), False),
+            (numbered.replace(PILOT, unknown) + "\n" + stamp.replace(unknown, PILOT), False),
+            (numbered + "\nSigner #2 certificate SHA-256 digest: " + unknown, False),
+        ):
+            with self.subTest(output=output):
+                def run(args):
+                    return output if args[0] == "apksigner" else self.tools(args)
+                result = self.check(run=run)
+                self.assertEqual(result["ready"], accepted)
+                if not accepted:
+                    self.assertIn("Play APK signer mismatch", result["blockers"])
+
     def test_wrong_upload_key_or_pilot_discontinuity_blocks(self):
         self.record["signing"]["uploadSha256"] = PILOT
         self.record["signing"]["playSha256"] = ["D" * 64]
@@ -190,6 +212,21 @@ class GateTest(unittest.TestCase):
                 return "package: name='com.bluegrain.smsrelay' versionCode='11' split='config.en'"
             return self.tools(args)
         self.assertTrue(self.check(run=run)["ready"])
+        matching_manifest = "package: name='com.bluegrain.smsrelay' versionCode='11' split='config.en'"
+        for manifest, signer, blocker in (
+            (matching_manifest.replace("com.bluegrain.smsrelay", "other.package"), PILOT, "APK package mismatch"),
+            (matching_manifest.replace("versionCode='11'", "versionCode='12'"), PILOT, "APK versionCode mismatch"),
+            (matching_manifest, "D" * 64, "Play APK signer mismatch"),
+        ):
+            with self.subTest(blocker=blocker):
+                def mismatched_split(args):
+                    if args[-1] == str(path):
+                        if args[0] == "aapt":
+                            return manifest
+                        if args[0] == "apksigner":
+                            return "Signer #1 certificate SHA-256 digest: " + signer
+                    return self.tools(args)
+                self.assertIn(blocker, self.check(run=mismatched_split)["blockers"])
 
     def test_open_prerequisite_blocks(self):
         self.open_issue = "9"

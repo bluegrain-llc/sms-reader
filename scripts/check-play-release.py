@@ -219,7 +219,9 @@ def check_record(record, base, offline=False, run=command, now=None):
                     require(target is not None and target.isdigit() and type(minimum) is int and int(target) >= minimum, "AAB target API below requirement")
             else:
                 cert = run(["apksigner", "verify", "--verbose", "--print-certs", str(path)])
-                digests = [fingerprint(value) for value in re.findall(r"certificate SHA-256 digest:\s*([A-Fa-f0-9]+)", cert)]
+                digests = [fingerprint(value) for value in re.findall(
+                    r"^Signer (?:#\d+|\([^\r\n]*\)) certificate SHA-256 digest:[ \t]*([A-Fa-f0-9]+)[ \t]*$",
+                    cert, re.MULTILINE)]
                 require(bool(digests) and all(value in signers for value in digests), "Play APK signer mismatch")
                 manifest = run(["aapt", "dump", "badging", str(path)])
                 require("package: name='com.bluegrain.smsrelay'" in manifest, "APK package mismatch")
