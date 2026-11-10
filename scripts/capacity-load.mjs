@@ -5,7 +5,7 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { parseArgs, promisify } from 'node:util';
 import { execFile } from 'node:child_process';
 import { performance } from 'node:perf_hooks';
-import { WorkloadState, StreamObservation, workloadComplete, streamLifetime } from './capacity-observation.mjs';
+import { WorkloadState, StreamObservation, workloadComplete, streamLifetime, SseEventCounter } from './capacity-observation.mjs';
 
 const { values } = parseArgs({ options: { config: { type: 'string' }, output: { type: 'string' }, quick: { type: 'boolean', default: false } } });
 const state = new WorkloadState(), unwatch = state.watch(process);
@@ -53,10 +53,10 @@ try {
           await response.body?.cancel(); throw Error('stream rejected');
         }
         openedAt = observation.open(Date.now()); metrics.streamConnections++; reader = response.body.getReader();
-        const decoder = new TextDecoder();
+        const decoder = new TextDecoder(), events = new SseEventCounter();
         while (state.running && Date.now() < plannedEnd) {
           const chunk = await reader.read(); if (chunk.done) { cleanEof = true; break; }
-          metrics.eventFrames += (decoder.decode(chunk.value, { stream: true }).match(/^id:/gm) ?? []).length;
+          metrics.eventFrames += events.push(decoder.decode(chunk.value, { stream: true }));
         }
       } catch { if (state.running && Date.now() < plannedEnd) metrics.streamFailures++; }
       finally {

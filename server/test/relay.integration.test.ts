@@ -707,6 +707,57 @@ integration('maintenance cursors move past poison records beyond page limits and
     assert.equal(processed.size,501);
   } finally { await db.recursiveDelete(db.collection(collection));await db.collection('maintenancePages').doc('capacity-fixture').delete(); }
 });
+integration('expired cleanup batches 400 unchanged records without per-document read transactions', { timeout: 30000 }, async () => {
+  const { MaintenancePages } = await import('../src/maintenance-pages.js');
+  const collection = 'capacityPurgeFixture', seed = db.batch();
+  for (let i = 0; i < 400; i++) seed.set(db.collection(collection).doc(String(i)), { purgeAt: new Date(time - 1) });
+  await seed.commit();
+  const originalBatch = db.batch.bind(db), originalTransaction = db.runTransaction.bind(db);
+  let commits = 0, transactions = 0;
+  db.batch = () => {
+    const batch = originalBatch(), commit = batch.commit.bind(batch);
+    batch.commit = async () => { commits++; return commit(); }; return batch;
+  };
+  db.runTransaction = ((...args: Parameters<typeof db.runTransaction>) => {
+    transactions++; return originalTransaction(...args);
+  }) as typeof db.runTransaction;
+  try {
+    assert.equal(await new MaintenancePages(db).purge(collection, time), 400);
+    assert.equal(commits, 1); assert.equal(transactions, 1, 'only the cursor transaction is needed');
+    assert.equal((await db.collection(collection).get()).size, 0);
+  } finally {
+    db.batch = originalBatch; db.runTransaction = originalTransaction;
+    await db.recursiveDelete(db.collection(collection)); await db.collection('maintenancePages').doc(`purge-${collection}`).delete();
+  }
+});
+integration('conditional purge preserves a concurrently renewed record and cleans unaffected records', { timeout: 15000 }, async () => {
+  const { MaintenancePages } = await import('../src/maintenance-pages.js');
+  const collection = 'capacityRenewalFixture', renewed = db.collection(collection).doc('renewed');
+  const seed = db.batch();
+  for (const id of ['renewed', 'expired-a', 'expired-b']) seed.set(db.collection(collection).doc(id), { purgeAt: new Date(time - 1) });
+  await seed.commit();
+  const originalBatch = db.batch.bind(db); let raced = false;
+  db.batch = () => {
+    const batch = originalBatch(), commit = batch.commit.bind(batch);
+    batch.commit = async () => {
+      if (!raced) {
+        raced = true;
+        await db.runTransaction(async tx => { tx.update(renewed, { purgeAt: new Date(time + MINUTE), retained: true }); });
+      }
+      return commit();
+    }; return batch;
+  };
+  try {
+    assert.equal(await new MaintenancePages(db).purge(collection, time), 3);
+    const remaining = await db.collection(collection).get();
+    assert.equal(raced, true); assert.deepEqual(remaining.docs.map(doc => doc.id), ['renewed']);
+    assert.equal(remaining.docs[0].data().retained, true);
+    assert.equal(await new MaintenancePages(db).purge(collection, time), 0);
+  } finally {
+    db.batch = originalBatch;
+    await db.recursiveDelete(db.collection(collection)); await db.collection('maintenancePages').doc(`purge-${collection}`).delete();
+  }
+});
 integration('independent ledger failure prevents acknowledging grant revocation', async () => {
   let attempted=false;
   const guarded=new Relay(db,async()=>{},()=>time,undefined,async action=>{attempted=true;assert.equal(action.kind,'grant.revoke');throw Error('ledger unavailable');});

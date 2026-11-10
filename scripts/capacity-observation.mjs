@@ -56,3 +56,29 @@ export function streamLifetime(index, duration, peakDuration, smoke) {
   // 200 for half an hour, 17 for four hours, then 16: 480 stream-hours/day.
   return index < 16 ? duration : index === 16 ? peakDuration + 4 * 3600_000 : peakDuration;
 }
+
+// Keep only field prefixes and frame state; arbitrary data lines never accumulate.
+export class SseEventCounter {
+  prefix = '';
+  length = 0;
+  afterCr = false;
+  hasId = false;
+  push(text) {
+    let frames = 0;
+    const line = () => {
+      if (this.length === 0) { if (this.hasId) frames++; this.hasId = false; }
+      else if (this.prefix === 'id:' || (this.length === 2 && this.prefix === 'id')) this.hasId = true;
+      this.prefix = ''; this.length = 0;
+    };
+    for (const char of text) {
+      if (char === '\r') { line(); this.afterCr = true; }
+      else if (char === '\n') { if (!this.afterCr) line(); this.afterCr = false; }
+      else {
+        this.afterCr = false;
+        if (this.length < 3) this.prefix += char;
+        this.length = Math.min(4, this.length + 1);
+      }
+    }
+    return frames;
+  }
+}
