@@ -809,10 +809,11 @@ integration('monitoring samples real due queues and timestamp expiries without e
 integration('legacy deletion attempts migrate atomically, resume identity retries and leave truthful backlog metrics', { timeout: 60000 }, async () => {
   await db.collection('accounts').doc(uid).set({ hasWork: true, activeRequestId: 'old', queueIds: ['old'] });
   const attempt = db.collection('deletionAttempts').doc(hash(uid));
-  await attempt.set({ ownerId: uid, nextAt: time - MINUTE });
+  await attempt.set({ ownerId: uid, nextAt: time - 10 * MINUTE });
   await relay.deletions.migrateLegacy();
   assert.equal((await attempt.get()).exists, false);
   assert.deepEqual((await db.collection('accounts').doc(uid).get()).data(), { deleting: true });
+  assert.equal((await db.collection('deletionJobs').doc(hash(uid)).get()).data()?.backlogAt, time - 10 * MINUTE);
   let fail = true;
   await relay.deletions.dispatch(async () => { if (fail) throw Error('identity unavailable'); });
   let rows: { kind?: string; count?: number }[] = [];
@@ -890,7 +891,16 @@ integration('stream admission keeps its committed deadline and slow event reads 
     assert.equal(response.status, 200);
     const text = await response.text(); assert.ok(text.includes('heartbeat')); assert.equal(reads, 2);
     // The second database read is still pending when the response ends.
-    const replacement = await relay.access.stream(uid, grantId, 1000); await replacement();
+    const leaseRef = db.collection('streamLimits').doc(hash(`grant:${grantId}`)), deadline = Date.now() + 3000;
+    let count = 1;
+    do {
+      count = Object.keys((await leaseRef.get()).data()?.leases ?? {}).length;
+      if (count) await new Promise(resolve => setTimeout(resolve, 25));
+    } while (count && Date.now() < deadline);
+    assert.equal(count, 0, 'HTTP close must release its lease while its event read is pending');
+    const first = await relay.access.stream(uid, grantId, 1000), secondRelease = await relay.access.stream(uid, grantId, 1000);
+    try { await assert.rejects(relay.access.stream(uid, grantId, 1000), reason('stream_limit_reached')); }
+    finally { await first(); await secondRelease(); }
   } finally { unblock?.(); relay.forms.events = events; server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); }
 });
 
@@ -936,4 +946,21 @@ integration('ordinary maintenance cancels tombstoned SMS while deletion remains 
   assert.equal((await db.collection('requests').doc(r.requestId).get()).data()?.status, 'cancelled');
   assert.equal((await db.collection('requests').doc(otherRequest.requestId).get()).data()?.notificationSent, true);
   assert.equal((await db.collection('formResults').doc('expired-other').get()).exists, false);
+});
+
+
+integration('repeated deletion adopts the original legacy acceptance age without resetting an existing job', { timeout: 30000 }, async () => {
+  const legacyAt = time - 20 * MINUTE;
+  const attempt = db.collection('deletionAttempts').doc(hash(uid)), job = db.collection('deletionJobs').doc(hash(uid));
+  await attempt.set({ ownerId: uid, nextAt: legacyAt });
+  await relay.deletions.request(uid);
+  assert.equal((await job.get()).data()?.createdAt, legacyAt);
+  assert.equal((await job.get()).data()?.backlogAt, legacyAt);
+  assert.equal((await attempt.get()).exists, false);
+  // Adoption into an existing pending job keeps the earliest acceptance time too.
+  await attempt.set({ ownerId: uid, nextAt: legacyAt - MINUTE });
+  await relay.deletions.migrateLegacy();
+  assert.equal((await job.get()).data()?.backlogAt, legacyAt - MINUTE);
+  await relay.deletions.request(uid);
+  assert.equal((await job.get()).data()?.backlogAt, legacyAt - MINUTE);
 });
