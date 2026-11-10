@@ -1,5 +1,13 @@
 # Verification record
 
+## Repeatable cloud acceptance tooling
+
+The [staging acceptance runner and fault-drill procedure](CLOUD_ACCEPTANCE.md)
+separate real-service checks from emulator and physical-phone evidence. Runner
+guard/signature/evidence tests execute without cloud credentials; unperformed
+cloud scenarios remain pending. This tooling does not establish a live staging
+pass or close the physical acceptance gate.
+
 ## Interactive request inbox (2026-11-09)
 
 Executed locally: server type checking; 11 server unit tests; 36 Firestore/Auth/REST/MCP integration tests; 13 Android unit tests, debug lint, APK and instrumentation builds; 18 UI tests on the Android 36 emulator at both 1080×2400 and CI’s 320×640 viewport; production-dependency audit with zero vulnerabilities; Docker build and HTTP startup/authentication smoke; deployment script syntax check.

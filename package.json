@@ -10,6 +10,7 @@
     "test:unit": "npm run test:unit -w server",
     "test:integration": "firebase emulators:exec --project demo-sms-relay --only auth,firestore 'npm run test:integration -w server'",
     "test:emulator": "npm run test:integration",
+    "test:cloud-harness": "node --test scripts/cloud-acceptance/*.test.mjs",
     "test:capacity-tools": "python3 scripts/test-capacity-tools.py && node --test scripts/capacity-observation.test.mjs"
   },
   "devDependencies": {
