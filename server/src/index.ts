@@ -10,12 +10,13 @@ import { RecoveryGate } from './recovery-gate.js';
 import { securityLedger } from './security-ledger.js';
 import { ensure } from './model.js';
 
-initializeApp({ credential: applicationDefault(), projectId: process.env.GOOGLE_CLOUD_PROJECT });
+const credential = applicationDefault();
+initializeApp({ credential, projectId: process.env.GOOGLE_CLOUD_PROJECT });
 const auth = getAuth(), oauth = new OAuth2Client();
 const relay = new Relay(getFirestore(), async (token, requestId, ttl, kind) => {
   await getMessaging().send({ token, data: { requestId, ...(kind ? { kind } : {}) }, android: { priority: 'high', ttl, collapseKey: requestId } });
 }, Date.now, taskWakeup(), securityLedger(process.env.SECURITY_LEDGER_BUCKET));
-const gate = new RecoveryGate(getFirestore());
+const gate = new RecoveryGate(getFirestore(), () => credential.getAccessToken());
 const server = app(relay, {
   assertServing: () => gate.assertServing(),
   verifyOwner: async token => {
