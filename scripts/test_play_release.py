@@ -36,7 +36,7 @@ class GateTest(unittest.TestCase):
             with zipfile.ZipFile(path, "w") as archive:
                 archive.writestr("fixture.txt", "synthetic artifact")
             self.record["artifacts"][kind] = {"path": path.name, "sha256": gate.sha256(path)}
-        evidence = {"result": "passed", "commit": self.record["commit"], "aabSha256": self.record["artifacts"]["aab"]["sha256"], "apkSha256": self.record["artifacts"]["playApk"]["sha256"], "splitSha256": [], "reviewCycles": [{"head": str(index) * 40, "findingsAddressed": True} for index in range(5)]}
+        evidence = {"result": "passed", "commit": self.record["commit"], "aabSha256": self.record["artifacts"]["aab"]["sha256"], "apkSha256": self.record["artifacts"]["playApk"]["sha256"], "splitSha256": [], "reviewCycles": [{"head": str(index) * 40, "findingsAddressed": True} for index in range(5)], "checks": {name: True for name in gate.RECOVERY_CHECKS}}
         for label in gate.EVIDENCE:
             path = self.base / (label + ".json")
             path.write_text(json.dumps(evidence))
@@ -114,6 +114,15 @@ class GateTest(unittest.TestCase):
         path.write_text(json.dumps(data))
         self.record["evidence"]["finalCiAndReviews"]["sha256"] = gate.sha256(path)
         self.assertIn("five completed review/fix cycles missing", self.check()["blockers"])
+
+    def test_recovery_requires_every_live_drill_and_control(self):
+        path = self.base / "capacityCostRestore.json"
+        complete = json.loads(path.read_text())
+        for checks in ({}, None, *({**complete["checks"], name: False} for name in gate.RECOVERY_CHECKS)):
+            with self.subTest(checks=checks):
+                path.write_text(json.dumps({**complete, "checks": checks}))
+                self.record["evidence"]["capacityCostRestore"]["sha256"] = gate.sha256(path)
+                self.assertIn("capacityCostRestore: capacity, backup, ledger and live restore checks incomplete", self.check()["blockers"])
 
     def test_new_personal_account_requires_fourteen_days_and_twelve_testers(self):
         self.record["cohort"].update(startedAt=(NOW - timedelta(days=7)).isoformat(), continuousTesters=11)

@@ -24,6 +24,11 @@ EVIDENCE = (
     "signingContinuity", "dataSafetyApproval", "reviewerAccess", "storeAssets",
     "consoleEligibility", "finalCiAndReviews",
 )
+RECOVERY_CHECKS = (
+    "capacityRun24Hours", "monthlyCostWithin100Usd", "isolatedMetadataBackup",
+    "lockedIndependentLedger", "denialsReplayed", "servingGateFailClosed",
+    "metadataRestoreDrill", "signingRestoreDrill", "infrastructureRestoreDrill",
+)
 REQUIRED_CI = {
     "Server unit tests and type check", "Firestore, Auth, REST and MCP integration tests",
     "Container build and HTTP smoke test", "Android unit tests, lint and build",
@@ -240,6 +245,10 @@ def check_record(record, base, offline=False, run=command, now=None):
             if label == "finalCiAndReviews":
                 cycles = evidence.get("reviewCycles", [])
                 require(len(cycles) >= 5 and all(isinstance(cycle, dict) and cycle.get("findingsAddressed") is True and re.fullmatch(r"[0-9a-f]{40}", cycle.get("head") or "") for cycle in cycles), "five completed review/fix cycles missing")
+            if label == "capacityCostRestore":
+                checks = evidence.get("checks", {})
+                require(isinstance(checks, dict) and all(checks.get(name) is True for name in RECOVERY_CHECKS),
+                        "capacityCostRestore: capacity, backup, ledger and live restore checks incomplete")
         except (OSError, ValueError, AttributeError):
             blockers.append(label + ": invalid evidence JSON")
 
