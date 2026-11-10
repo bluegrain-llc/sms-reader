@@ -14,8 +14,9 @@ export interface DeletionJob {
 /** The account tombstone survives cleanup. Receipts authorize status only, never account access. */
 export class Deletions {
   constructor(readonly db: Firestore, readonly now: () => number, readonly wake: () => Promise<void>, readonly recordSecurity: RecordSecurity = async () => {}) {}
-  private initialJob(uid: string): DeletionJob {
-    return { ownerId: uid, status: 'pending', createdAt: this.now(), updatedAt: this.now(), nextAt: this.now(), backlogAt: this.now(), lease: null,
+  private initialJob(uid: string, legacyAt?: number): DeletionJob {
+    const acceptedAt = Number.isFinite(legacyAt) ? Math.min(legacyAt!, this.now()) : this.now();
+    return { ownerId: uid, status: 'pending', createdAt: acceptedAt, updatedAt: this.now(), nextAt: this.now(), backlogAt: acceptedAt, lease: null,
       leaseUntil: 0, collectionIndex: 0, attempts: 0, purgeAt: null };
   }
   /** Adopt interrupted pre-worker deletions before sampling or executing the durable queue. */
@@ -32,7 +33,13 @@ export class Deletions {
         const account = this.db.collection('accounts').doc(uid), job = this.db.collection('deletionJobs').doc(attempt.id);
         const [owner, existing] = await Promise.all([tx.get(account), tx.get(job)]);
         // Legacy completion was committed only after both record and identity cleanup succeeded.
-        if (!owner.data()?.deletionTelemetryComplete && !existing.exists) tx.create(job, this.initialJob(uid));
+        if (!owner.data()?.deletionTelemetryComplete) {
+          const adopted = this.initialJob(uid, current.data()?.nextAt);
+          if (!existing.exists) tx.create(job, adopted);
+          else if (existing.data()?.status !== 'completed') tx.update(job, {
+            createdAt: Math.min(existing.data()!.createdAt, adopted.createdAt), backlogAt: Math.min(existing.data()!.backlogAt, adopted.backlogAt),
+          });
+        }
         tx.set(account, { deleting: true });
         tx.delete(attempt.ref);
       });
@@ -43,10 +50,15 @@ export class Deletions {
     const receipt = `smsd_${randomBytes(32).toString('base64url')}`, jobId = hash(uid), expiresAt = this.now() + DAY;
     const ref = this.db.collection('deletionJobs').doc(jobId);
     const status = await this.db.runTransaction(async tx => {
-      const old = (await tx.get(ref)).data() as DeletionJob | undefined;
+      const attempt = this.db.collection('deletionAttempts').doc(jobId);
+      const [previous, legacy] = await Promise.all([tx.get(ref), tx.get(attempt)]);
+      const old = previous.data() as DeletionJob | undefined, adopted = this.initialJob(uid, legacy.data()?.nextAt);
       tx.set(this.db.collection('accounts').doc(uid), { deleting: true });
-      if (!old) tx.create(ref, this.initialJob(uid));
-      tx.delete(this.db.collection('deletionAttempts').doc(jobId));
+      if (!old) tx.create(ref, adopted);
+      else if (legacy.exists && old.status !== 'completed') tx.update(ref, {
+        createdAt: Math.min(old.createdAt, adopted.createdAt), backlogAt: Math.min(old.backlogAt, adopted.backlogAt),
+      });
+      tx.delete(attempt);
       tx.create(this.db.collection('deletionReceipts').doc(hash(receipt)), { jobId, expiresAt, purgeAt: new Date(expiresAt) });
       return old?.status ?? 'pending';
     });
