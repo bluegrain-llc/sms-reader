@@ -21,7 +21,8 @@ data class InboxState(val requests: List<RequestForm> = emptyList(), val form: R
     val values: Map<String, Any> = emptyMap(), val busy: Boolean = false, val error: String? = null,
     val helper: String? = null, val helperUntil: Long = 0, val consent: Intent? = null, val candidates: List<String> = emptyList(),
     val now: Long = System.currentTimeMillis(), val foreground: Boolean = false,
-    val stepId: String? = null, val reviewing: Boolean = false, val fieldErrors: Map<String, String> = emptyMap())
+    val stepId: String? = null, val reviewing: Boolean = false, val fieldErrors: Map<String, String> = emptyMap(),
+    val openingForms: Int = 0)
 class InboxViewModel(application: Application) : AndroidViewModel(application) {
     private val app = application as RelayApplication
     private val repo get() = app.repository
@@ -60,7 +61,7 @@ class InboxViewModel(application: Application) : AndroidViewModel(application) {
         if (!app.configured) return
         if (sessionOwner != repo.ownerId) {
             stopHelper(null); submitBody = null; drafts.clear(); sessionOwner = repo.ownerId
-            mutable.update { InboxState(foreground = it.foreground) }
+            mutable.update { InboxState(foreground = it.foreground, openingForms = it.openingForms) }
         }
         refresh()
     }
@@ -82,15 +83,18 @@ class InboxViewModel(application: Application) : AndroidViewModel(application) {
         catch (_: Exception) { /* explicit actions present errors; background refresh preserves drafts */ }
     }
     fun open(id: String) = viewModelScope.async {
-        var loaded = false
-        action(waitForIdle = true) {
-            val owner = repo.ownerId
-            val form = repo.form(id)
-            if (owner != repo.ownerId) return@action
-            showLoaded(form)
-            loaded = true
-        }.join()
-        loaded
+        mutable.update { it.copy(openingForms = it.openingForms + 1) }
+        try {
+            var loaded = false
+            performAction(waitForIdle = true) {
+                val owner = repo.ownerId
+                val form = repo.form(id)
+                if (owner != repo.ownerId) return@performAction
+                showLoaded(form)
+                loaded = true
+            }
+            loaded
+        } finally { mutable.update { it.copy(openingForms = it.openingForms - 1) } }
     }
     internal fun showLoaded(form: RequestForm) {
         saveDraft()
@@ -140,9 +144,10 @@ class InboxViewModel(application: Application) : AndroidViewModel(application) {
         val previous = if (s.reviewing) steps.lastOrNull() else steps.getOrNull(steps.indexOf(FormWizard.current(form, s.values, s.stepId)) - 1)
         if (previous == null) close() else mutable.update { it.copy(stepId = previous.id, reviewing = false, fieldErrors = emptyMap(), error = null) }
     }
-    private fun action(waitForIdle: Boolean = false, block: suspend () -> Unit) = viewModelScope.launch {
+    private fun action(waitForIdle: Boolean = false, block: suspend () -> Unit) = viewModelScope.launch { performAction(waitForIdle, block) }
+    private suspend fun performAction(waitForIdle: Boolean = false, block: suspend () -> Unit) {
         if (waitForIdle) while (state.value.busy) delay(50)
-        if (state.value.busy) return@launch
+        if (state.value.busy) return
         mutable.update { it.copy(busy = true, error = null) }
         try { block() } catch (e: CancellationException) { throw e }
         catch (e: ApiFailure) { mutable.update { it.copy(error = e.reason.replace('_', ' ')) } }

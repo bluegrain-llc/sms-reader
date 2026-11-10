@@ -60,7 +60,7 @@ class RelayNavigationTest {
         assertEquals(listOf("second"), opened)
     }
     @Test fun retainedFormDoesNotRequireAnotherFetchButADifferentTargetDoes() = runBlocking {
-        val session = MutableStateFlow(RelayUiState(configured = true, signedIn = true, registered = true))
+        val session = MutableStateFlow(RelayUiState(configured = true, signedIn = true, registered = true, busy = true))
         val form = RequestForm("retained", "Assistant", "Review", "", "submitted", Long.MAX_VALUE,
             emptyList(), emptyList(), null)
         val inbox = MutableStateFlow(InboxState(form = form, busy = true))
@@ -71,6 +71,7 @@ class RelayNavigationTest {
             session, inbox, ::unavailable, ::unavailable, { entries++ }) })
         assertTrue(opened.isEmpty())
         assertEquals(1, entries)
+        session.value = session.value.copy(busy = false)
         inbox.value = inbox.value.copy(busy = false)
         assertFalse(loadResponseWhenReady(RequestTarget("different", RequestKind.Form),
             session, inbox, ::unavailable, ::unavailable))
@@ -78,7 +79,7 @@ class RelayNavigationTest {
     }
     @Test fun retainedTerminalSmsNeedsNoFetchButActiveAndDifferentTargetsStillOpen() = runBlocking {
         val request = PhoneRequest("retained", "cancelled", "Assistant", "Sign in", null, Long.MAX_VALUE, null, null)
-        val session = MutableStateFlow(RelayUiState(configured = true, signedIn = true, registered = true, request = request))
+        val session = MutableStateFlow(RelayUiState(configured = true, signedIn = true, registered = true, request = request, busy = true))
         val inbox = MutableStateFlow(InboxState())
         val opened = mutableListOf<String>()
         suspend fun unavailable(id: String): Boolean { opened.add(id); return false }
@@ -88,6 +89,7 @@ class RelayNavigationTest {
                 session, inbox, ::unavailable, ::unavailable) })
         }
         assertTrue(opened.isEmpty())
+        session.value = session.value.copy(busy = false)
         for (status in listOf("queued", "pending_phone", "ready", "awaiting_consent")) {
             session.value = session.value.copy(request = request.copy(status = status))
             assertFalse(withTimeout(1000) { loadResponseWhenReady(RequestTarget(request.id, RequestKind.Sms),
@@ -97,5 +99,53 @@ class RelayNavigationTest {
         assertFalse(withTimeout(1000) { loadResponseWhenReady(RequestTarget("different", RequestKind.Sms),
             session, inbox, ::unavailable, ::unavailable) })
         assertEquals(listOf("retained", "retained", "retained", "retained", "different"), opened)
+    }
+    @Test fun retainedFormWaitsForEarlierLoadThenReopensSelectedTarget() = runBlocking {
+        val session = MutableStateFlow(RelayUiState(configured = true, signedIn = true, registered = true))
+        val form = RequestForm("selected", "Assistant", "Review", "", "pending", Long.MAX_VALUE,
+            emptyList(), emptyList(), null)
+        val inbox = MutableStateFlow(InboxState(form = form, busy = true, openingForms = 1))
+        val releaseEarlierLoad = CompletableDeferred<Unit>()
+        val earlierLoad = launch {
+            releaseEarlierLoad.await()
+            inbox.value = inbox.value.copy(form = form.copy(id = "earlier"), busy = false, openingForms = 0)
+        }
+        val opened = mutableListOf<String>()
+        val selected = async {
+            loadResponseWhenReady(RequestTarget(form.id, RequestKind.Form), session, inbox,
+                { error("Wrong request kind") }, { id ->
+                    opened.add(id)
+                    inbox.value = inbox.value.copy(form = form)
+                    true
+                })
+        }
+        try {
+            yield()
+            assertFalse(selected.isCompleted)
+            assertTrue(opened.isEmpty())
+            releaseEarlierLoad.complete(Unit)
+            assertTrue(withTimeout(1000) { selected.await() })
+            assertEquals(listOf(form.id), opened)
+            assertEquals(form.id, inbox.value.form?.id)
+        } finally { earlierLoad.cancelAndJoin(); selected.cancelAndJoin() }
+    }
+    @Test fun retainedSmsWaitsForAnEarlierSmsLoadButNotBackgroundRefresh() = runBlocking {
+        val request = PhoneRequest("selected", "cancelled", "Assistant", "Sign in", null, Long.MAX_VALUE, null, null)
+        val session = MutableStateFlow(RelayUiState(configured = true, signedIn = true, registered = true,
+            request = request, busy = true, opening = true))
+        val inbox = MutableStateFlow(InboxState())
+        val opened = mutableListOf<String>()
+        val selected = async {
+            loadResponseWhenReady(RequestTarget(request.id, RequestKind.Sms), session, inbox,
+                { id -> opened.add(id); true }, { error("Wrong request kind") })
+        }
+        try {
+            yield()
+            assertFalse(selected.isCompleted)
+            session.value = session.value.copy(opening = false)
+            assertTrue(withTimeout(1000) { selected.await() })
+            assertTrue(opened.isEmpty())
+            assertTrue(session.value.busy)
+        } finally { selected.cancelAndJoin() }
     }
 }

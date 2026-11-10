@@ -134,10 +134,6 @@ class ApprovalScreenTest {
         compose.onNodeWithText("Settings").performClick()
         compose.onNodeWithText("Connect an app or bot").performScrollTo().assertIsDisplayed()
         compose.onNodeWithText("Copy connection").assertDoesNotExist()
-        compose.mainClock.advanceTimeBy(500)
-        val preview = compose.onRoot().captureToImage().asAndroidBitmap()
-        File(InstrumentationRegistry.getInstrumentation().targetContext.cacheDir, "admin-preview.png")
-            .outputStream().use { preview.compress(Bitmap.CompressFormat.PNG, 100, it) }
         compose.onNodeWithText("Devices").performClick()
         compose.onNodeWithText("Samsung phone").performScrollTo().assertIsDisplayed()
         compose.onNodeWithText("This phone · Receives requests").assertIsDisplayed()

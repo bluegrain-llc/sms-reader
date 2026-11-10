@@ -41,6 +41,7 @@ data class RelayUiState(
     val devices: List<DeviceRow> = emptyList(), val connection: ConnectionReview? = null, val connectionCode: String? = null,
     val autoConnect: Boolean = true, val discoveredRequest: PhoneRequest? = null,
     val consentAvailable: Boolean = false, val now: Long = System.currentTimeMillis(), val foreground: Boolean = false,
+    val opening: Boolean = false,
 )
 class RelayViewModel(application: Application) : AndroidViewModel(application) {
     private val app = application as RelayApplication
@@ -55,7 +56,6 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
     private var consentLaunched = false
     private var boundId: String? = null
     private var poll: Job? = null
-    private var opening = false
     private var blocked = false
     private var recovered = false
     private val recoveryMutex = Mutex()
@@ -176,14 +176,13 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         mutable.update { it.copy(foreground = value) }
         if (!value) {
             if (consent != null) state.value.request?.id?.let { RelayNotifications.show(app, it, true) }
-        } else if (app.configured && repo.signedIn && !opening) refresh()
+        } else if (app.configured && repo.signedIn && !state.value.opening) refresh()
     }
     fun open(id: String) = viewModelScope.async {
-        while (state.value.busy || opening) delay(50)
+        while (state.value.busy || state.value.opening) delay(50)
         if (!RelayNotifications.validId.matches(id) || !app.configured || !repo.signedIn) return@async false
         if (state.value.request.blocksSmsOpen(boundId, id)) { error("Finish or cancel the current request first."); return@async false }
-        opening = true
-        mutable.update { it.copy(busy = true, error = null) }
+        mutable.update { it.copy(busy = true, opening = true, error = null) }
         var loaded = false
         try {
             recover()
@@ -205,7 +204,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         } catch (e: CancellationException) { throw e }
         catch (e: ApiFailure) { error(e.reason.replace('_', ' ')) }
         catch (_: Exception) { error("Could not open this request. Check your network and retry.") }
-        finally { opening = false; mutable.update { it.copy(busy = false) } }
+        finally { mutable.update { it.copy(busy = false, opening = false) } }
         loaded
     }
     private suspend fun startListener(r: PhoneRequest) {

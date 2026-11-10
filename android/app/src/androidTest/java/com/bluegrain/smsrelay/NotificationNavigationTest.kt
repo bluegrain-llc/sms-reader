@@ -161,7 +161,7 @@ class NotificationNavigationTest {
                 @Suppress("UNCHECKED_CAST")
                 val state = RelayViewModel::class.java.getDeclaredField("mutable").apply { isAccessible = true }
                     .get(vm) as kotlinx.coroutines.flow.MutableStateFlow<RelayUiState>
-                state.value = state.value.copy(configured = true, signedIn = true, registered = true)
+                state.value = state.value.copy(configured = true, signedIn = true, registered = true, busy = true)
                 val inbox = androidx.lifecycle.ViewModelProvider(activity)[InboxViewModel::class.java]
                 original = inbox
                 inbox.showLoaded(form); inbox.change("note", "In-memory draft")
@@ -252,6 +252,7 @@ class NotificationNavigationTest {
                         val state = RelayViewModel::class.java.getDeclaredField("mutable").apply { isAccessible = true }
                             .get(vm) as kotlinx.coroutines.flow.MutableStateFlow<RelayUiState>
                         state.value = state.value.copy(configured = true, signedIn = true, registered = true,
+                            busy = true,
                             request = PhoneRequest(id, status, "Demo assistant", "Sign in", null, Long.MAX_VALUE, null,
                                 if (status == "completed") "handled_on_another_device" else null))
                         if (origin == RequestOrigin.Inbox) MainActivity::class.java
