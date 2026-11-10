@@ -827,3 +827,13 @@ integration('legacy deletion attempts migrate atomically, resume identity retrie
   assert.equal((await db.collection('deletionAttempts').get()).size, 0);
   assert.deepEqual((await db.collection('accounts').doc('finished').get()).data(), { deleting: true });
 });
+
+
+integration('durable account tombstones release all obsolete maintenance queue fields', async () => {
+  await db.collection('accounts').doc(uid).set({ hasWork: true, queueIds: ['old'], activeRequestId: 'old', deletionTelemetryComplete: true });
+  await relay.deletions.request(uid);
+  const account = (await db.collection('accounts').doc(uid).get()).data()!;
+  assert.equal(account.deleting, true);
+  assert.deepEqual(account, { deleting: true });
+  assert.equal((await db.collection('accounts').where('hasWork', '==', true).get()).size, 0);
+});
