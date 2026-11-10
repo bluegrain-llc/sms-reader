@@ -1,3 +1,5 @@
+import { dueSmsQueries } from './delivery-queries.js';
+import { telemetry } from './telemetry.js';
 import { randomUUID } from 'node:crypto';
 import { Deletions } from './deletions.js';
 import { Access } from './access.js';
@@ -290,18 +292,21 @@ export class Relay {
       const g = (await tx.get(this.ref('grants', r.grantId))).data() as Grant | undefined;
       const valid = await this.validGrant(tx, g), a = await this.account(tx, r.ownerId), devices = await this.devices(tx, r.ownerId);
       this.expire(tx, r, a, valid, devices); if (!active(r.status)) return [];
-      r.phones = this.phones(r); const plans: { deviceId: string; token: string; lease: number; attempts: number; ttl: number }[] = [];
+      r.phones = this.phones(r); const plans: { deviceId: string; token: string; lease: number; attempts: number; ttl: number; createdAt: number }[] = [];
       for (const [deviceId, p] of Object.entries(r.phones)) {
         const d = devices.find(d => d.id === deviceId);
         if (!d || !active(p.status)) { p.sent = true; continue; }
         if (p.sent || p.lease > this.now() || p.nextAt > this.now()) continue;
         p.lease = this.now() + MINUTE; p.attempts++;
-        plans.push({ deviceId, token: d.fcmToken, lease: p.lease, attempts: p.attempts, ttl: r.expiresAt - this.now() });
+        plans.push({ deviceId, token: d.fcmToken, lease: p.lease, attempts: p.attempts, ttl: r.expiresAt - this.now(), createdAt: r.createdAt });
       }
       this.deliverySummary(r); tx.set(this.ref('requests', id), r); return plans;
     });
     await Promise.all(claimed.map(async claim => {
-      let sent = false; try { await this.notify(claim.token, id, claim.ttl); sent = true; } catch { /* payloads never logged */ }
+      let sent = false;
+      try { await this.notify(claim.token, id, claim.ttl); sent = true; }
+      catch (error) { telemetry.delivery('sms', claim.createdAt, 'failed', error); }
+      if (sent) telemetry.delivery('sms', claim.createdAt, 'accepted');
       await this.db.runTransaction(async tx => {
         const r = (await tx.get(this.ref('requests', id))).data() as CodeRequest | undefined;
         if (!r?.phones || !active(r.status)) return;
@@ -319,9 +324,8 @@ export class Relay {
   async maintenance() {
     const work = await this.db.collection('accounts').where('hasWork', '==', true).limit(250).get();
     for (const doc of work.docs) { if (!doc.data().deleting) await this.advance(doc.id); }
-    for (const status of ['pending_phone', 'ready', 'awaiting_consent']) {
-      const pending = await this.db.collection('requests').where('status', '==', status).where('notificationSent', '==', false)
-        .where('nextNotificationAt', '<=', this.now()).orderBy('nextNotificationAt').limit(250).get();
+    for (const query of dueSmsQueries(this.db, this.now())) {
+      const pending = await query.limit(250).get();
       for (let i = 0; i < pending.docs.length; i += 10) await Promise.all(pending.docs.slice(i, i + 10).map(doc => this.deliver(doc.id)));
     }
     for (const collection of ['results', 'requests', 'audit', 'connections', 'connectionCodes', 'connectionRates']) {

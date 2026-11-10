@@ -42,3 +42,5 @@ SSE admission permits two streams per caller and four per owner, using transacti
 Automated integration tests cover tombstone timing, lost-lease recovery, bounded batches, transient identity failures, already-deleted identities, receipt hashing/expiry, cross-instance quotas, stream admission/release, stale owner sessions and browser origins. They use Firestore/Auth emulators and synthetic credentials.
 
 Live Cloud Tasks/IAM/Scheduler recovery, web Google popup sign-in, physical Android reauthentication, and verified public operator disclosures remain release gates until recorded against a deployed release. Automated fixture results do not establish those live outcomes.
+
+Temporary legacy `deletionAttempts` markers include their server-only owner ID. Each worker invocation adopts at most 100 markers into durable jobs, clears account queue fields, and removes the legacy marker in one transaction. Markers whose legacy completion flag proves record and identity cleanup already succeeded are cleared without another job. Monitoring continues sampling both queues during the transition.

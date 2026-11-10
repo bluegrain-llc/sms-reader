@@ -30,6 +30,8 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: npm run test:unit
+      - name: Monitoring configuration tests
+        run: python3 -m unittest discover -s scripts/monitoring -p 'test_*.py'
       - run: python3 -m unittest discover -s scripts/tests -p 'test_release*.py'
       - run: python3 -m unittest discover -s scripts/tests -p 'test_deploy.py'
       - run: npm audit --omit=dev

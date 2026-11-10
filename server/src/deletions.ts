@@ -12,14 +12,34 @@ export interface DeletionJob {
 /** The account tombstone survives cleanup. Receipts authorize status only, never account access. */
 export class Deletions {
   constructor(readonly db: Firestore, readonly now: () => number, readonly wake: () => Promise<void>) {}
+  private initialJob(uid: string): DeletionJob {
+    return { ownerId: uid, status: 'pending', createdAt: this.now(), updatedAt: this.now(), nextAt: this.now(), lease: null,
+      leaseUntil: 0, collectionIndex: 0, attempts: 0, purgeAt: null };
+  }
+  /** Adopt interrupted pre-worker deletions before sampling or executing the durable queue. */
+  async migrateLegacy() {
+    const attempts = await this.db.collection('deletionAttempts').orderBy('nextAt').limit(100).get();
+    for (const attempt of attempts.docs) await this.db.runTransaction(async tx => {
+      const current = await tx.get(attempt.ref);
+      if (!current.exists) return;
+      const uid: unknown = current.data()?.ownerId;
+      ensure(typeof uid === 'string' && uid.length > 0 && hash(uid) === attempt.id, 500, 'invalid_legacy_deletion');
+      const account = this.db.collection('accounts').doc(uid), job = this.db.collection('deletionJobs').doc(attempt.id);
+      const [owner, existing] = await Promise.all([tx.get(account), tx.get(job)]);
+      // Legacy completion was committed only after both record and identity cleanup succeeded.
+      if (!owner.data()?.deletionTelemetryComplete && !existing.exists) tx.create(job, this.initialJob(uid));
+      tx.set(account, { deleting: true });
+      tx.delete(attempt.ref);
+    });
+  }
   async request(uid: string) {
     const receipt = `smsd_${randomBytes(32).toString('base64url')}`, jobId = hash(uid), expiresAt = this.now() + DAY;
     const ref = this.db.collection('deletionJobs').doc(jobId);
     const status = await this.db.runTransaction(async tx => {
       const old = (await tx.get(ref)).data() as DeletionJob | undefined;
       tx.set(this.db.collection('accounts').doc(uid), { deleting: true });
-      if (!old) tx.create(ref, { ownerId: uid, status: 'pending', createdAt: this.now(), updatedAt: this.now(), nextAt: this.now(), lease: null,
-        leaseUntil: 0, collectionIndex: 0, attempts: 0, purgeAt: null } satisfies DeletionJob);
+      if (!old) tx.create(ref, this.initialJob(uid));
+      tx.delete(this.db.collection('deletionAttempts').doc(jobId));
       tx.create(this.db.collection('deletionReceipts').doc(hash(receipt)), { jobId, expiresAt, purgeAt: new Date(expiresAt) });
       return old?.status ?? 'pending';
     });
@@ -78,6 +98,7 @@ export class Deletions {
   }
   async dispatch(deleteIdentity: (uid: string) => Promise<void>) {
     const deadline = Date.now() + 40_000;
+    await this.migrateLegacy();
     // Fair rounds let multiple owners make progress; wall-clock budget fits the HTTP deadline.
     for (let round = 0; round < 40 && Date.now() < deadline; round++) {
       const jobs = await this.db.collection('deletionJobs').where('nextAt', '<=', this.now()).orderBy('nextAt').limit(10).get();

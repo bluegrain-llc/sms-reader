@@ -1,3 +1,4 @@
+import { Telemetry } from '../src/telemetry.js';
 import { after, before, beforeEach, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { initializeApp, deleteApp } from 'firebase-admin/app';
@@ -13,7 +14,7 @@ import type { Server } from 'node:http';
 const enabled = !!process.env.FIRESTORE_EMULATOR_HOST && !!process.env.FIREBASE_AUTH_EMULATOR_HOST;
 if (!enabled) throw new Error('Integration tests require Firestore and Auth emulators. Run npm run test:integration from the repository root.');
 const integration = test;
-const collections = ['deletionJobs', 'deletionReceipts', 'accessRates', 'streamLimits', 'devices', 'grants', 'managers', 'managerCallers', 'connections', 'connectionCodes', 'connectionRates', 'requests', 'results', 'audit', 'accounts', 'formRequests', 'formResults', 'requestEvents', 'deliveryOutbox'];
+const collections = ['deletionAttempts', 'deletionJobs', 'deletionReceipts', 'accessRates', 'streamLimits', 'devices', 'grants', 'managers', 'managerCallers', 'connections', 'connectionCodes', 'connectionRates', 'requests', 'results', 'audit', 'accounts', 'formRequests', 'formResults', 'requestEvents', 'deliveryOutbox'];
 let firebase: ReturnType<typeof initializeApp>, db: ReturnType<typeof getFirestore>, relay: Relay;
 let time: number, sends: string[], token: string, grantId: string;
 const uid = 'owner', did = 'installation', second = 'second-phone';
@@ -776,4 +777,53 @@ integration('token refresh preserves paused devices and cannot revive unregister
   assert.equal((await db.collection('devices').doc(did).get()).data()?.paused, true);
   await relay.changeDevice(uid, did, true, true);
   await assert.rejects(relay.register(uid, did, 'Renamed phone', 'new-fcm'), reason('installation_id_unavailable'));
+});
+
+integration('monitoring samples real due queues and timestamp expiries without emitting document data', { timeout: 30_000 }, async () => {
+  await db.collection('requests').doc('sample-a').set({ status: 'pending_phone', notificationSent: false, nextNotificationAt: time - 200_000, purpose: 'private-code' });
+  await db.collection('requests').doc('sample-b').set({ status: 'ready', notificationSent: false, nextNotificationAt: time - 300_000 });
+  await db.collection('requests').doc('not-due').set({ status: 'pending_phone', notificationSent: false, nextNotificationAt: time + 1 });
+  await db.collection('deliveryOutbox').doc('sample').set({ nextAt: time - 181_000, secret: 'private-token' });
+  await db.collection('results').doc('sample').set({ purgeAt: new Date(time - 301_000), code: 'private-answer' });
+  await db.collection('formResults').doc('sample').set({ purgeAt: new Date(time - 2_000), values: { field: 'private-answer' } });
+  await db.collection('deletionJobs').doc('sample').set({ nextAt: time - 400_000, ownerId: 'private-owner' });
+  await db.collection('deletionJobs').doc('complete').set({ nextAt: Number.MAX_SAFE_INTEGER });
+  const entries: unknown[] = [];
+  await new Telemetry(entry => entries.push(entry), () => time).backlogs(db);
+  const samples = entries as { kind: string; count: number; oldest_due_age_s: number }[];
+  assert.equal(samples.length, 6);
+  assert.deepEqual(Object.fromEntries(samples.map(s => [s.kind, [s.count, s.oldest_due_age_s]])), {
+    sms: [2, 300], form: [1, 181], results: [1, 301], form_results: [1, 2], deletion: [1, 400], legacy_deletion: [0, 0],
+  });
+  assert.ok(!JSON.stringify(samples).includes('private'));
+});
+
+
+
+integration('legacy deletion attempts migrate atomically, resume identity retries and leave truthful backlog metrics', { timeout: 60000 }, async () => {
+  await db.collection('accounts').doc(uid).set({ hasWork: true, activeRequestId: 'old', queueIds: ['old'] });
+  const attempt = db.collection('deletionAttempts').doc(hash(uid));
+  await attempt.set({ ownerId: uid, nextAt: time - MINUTE });
+  await relay.deletions.migrateLegacy();
+  assert.equal((await attempt.get()).exists, false);
+  assert.deepEqual((await db.collection('accounts').doc(uid).get()).data(), { deleting: true });
+  let fail = true;
+  await relay.deletions.dispatch(async () => { if (fail) throw Error('identity unavailable'); });
+  let rows: { kind?: string; count?: number }[] = [];
+  await new Telemetry(row => rows.push(row), () => time + MINUTE).backlogs(db);
+  assert.equal(rows.find(row => row.kind === 'legacy_deletion')?.count, 0);
+  assert.equal(rows.find(row => row.kind === 'deletion')?.count, 1);
+  fail = false; time += MINUTE;
+  await relay.deletions.dispatch(async () => {});
+  rows = [];
+  await new Telemetry(row => rows.push(row), () => time).backlogs(db);
+  assert.equal(rows.find(row => row.kind === 'deletion')?.count, 0);
+  assert.equal((await db.collection('deletionJobs').doc(hash(uid)).get()).data()?.status, 'completed');
+  // A legacy completed marker must not create another job or retain stale queue fields.
+  await db.collection('accounts').doc('finished').set({ deleting: true, hasWork: true, deletionTelemetryComplete: true });
+  await db.collection('deletionAttempts').doc(hash('finished')).set({ ownerId: 'finished', nextAt: time });
+  await relay.deletions.migrateLegacy();
+  assert.equal((await db.collection('deletionJobs').doc(hash('finished')).get()).exists, false);
+  assert.equal((await db.collection('deletionAttempts').get()).size, 0);
+  assert.deepEqual((await db.collection('accounts').doc('finished').get()).data(), { deleting: true });
 });

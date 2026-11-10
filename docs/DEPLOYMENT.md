@@ -56,4 +56,4 @@ Use JDK 17+ (JDK 21 in CI), SDK 36 and the pinned Gradle wrapper. `scripts/build
 
 The backend accepts `ANDROID_SIGNING_SHA256S` as a JSON array and continues to accept legacy `ANDROID_SIGNING_SHA256`. Asset Links contains the deduplicated union; malformed fingerprints fail closed. Do not drop an active certificate until its installed clients have migrated.
 
-Do not enable request/header/body capture. Monitor maintenance, delivery age, provider failures and overdue result deletion. API expiry is independent of asynchronous TTL cleanup. Signed release and cloud smoke evidence do not replace physical-phone consent, denial, lifecycle or multi-phone acceptance in [PILOT.md](PILOT.md).
+Do not enable request/header/body capture. Use [production monitoring, alert provisioning and incident runbooks](OPERATIONS.md) for maintenance, delivery age, provider failures and overdue result deletion. API expiry is independent of asynchronous TTL cleanup. Signed release and cloud smoke evidence do not replace physical-phone consent, denial, lifecycle or multi-phone acceptance in [PILOT.md](PILOT.md).
