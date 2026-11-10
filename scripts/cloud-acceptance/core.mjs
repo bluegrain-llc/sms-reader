@@ -1,11 +1,18 @@
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import { readFile, stat, writeFile } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
+import { isDeepStrictEqual, promisify } from 'node:util';
 
 const execute = promisify(execFile);
 export const scenarios = ['infrastructure', 'device-setup', 'pairing', 'sms-api', 'forms-wizard', 'events-replay', 'webhook-tls-retry', 'webhook-timeout', 'enqueue-recovery', 'worker-recovery', 'duplicate-delivery', 'provider-outage', 'storage-outage', 'deletion'];
 export function requireThat(condition, code) { if (!condition) throw new Error(code); }
+export function runInterrupts(host = process) {
+  const controller = new AbortController();
+  const stop = () => controller.abort(new Error('acceptance_interrupted'));
+  host.on('SIGINT', stop); host.on('SIGTERM', stop);
+  return { signal: controller.signal, dispose() { host.removeListener('SIGINT', stop); host.removeListener('SIGTERM', stop); } };
+}
+const deadline = (timeoutMs, signal) => signal ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs);
 export function httpsOrigin(raw) {
   const url = new URL(raw);
   requireThat(url.protocol === 'https:' && !url.username && !url.password && !url.search && !url.hash && url.pathname === '/', 'invalid_service_origin');
@@ -59,7 +66,12 @@ export function callbackReceipts(mode, receipts) {
   const retry = receipts.find(r => r.attempt >= 2 && r.status === 204 && r.responseFinished === true);
   requireThat(first && retry && new Set(receipts.map(r => r.id)).size === 1, 'callback_retry_contract');
   if (mode === 'timeout-once') requireThat(first.status === 204 && first.clientClosedBeforeResponse === true, 'callback_timeout_not_observed');
-  else requireThat(first.status === 503, 'callback_rejection_not_observed');
+  else requireThat(first.status === 503 && first.responseFinished === true, 'callback_rejection_not_observed');
+}
+export function readyIndexes(actual, required) {
+  const fields = rows => rows.filter(field => field.fieldPath !== '__name__').map(({ fieldPath, order, arrayConfig }) => ({ fieldPath, ...(order ? { order } : {}), ...(arrayConfig ? { arrayConfig } : {}) }));
+  requireThat(actual.every(index => index.state === 'READY') && required.every(wanted => actual.some(index =>
+    index.name?.includes(`/collectionGroups/${wanted.collectionGroup}/indexes/`) && index.queryScope === wanted.queryScope && isDeepStrictEqual(fields(index.fields ?? []), fields(wanted.fields)))), 'indexes_not_ready');
 }
 export function activeTtl(fields, collection) {
   return fields.some(field => field.name?.endsWith(`/collectionGroups/${collection}/fields/purgeAt`) && field.ttlConfig?.state === 'ACTIVE');
@@ -67,9 +79,24 @@ export function activeTtl(fields, collection) {
 export function replayProgress(text, expected, cursor) {
   requireThat(expected.length > 0 && !expected.some(event => event.id === cursor), 'replay_suffix_required');
   const frames = text.split(/\r?\n\r?\n/); frames.pop();
-  const ids = frames.flatMap(frame => frame.split(/\r?\n/).filter(line => line.startsWith('id: ')).map(line => line.slice(4)));
-  requireThat(ids.every((id, index) => index < expected.length ? id === expected[index].id : id !== cursor && id > ids[index - 1]), 'sse_replay_order_mismatch');
-  return ids.length >= expected.length;
+  const events = [];
+  for (const frame of frames) {
+    const lines = frame.split(/\r?\n/);
+    const values = name => lines.filter(line => line.startsWith(`${name}:`)).map(line => line.slice(name.length + 1).replace(/^ /, ''));
+    const ids = values('id'), types = values('event'), data = values('data');
+    if (!ids.length && !types.length && !data.length) continue;
+    requireThat(ids.length === 1 && types.length === 1 && data.length > 0, 'invalid_sse_event');
+    let event; try { event = JSON.parse(data.join('\n')); } catch { throw new Error('invalid_sse_event'); }
+    requireThat(event.id === ids[0] && event.type === types[0], 'invalid_sse_event');
+    events.push(event);
+  }
+  requireThat(events.length <= expected.length && events.every((event, index) => isDeepStrictEqual(event, expected[index])), 'sse_replay_order_mismatch');
+  return events.length === expected.length;
+}
+export async function proveCancellation(requestId, cancel, inspect, events) {
+  const cancelled = await cancel();
+  requireThat(cancelled.requestId === requestId && cancelled.status === 'cancelled', 'mcp_cancel_failed');
+  requireThat((await inspect()).status === 'cancelled' && (await events()).some(event => event.requestId === requestId && event.type === 'request.cancelled'), 'mcp_cancellation_not_observed');
 }
 export async function settlePairings(userCodes, decide) {
   let complete = true;
@@ -82,12 +109,12 @@ export async function settlePairings(userCodes, decide) {
   return complete;
 }
 export async function stagingDocumentReader(cfg) {
-  const { stdout } = await execute('gcloud', ['auth', 'print-access-token', `--account=${cfg.account}`, `--project=${cfg.projectId}`, '--quiet'], { timeout: 30_000, maxBuffer: 64 * 1024 });
+  const { stdout } = await execute('gcloud', ['auth', 'print-access-token', `--account=${cfg.account}`, `--project=${cfg.projectId}`, '--quiet'], { timeout: 30_000, maxBuffer: 64 * 1024, signal: cfg.signal });
   const token = stdout.trim();
   return async (collection, id) => {
     requireThat(['results', 'deliveryOutbox'].includes(collection) && /^[a-f0-9]{64}$/.test(id), 'invalid_fixture_document');
     const endpoint = `https://firestore.googleapis.com/v1/projects/${cfg.projectId}/databases/(default)/documents/${collection}/${id}`;
-    const response = await fetch(endpoint, { headers: { authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(20_000), redirect: 'error' });
+    const response = await fetch(endpoint, { headers: { authorization: `Bearer ${token}` }, signal: deadline(20_000, cfg.signal), redirect: 'error' });
     if (response.status === 404) return null;
     requireThat(response.ok, 'fixture_read_failed'); return response.json();
   };
@@ -111,17 +138,17 @@ export async function checkedScenario(results, scenario, fn) {
 }
 export async function preserveExpiryFixture(cfg, requestId) {
   requireThat(/^[a-f0-9]{64}$/.test(requestId), 'invalid_fixture_id');
-  const { stdout } = await execute('gcloud', ['auth', 'print-access-token', `--account=${cfg.account}`, `--project=${cfg.projectId}`, '--quiet'], { timeout: 30_000, maxBuffer: 64 * 1024 });
+  const { stdout } = await execute('gcloud', ['auth', 'print-access-token', `--account=${cfg.account}`, `--project=${cfg.projectId}`, '--quiet'], { timeout: 30_000, maxBuffer: 64 * 1024, signal: cfg.signal });
   const endpoint = `https://firestore.googleapis.com/v1/projects/${cfg.projectId}/databases/(default)/documents/results/${requestId}`;
   const token = stdout.trim();
   const read = async () => {
-    const response = await fetch(endpoint, { headers: { authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(20_000), redirect: 'error' });
+    const response = await fetch(endpoint, { headers: { authorization: `Bearer ${token}` }, signal: deadline(20_000, cfg.signal), redirect: 'error' });
     requireThat(response.ok, 'expiry_fixture_missing'); return response.json();
   };
   const before = await read();
   expiryFixtureState(before, cfg, false);
   const purgeAt = new Date(Date.now() + 20 * 60_000).toISOString();
-  const response = await fetch(`${endpoint}?updateMask.fieldPaths=purgeAt`, { method: 'PATCH', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, signal: AbortSignal.timeout(20_000), redirect: 'error', body: JSON.stringify({ fields: { purgeAt: { timestampValue: purgeAt } } }) });
+  const response = await fetch(`${endpoint}?updateMask.fieldPaths=purgeAt`, { method: 'PATCH', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, signal: deadline(20_000, cfg.signal), redirect: 'error', body: JSON.stringify({ fields: { purgeAt: { timestampValue: purgeAt } } }) });
   requireThat(response.ok, 'expiry_fixture_ttl_extension_failed');
   return async () => {
     const result = await read();
@@ -137,7 +164,7 @@ export function ownerClaims(token, uid, project, now = Date.now()) {
   return claims;
 }
 export async function cloud(cfg, args) {
-  const { stdout } = await execute('gcloud', [...args, `--account=${cfg.account}`, `--project=${cfg.projectId}`, '--format=json', '--quiet'], { timeout: 60_000, maxBuffer: 4 * 1024 * 1024 });
+  const { stdout } = await execute('gcloud', [...args, `--account=${cfg.account}`, `--project=${cfg.projectId}`, '--format=json', '--quiet'], { timeout: 60_000, maxBuffer: 4 * 1024 * 1024, signal: cfg.signal });
   return JSON.parse(stdout);
 }
 export async function preflight(cfg, inspect = cloud) {
@@ -147,17 +174,27 @@ export async function preflight(cfg, inspect = cloud) {
   const service = await inspect(cfg, ['run', 'services', 'describe', cfg.service, `--region=${cfg.region}`]);
   requireThat(service.metadata?.labels?.environment === 'staging', 'staging_service_label_required');
   requireThat(service.status?.url === cfg.serviceUrl, 'service_origin_mismatch');
-  const env = service.spec?.template?.spec?.containers?.[0]?.env ?? [];
-  requireThat(env.find(v => v.name === 'GOOGLE_CLOUD_PROJECT')?.value === cfg.projectId, 'runtime_project_mismatch');
-  requireThat(env.find(v => v.name === 'SECURITY_LEDGER_BUCKET')?.value === cfg.securityLedgerBucket, 'staging_ledger_mismatch');
-  requireThat(!env.some(v => /EMULATOR_HOST/.test(v.name)), 'deployed_emulators_forbidden');
   const active = service.status.traffic?.find(t => t.percent === 100);
-  requireThat(active?.revisionName, 'single_active_revision_required');
-  if (cfg.replayUrl) requireThat(service.status.traffic.some(t => t.url === cfg.replayUrl && t.revisionName !== active.revisionName), 'distinct_tagged_revision_required');
+  requireThat(active?.revisionName && service.status.traffic.filter(t => t.percent > 0).length === 1, 'single_active_revision_required');
+  const checkRevision = async (name, ledger = true) => {
+    const revision = await inspect(cfg, ['run', 'revisions', 'describe', name, `--region=${cfg.region}`]);
+    requireThat(revision.metadata?.name === name, 'revision_mismatch');
+    const env = revision.spec?.containers?.[0]?.env ?? [];
+    requireThat(env.find(v => v.name === 'GOOGLE_CLOUD_PROJECT')?.value === cfg.projectId, 'runtime_project_mismatch');
+    if (ledger) requireThat(env.find(v => v.name === 'SECURITY_LEDGER_BUCKET')?.value === cfg.securityLedgerBucket, 'staging_ledger_mismatch');
+    requireThat(!env.some(v => /EMULATOR_HOST/.test(v.name)), 'deployed_emulators_forbidden');
+  };
+  await checkRevision(active.revisionName);
+  if (cfg.replayUrl) {
+    const replay = service.status.traffic.find(t => t.url === cfg.replayUrl && t.revisionName !== active.revisionName);
+    requireThat(replay, 'distinct_tagged_revision_required'); await checkRevision(replay.revisionName);
+  }
   if (cfg.callbackUrl) {
     const receiver = await inspect(cfg, ['run', 'services', 'describe', cfg.callbackService, `--region=${cfg.region}`]);
     requireThat(receiver.metadata?.labels?.environment === 'staging' && receiver.status?.url === cfg.callbackUrl, 'callback_staging_origin_mismatch');
-    requireThat(receiver.spec?.template?.spec?.containers?.[0]?.env?.find(v => v.name === 'GOOGLE_CLOUD_PROJECT')?.value === cfg.projectId, 'callback_project_mismatch');
+    const receiverTraffic = receiver.status?.traffic?.filter(t => t.percent > 0) ?? [];
+    requireThat(receiverTraffic.length === 1 && receiverTraffic[0].percent === 100 && receiverTraffic[0].revisionName, 'single_callback_revision_required');
+    await checkRevision(receiverTraffic[0].revisionName, false);
   }
   const billing = await inspect(cfg, ['billing', 'projects', 'describe', cfg.projectId]);
   requireThat(billing.billingEnabled === true, 'staging_billing_not_enabled');
@@ -174,15 +211,15 @@ export function eventMetadata(event) {
   requireThat(typeof event.id === 'string' && event.id.length <= 200 && /^[a-z][a-z.]+$/.test(event.type) && Number.isSafeInteger(event.sequence) && typeof event.requestId === 'string', 'invalid_callback_event');
   return { id: event.id, type: event.type, sequence: event.sequence, requestId: event.requestId };
 }
-export async function request(origin, path, token, body, method = body === undefined ? 'GET' : 'POST') {
-  const response = await fetch(`${origin}${path}`, { method, redirect: 'error', signal: AbortSignal.timeout(20_000), headers: { ...(token ? { authorization: `Bearer ${token}` } : {}), ...(body !== undefined ? { 'content-type': 'application/json' } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
+export async function request(origin, path, token, body, method = body === undefined ? 'GET' : 'POST', signal) {
+  const response = await fetch(`${origin}${path}`, { method, redirect: 'error', signal: deadline(20_000, signal), headers: { ...(token ? { authorization: `Bearer ${token}` } : {}), ...(body !== undefined ? { 'content-type': 'application/json' } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
   let value; try { value = await response.json(); } catch { value = null; }
   return { status: response.status, value };
 }
 export function report(results, context) {
   requireThat(results.every(r => scenarios.includes(r.scenario) && ['passed', 'failed', 'pending'].includes(r.status)), 'invalid_result');
   requireThat(new Set(results.map(r => r.scenario)).size === results.length, 'duplicate_result');
-  const complete = scenarios.every(name => results.some(r => r.scenario === name && r.status === 'passed'));
+  const complete = !context.interrupted && scenarios.every(name => results.some(r => r.scenario === name && r.status === 'passed'));
   return { schemaVersion: 1, ...context, complete, results };
 }
 export async function writeReport(path, result) { await writeFile(path, JSON.stringify(result, null, 2) + '\n', { mode: 0o600, flag: 'wx' }); }

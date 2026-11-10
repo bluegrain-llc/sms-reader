@@ -5,7 +5,9 @@ import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EventEmitter } from 'node:events';
-import { activeTtl, callbackOutcome, callbackReceipts, checkedScenario, clientDisconnectedBeforeResponse, config, eventMetadata, expiryFixtureState, fixtureCredentials, httpsOrigin, ownerClaims, preflight, privateValue, replayProgress, report, scenarios, settlePairings, verifySignature, winnerAgreement, writeReport } from './core.mjs';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { activeTtl, callbackOutcome, callbackReceipts, checkedScenario, clientDisconnectedBeforeResponse, config, eventMetadata, expiryFixtureState, fixtureCredentials, httpsOrigin, ownerClaims, preflight, privateValue, proveCancellation, readyIndexes, replayProgress, report, scenarios, settlePairings, verifySignature, winnerAgreement, writeReport } from './core.mjs';
 
 const base = { projectId: 'relay-staging-123', productionProjectId: 'relay-production-123', securityLedgerBucket: 'relay-staging-ledger', account: 'operator@example.com', region: 'us-central1', service: 'relay-service', serviceUrl: 'https://relay.run.app', ownerTokenFile: '/private/owner', disposableOwnerUid: 'disposable', fcmTokenFiles: ['/private/one', '/private/two'], budgetUsd: 10 };
 test('destructive staging guard rejects production, implicit account, unsafe URLs and missing budget', () => {
@@ -21,23 +23,27 @@ test('owner guard rejects another identity/project/provider and expiring tokens 
   for (const patch of [{ sub: 'production-owner' }, { aud: 'wrong-project' }, { iss: 'untrusted' }, { exp: now / 1000 + 29 }, { firebase: { sign_in_provider: 'custom' } }]) assert.throws(() => ownerClaims(token({ ...claims, ...patch }), 'disposable', base.projectId, now));
   assert.throws(() => ownerClaims('not-a-jwt', 'disposable', base.projectId, now));
 });
-test('cloud preflight verifies project labels, runtime project, billing and tagged replay origin', async () => {
+test('cloud preflight verifies actual active and tagged revisions rather than a candidate template', async () => {
   const cfg = config({ ...base, replayUrl: 'https://previous---relay.run.app' });
   const project = { projectId: cfg.projectId, lifecycleState: 'ACTIVE', labels: { environment: 'staging' } };
-  const service = { metadata: { labels: { environment: 'staging' } }, status: { url: cfg.serviceUrl, traffic: [{ revisionName: 'current', percent: 100 }, { revisionName: 'previous', url: cfg.replayUrl }] }, spec: { template: { spec: { containers: [{ env: [{ name: 'GOOGLE_CLOUD_PROJECT', value: cfg.projectId }, { name: 'SECURITY_LEDGER_BUCKET', value: cfg.securityLedgerBucket }] }] } } } };
-  const inspect = (p = project, s = service, b = { billingEnabled: true }) => async (_cfg, args) => structuredClone(args[0] === 'projects' ? p : args[0] === 'run' ? s : b);
+  const env = [{ name: 'GOOGLE_CLOUD_PROJECT', value: cfg.projectId }, { name: 'SECURITY_LEDGER_BUCKET', value: cfg.securityLedgerBucket }];
+  const service = { metadata: { labels: { environment: 'staging' } }, status: { url: cfg.serviceUrl, traffic: [{ revisionName: 'current', percent: 100 }, { revisionName: 'previous', url: cfg.replayUrl }] }, spec: { template: { spec: { containers: [{ env }] } } } };
+  const revisions = Object.fromEntries(['current', 'previous'].map(name => [name, { metadata: { name }, spec: { containers: [{ env: structuredClone(env) }] } }]));
+  const inspect = (p = project, s = service, r = revisions, billing = true) => async (_cfg, args) => structuredClone(args[0] === 'projects' ? p : args[0] === 'run' ? args[1] === 'revisions' ? r[args[3]] : s : { billingEnabled: billing });
   assert.deepEqual(await preflight(cfg, inspect()), { revision: 'current', projectId: cfg.projectId });
   await assert.rejects(preflight(cfg, inspect({ ...project, labels: {} })));
   await assert.rejects(preflight(cfg, inspect(project, { ...service, metadata: { labels: { environment: 'production' } } })));
   await assert.rejects(preflight(cfg, inspect(project, { ...service, status: { ...service.status, url: 'https://foreign.run.app' } })));
   await assert.rejects(preflight({ ...cfg, replayUrl: 'https://untrusted.run.app' }, inspect()));
-  await assert.rejects(preflight(cfg, inspect(project, service, { billingEnabled: false })));
-  const wrongRuntime = structuredClone(service); wrongRuntime.spec.template.spec.containers[0].env[0].value = 'production-project';
-  await assert.rejects(preflight(cfg, inspect(project, wrongRuntime)));
-  const wrongLedger = structuredClone(service); wrongLedger.spec.template.spec.containers[0].env[1].value = 'prod-ledger';
-  await assert.rejects(preflight(cfg, inspect(project, wrongLedger)), /staging_ledger_mismatch/);
-  const emulatorRuntime = structuredClone(service); emulatorRuntime.spec.template.spec.containers[0].env.push({ name: 'FIRESTORE_EMULATOR_HOST', value: 'localhost:8080' });
-  await assert.rejects(preflight(cfg, inspect(project, emulatorRuntime)));
+  await assert.rejects(preflight(cfg, inspect(project, service, revisions, false)));
+  for (const name of ['current', 'previous']) {
+    const wrongRuntime = structuredClone(revisions); wrongRuntime[name].spec.containers[0].env[0].value = 'production-project';
+    await assert.rejects(preflight(cfg, inspect(project, service, wrongRuntime)), /runtime_project_mismatch/);
+  }
+  const wrongLedger = structuredClone(revisions); wrongLedger.current.spec.containers[0].env[1].value = 'prod-ledger';
+  await assert.rejects(preflight(cfg, inspect(project, service, wrongLedger)), /staging_ledger_mismatch/);
+  const emulator = structuredClone(revisions); emulator.current.spec.containers[0].env.push({ name: 'FIRESTORE_EMULATOR_HOST', value: 'localhost:8080' });
+  await assert.rejects(preflight(cfg, inspect(project, service, emulator)));
 });
 test('callback verification binds exact body and timestamp and refuses stale or malformed signatures', () => {
   const secret = 'private-test-secret', now = 1800000000000, timestamp = String(now / 1000), body = '{"id":"event"}';
@@ -64,6 +70,8 @@ test('timeout evidence requires an observed client abort, not delayed rejection 
   assert.throws(() => callbackReceipts('timeout-once', [first]));
   assert.throws(() => callbackReceipts('timeout-once', [first, { ...retry, responseFinished: undefined }]));
   assert.throws(() => callbackReceipts('timeout-once', [first, { ...retry, responseFinished: false }]));
+  callbackReceipts('fail-once', [{ ...first, status: 503, responseFinished: true }, retry]);
+  for (const responseFinished of [false, undefined]) assert.throws(() => callbackReceipts('fail-once', [{ ...first, status: 503, responseFinished }, retry]), /callback_rejection_not_observed/);
   const closed = new EventEmitter(); closed.writableFinished = false;
   const observed = clientDisconnectedBeforeResponse(closed, 1000); closed.emit('close');
   assert.equal(await observed, true); assert.equal(closed.listenerCount('close'), 0);
@@ -131,7 +139,7 @@ test('all fixture credentials fail validation before callers can begin setup mut
     let mutationStarted = false;
     await assert.rejects(async () => { await fixtureCredentials(cfg); mutationStarted = true; });
     assert.equal(mutationStarted, false);
-    await writeFile(second, 'second-token', { mode: 0o644 });
+    await writeFile(second, 'second-token', { mode: 0o600 }); await chmod(second, 0o644);
     await assert.rejects(fixtureCredentials(cfg));
     await chmod(second, 0o600);
     const withCallback = { ...cfg, callbackUrl: 'https://receiver.run.app', callbackAdminTokenFile: admin };
@@ -148,13 +156,17 @@ test('all fixture credentials fail validation before callers can begin setup mut
     await assert.rejects(fixtureCredentials({ ...cfg, fcmTokenFiles: [first, first] }), /distinct_fcm_tokens_required/);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
-test('replay evidence rejects ignored cursors, duplicates and reordered suffixes', () => {
-  const frame = id => `id: ${id}\nevent: request.created\ndata: {}\n\n`;
-  const expected = [{ id: 'grant_0002' }, { id: 'grant_0003' }], cursor = 'grant_0001';
+test('replay evidence requires ordered event types and complete matching JSON metadata', () => {
+  const event = id => ({ id, type: 'request.created', requestId: 'request', sequence: Number(id.slice(-4)) });
+  const frame = id => `id: ${id}\nevent: request.created\ndata: ${JSON.stringify(event(id))}\n\n`;
+  const expected = [event('grant_0002'), event('grant_0003')], cursor = 'grant_0001';
   assert.equal(replayProgress(frame(expected[0].id), expected, cursor), false);
   assert.equal(replayProgress(expected.map(e => frame(e.id)).join(''), expected, cursor), true);
   for (const ids of [[cursor, ...expected.map(e => e.id)], ['grant_0002', 'grant_0002', 'grant_0003'], ['grant_0003', 'grant_0002']]) {
     assert.throws(() => replayProgress(ids.map(frame).join(''), expected, cursor), /sse_replay_order_mismatch/);
+  }
+  for (const invalid of [`id: grant_0002\n\n`, frame('grant_0002').replace('request.created', 'request.cancelled'), frame('grant_0002').replace(JSON.stringify(expected[0]), '{}'), frame('grant_0002').replace(JSON.stringify(expected[0]), '{bad')]) {
+    assert.throws(() => replayProgress(invalid, expected, cursor));
   }
   assert.throws(() => replayProgress('', [], cursor), /replay_suffix_required/);
 });
@@ -176,4 +188,30 @@ test('cleanup assigns known pending pairings to the disposable owner before dele
   const attempted = [];
   assert.equal(await settlePairings(['failed', 'later'], async code => { attempted.push(code); throw new Error('unavailable'); }), false);
   assert.deepEqual(attempted, ['failed', 'later']);
+});
+test('infrastructure requires every configured composite index, including field order', () => {
+  const required = [{ collectionGroup: 'requests', queryScope: 'COLLECTION', fields: [{ fieldPath: 'ownerId', order: 'ASCENDING' }, { fieldPath: 'createdAt', order: 'DESCENDING' }] }];
+  const actual = [{ name: 'projects/p/databases/(default)/collectionGroups/requests/indexes/one', state: 'READY', queryScope: 'COLLECTION', fields: [...required[0].fields, { fieldPath: '__name__', order: 'DESCENDING' }] }];
+  readyIndexes(actual, required);
+  assert.throws(() => readyIndexes([], required));
+  assert.throws(() => readyIndexes([{ ...actual[0], fields: [...required[0].fields].reverse() }], required));
+  assert.throws(() => readyIndexes([{ ...actual[0], queryScope: 'COLLECTION_GROUP' }], required));
+  assert.throws(() => readyIndexes([{ ...actual[0], state: 'CREATING' }], required));
+});
+test('MCP cancellation proof rejects a successful no-op and requires persisted cancellation event', async () => {
+  const cancelled = { requestId: 'fixture', status: 'cancelled' };
+  const events = async () => [{ requestId: 'fixture', type: 'request.cancelled' }];
+  await proveCancellation('fixture', async () => cancelled, async () => cancelled, events);
+  await assert.rejects(proveCancellation('fixture', async () => ({ ...cancelled, status: 'pending' }), async () => cancelled, events));
+  await assert.rejects(proveCancellation('fixture', async () => cancelled, async () => ({ status: 'pending' }), events));
+  await assert.rejects(proveCancellation('fixture', async () => cancelled, async () => cancelled, async () => []));
+});
+test('native SIGINT and SIGTERM abort an in-flight wait through cleanup before exit', async () => {
+  const core = new URL('./core.mjs', import.meta.url).href;
+  const script = `import { runInterrupts } from ${JSON.stringify(core)}; import { setTimeout } from 'node:timers/promises'; const run = runInterrupts(); let cleaned = false; try { process.kill(process.pid, process.argv[1]); await setTimeout(121000, undefined, {signal:run.signal}); } catch { if (!run.signal.aborted) throw Error('not interrupted'); } finally { cleaned = true; console.log(JSON.stringify({cleaned,interrupted:run.signal.aborted})); run.dispose(); }`;
+  for (const signal of ['SIGINT', 'SIGTERM']) {
+    const { stdout } = await promisify(execFile)(process.execPath, ['--input-type=module', '-e', script, signal], { timeout: 5000 });
+    assert.deepEqual(JSON.parse(stdout), { cleaned: true, interrupted: true });
+  }
+  assert.equal(report(scenarios.map(scenario => ({ scenario, status: 'passed' })), { interrupted: true }).complete, false);
 });

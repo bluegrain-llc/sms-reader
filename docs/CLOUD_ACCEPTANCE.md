@@ -27,7 +27,9 @@ identity with no personal records. No production project is accepted.
    `schedulerEmail`, and `deliveryQueue`. The service must have one named
    100%-traffic revision and a zero-traffic tag targeting another compatible
    revision for replay. Set `replayUrl` to that tag's URL. The runner checks this
-   association before forwarding caller credentials.
+   association and reads the actual active/tagged revision environments before
+   forwarding caller credentials; a newer no-traffic template cannot satisfy
+   these guards for an older serving revision.
    Provision a separate staging security ledger using [the recovery runbook](recovery/README.md)
    and configure its bucket as `securityLedgerBucket`. The runtime's
    `SECURITY_LEDGER_BUCKET` must match it; the bucket name must contain `staging`
@@ -88,7 +90,7 @@ timestamp tolerance, event
 ID, and an allowlist excluding answers and owner/grant fields. Receipt counters
 are transactional and survive receiver cold starts.
 
-Two modes independently exercise a first-attempt 503 and an 11-second response
+Two modes independently exercise a completed first-attempt 503 and an 11-second response
 delay (longer than the relay's 10-second timeout). The timeout mode plans a 204,
 never a delayed rejection. It records whether the HTTP client disconnected before
 the response, and requires that observation plus a later same-event successful
@@ -119,7 +121,8 @@ synthetic manual SMS API submission and two-minute expiry with a retained result
 document, hidden wizard branch rejection, consistent winner identity across both
 competing responses, losing/winning retries without overwrites, exactly one
 terminal submission event, two FCM provider acceptances,
-cross-revision Last-Event-ID replay with the exact ordered expected suffix,
+cross-revision Last-Event-ID replay with the exact ordered event types and JSON
+metadata for the expected suffix,
 callback retries, and receipt-based account
 deletion. It never stores response values or callback secrets in evidence.
 
@@ -131,6 +134,10 @@ durable owner deletion with a recent token, then waits for
 the read-only receipt to report completion and verifies the old owner session is
 rejected. Failed cleanup is a failed run, requiring operator repair; do not discard
 that evidence or rerun with a different owner to hide leftover fixtures.
+SIGINT and SIGTERM abort active requests, cloud inspection and waits, then enter
+the same cleanup path and write interrupted evidence with a failed exit status.
+Cleanup keeps its own request deadlines after cancellation. SIGKILL, machine loss
+or an unavailable provider can still require operator repair.
 
 Output is a new mode-0600 JSON evidence file; an existing file is never overwritten.
 Standard output contains only scenario counts and cleanup status. Exit 0 requires
