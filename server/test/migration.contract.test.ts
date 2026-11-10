@@ -1,6 +1,7 @@
 import { before, beforeEach, after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
+import { request as httpRequest } from 'node:http';
 import { gzipSync, deflateSync, brotliCompressSync } from 'node:zlib';
 import { initializeApp, deleteApp } from 'firebase-admin/app';
 import { getFirestore, FieldValue, Timestamp } from 'firebase-admin/firestore';
@@ -152,6 +153,21 @@ test('HTTP errors, body bounds, auth ordering, headers and protocol negotiation 
         return { status: response.status, body: await response.text(), cache: response.headers.get('cache-control'), nosniff: response.headers.get('x-content-type-options') }; }));
       assert.deepEqual(results[1], results[0], `${item.method ?? 'GET'} ${item.path}`);
     }
+    for (const [charset, content, firstChunk] of [['utf-16', 'Ā', 16], ['utf-32', '𐀀', 32]] as const) {
+      const text = JSON.stringify({ purpose: content.repeat(100), idempotencyKey: `streaming-${charset}` });
+      const bytes = charset === 'utf-16' ? Buffer.from(text, 'utf16le') : utf32(text);
+      const results = await Promise.all(bases.map(base => new Promise<{ status: number; body: string }>((resolve, reject) => {
+        const req = httpRequest(base + '/v1/requests', { method: 'POST', headers: { 'content-type': `application/json; charset=${charset}`, authorization: `Bearer ${token}` } }, response => {
+          const chunks: Buffer[] = []; response.on('data', chunk => chunks.push(chunk));
+          response.on('end', () => resolve({ status: response.statusCode!, body: Buffer.concat(chunks).toString() }));
+          response.on('error', reject);
+        });
+        req.setTimeout(15_000, () => req.destroy(Error('chunked request timed out'))); req.on('error', reject);
+        // Separate HTTP chunks select the codec before competing later votes.
+        req.write(bytes.subarray(0, firstChunk)); req.end(bytes.subarray(firstChunk));
+      })));
+      assert.equal(results[0]!.status, 201); assert.deepEqual(results[1], results[0], charset);
+    }
     for (const version of ['2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05', '2024-10-07', '2099-01-01']) {
       const results = await Promise.all(bases.map(async base => { const response = await fetch(base + '/mcp', { method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream', authorization: `Bearer ${token}` },
         body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: version, capabilities: {}, clientInfo: { name: 'migration', version: '1' } } }), signal: AbortSignal.timeout(15_000) });
@@ -276,6 +292,9 @@ test('native Firebase verifier checks Google provider, disabled/deleted users an
   const revoked = await fetch(`${base}/projects/demo-sms-relay/accounts:update`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer owner' }, body: JSON.stringify({ localId, validSince: String(Math.floor(Date.now() / 1000) + 10) }), signal: AbortSignal.timeout(10_000) });
   assert.equal(revoked.status, 200);
   await assert.rejects(verify(idToken));
+  const restored = await fetch(`${base}/projects/demo-sms-relay/accounts:update`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer owner' }, body: JSON.stringify({ localId, validSince: '0' }), signal: AbortSignal.timeout(10_000) });
+  assert.equal(restored.status, 200);
+  assert.equal((await verify(idToken)).uid, localId);
   await auth.deleteUser(localId);
   await assert.rejects(verify(idToken));
 });

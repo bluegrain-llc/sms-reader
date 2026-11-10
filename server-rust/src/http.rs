@@ -140,13 +140,29 @@ async fn json_body(body: Body, headers: &HeaderMap) -> Result<Vec<u8>> {
         "br" => Box::pin(BrotliDecoder::new(reader)),
         _ => return Err(Error::External),
     };
-    let mut bytes = Vec::new();
-    reader
-        .take(256 * 1024 + 1)
-        .read_to_end(&mut bytes)
-        .await
-        .map_err(|_| Error::External)?;
-    ensure(bytes.len() <= 256 * 1024, 413, "payload_too_large")?;
+    let limit = 256 * 1024;
+    let mut reader = reader.take(limit + 1);
+    let mut bytes = Vec::with_capacity(limit as usize + 1);
+    let (mut utf16_sample, mut utf32_sample) = (None, None);
+    while bytes.len() <= limit as usize {
+        if reader
+            .read_buf(&mut bytes)
+            .await
+            .map_err(|_| Error::External)?
+            == 0
+        {
+            break;
+        }
+        // iconv locks automatic byte order at the first incoming chunk that
+        // reaches its minimum sample size, before later chunks can change it.
+        if bytes.len() >= 16 && utf16_sample.is_none() {
+            utf16_sample = Some(bytes.len());
+        }
+        if bytes.len() >= 32 && utf32_sample.is_none() {
+            utf32_sample = Some(bytes.len());
+        }
+    }
+    ensure(bytes.len() <= limit as usize, 413, "payload_too_large")?;
     let charset = header(headers, "content-type")
         .unwrap_or("")
         .split(';')
@@ -170,7 +186,9 @@ async fn json_body(body: Body, headers: &HeaderMap) -> Result<Vec<u8>> {
         "utf8" => String::from_utf8_lossy(bytes).into_owned(),
         "utf7" | "utf7imap" => utf7_json(bytes, charset == "utf7imap")?,
         "utf16" | "utf16le" | "utf16be" => {
-            let pairs = bytes.as_chunks::<2>().0;
+            let pairs = bytes[..utf16_sample.unwrap_or(bytes.len())]
+                .as_chunks::<2>()
+                .0;
             let be = charset == "utf16be"
                 || (charset == "utf16"
                     && if bytes.starts_with(&[0xfe, 0xff]) {
@@ -204,8 +222,9 @@ async fn json_body(body: Body, headers: &HeaderMap) -> Result<Vec<u8>> {
             crate::js_string::utf16_json(&units)?
         }
         "utf32" | "utf32le" | "utf32be" => {
+            let sample = &bytes[..utf32_sample.unwrap_or(bytes.len())];
             let score = |be: bool| {
-                bytes
+                sample
                     .as_chunks::<4>()
                     .0
                     .iter()
