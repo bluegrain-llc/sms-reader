@@ -722,3 +722,16 @@ integration('failed synchronous identity deletion remains visible until successf
     await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
   }
 });
+
+
+integration('deleted account tombstones release maintenance work while preserving completion metadata', async () => {
+  await db.collection('accounts').doc(uid).set({ hasWork: true, queueIds: ['old'], activeRequestId: 'old', deletionTelemetryComplete: true });
+  await relay.deleteAccount(uid);
+  const account = (await db.collection('accounts').doc(uid).get()).data()!;
+  assert.equal(account.deleting, true);
+  assert.equal(account.hasWork, false);
+  assert.deepEqual(account.queueIds, []);
+  assert.equal(account.activeRequestId, null);
+  assert.equal(account.deletionTelemetryComplete, true);
+  assert.equal((await db.collection('accounts').where('hasWork', '==', true).get()).size, 0);
+});

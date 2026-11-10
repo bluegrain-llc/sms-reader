@@ -111,7 +111,7 @@ export function app(relay: Relay, options: HttpOptions) {
     const started = await relay.db.runTransaction(async tx => {
       const [owner, existing] = await Promise.all([tx.get(account), tx.get(attempt)]);
       if (owner.data()?.deletionTelemetryComplete) return false;
-      if (!existing.exists) tx.set(attempt, { nextAt: Date.now() });
+      if (!existing.exists) tx.set(attempt, { ownerId: identity.uid, nextAt: Date.now() });
       return true;
     });
     if (!started) { res.json({ ok: true }); return; }

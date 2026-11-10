@@ -141,7 +141,7 @@ export class Relay {
     }
   }
   async deleteAccount(uid: string) {
-    await this.ref('accounts', uid).set({ deleting: true }, { merge: true });
+    await this.ref('accounts', uid).set({ deleting: true, hasWork: false, queueIds: [], activeRequestId: null }, { merge: true });
     for (const collection of ['devices', 'grants', 'managers', 'managerCallers', 'connections', 'connectionCodes', 'requests', 'results', 'audit', 'formRequests', 'formResults', 'requestEvents', 'deliveryOutbox']) await this.deleteQuery(this.db.collection(collection).where('ownerId', '==', uid));
   }
   async advance(uid: string) {
