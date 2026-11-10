@@ -97,7 +97,7 @@ def validate(record):
         raise ValueError('Invalid signing certificate')
     if not matches(r'[a-z][a-z0-9-]{4,28}[a-z0-9]', record['project']):
         raise ValueError('Invalid project ID')
-    if not matches(r'[a-z]+-[a-z]+[0-9]', record['region']):
+    if not matches(r'[a-z]+-[a-z]+[0-9]+', record['region']):
         raise ValueError('Invalid region')
     if not matches(r'[a-z][a-z0-9-]{0,61}[a-z0-9]', record['backendRevision']):
         raise ValueError('Invalid backend revision')

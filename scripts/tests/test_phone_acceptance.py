@@ -155,6 +155,24 @@ class PhoneAcceptanceTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 acceptance.validate(value)
 
+    def test_multi_digit_cloud_run_regions_round_trip_through_gate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            record = Path(directory) / 'record.json'
+            for region in ('us-central1', 'europe-west10', 'europe-west12'):
+                with self.subTest(region=region):
+                    value = self.pending(2)
+                    value['region'] = region
+                    value['cases'] = {case: self.passed() for case in acceptance.CASES}
+                    acceptance.save(record, value)
+                    with patch('sys.argv', ['phone-acceptance', 'summary', '--file', str(record), '--require-pass']), patch('builtins.print'):
+                        self.assertEqual(acceptance.main(), 0)
+                    self.assertEqual(json.loads(record.read_text())['region'], region)
+            for region in ('europe-west', 'europe-west10x', 'europe--west10', '../europe-west10'):
+                with self.subTest(region=region):
+                    value['region'] = region
+                    with self.assertRaises(ValueError):
+                        acceptance.validate(value)
+
     def test_emulator_refused_before_package_inspection(self):
         with patch.object(acceptance, 'run') as run:
             with self.assertRaises(ValueError):
