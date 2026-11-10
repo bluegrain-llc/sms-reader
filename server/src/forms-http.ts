@@ -34,12 +34,15 @@ export function mountForms(app: Express, forms: Forms, owner: (req: Request) => 
     let closed = res.destroyed, timer: ReturnType<typeof setTimeout> | undefined, resume: (() => void) | undefined;
     let deadlineTimer: ReturnType<typeof setTimeout> | undefined, destroyTimer: ReturnType<typeof setTimeout> | undefined;
     let release: Awaited<ReturnType<typeof forms.relay.access.stream>> | undefined;
+    let releasing = false;
     let feed: Awaited<ReturnType<EventStreams['subscribe']>> | undefined;
     const cancellation = new AbortController();
     const detach = () => {
       clearTimeout(timer); clearTimeout(deadlineTimer); resume?.();
       cancellation.abort(); feed?.stop();
-      if (release) void release().catch(() => {}); // Lease expiry recovers unavailable storage.
+      // Deadline and response close can both detach. Start the storage release
+      // once so completion observers join its actual transaction.
+      if (release && !releasing) { releasing = true; void release().catch(() => {}); } // Lease expiry recovers unavailable storage.
     };
     res.once('close', () => { closed = true; detach(); clearTimeout(destroyTimer); });
     const stop = () => {
