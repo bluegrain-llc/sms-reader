@@ -161,11 +161,10 @@ export function app(relay: Relay, options: HttpOptions) {
   });
   app.post('/mcp', async (req, res) => {
     const secret = bearer(req); await relay.checkAgent(secret);
-    for (const message of Array.isArray(req.body) ? req.body : [req.body]) {
-      if (message?.method === 'tools/call' && ['get_sms_code_request', 'inspect_request', 'get_request_result', 'poll_request_events'].includes(message?.params?.name)) await agentRead(req);
-    }
     // New stateless server per HTTP request; identity is never shared between clients.
     const server = new McpServer({ name: 'sms-code-relay', version: '0.6.0' });
+    const readTools = new Set<string>();
+    const readToolName = (name: string) => { readTools.add(name); return name; };
     const tool = (fn: () => Promise<unknown>) => fn().then(result => ({
       content: [{ type: 'text' as const, text: JSON.stringify(result) }], structuredContent: result as Record<string, unknown>,
     })).catch(error => {
@@ -176,17 +175,20 @@ export function app(relay: Relay, options: HttpOptions) {
       description: 'Notify the owner’s registered phones about an upcoming SMS, queuing behind another caller if needed. Wait for ready before triggering SMS in a separate system. First approved response wins. Never triggers SMS.',
       inputSchema: requestSchema.shape,
     }, input => tool(() => relay.create(secret, input)));
-    server.registerTool('get_sms_code_request', {
+    server.registerTool(readToolName('get_sms_code_request'), {
       description: 'Poll status. Code is available only after owner approval, for two minutes.', inputSchema: { requestId: idSchema },
     }, input => tool(() => relay.get(secret, input.requestId)));
     server.registerTool('cancel_sms_code_request', {
       description: 'Cancel this token’s request.', inputSchema: { requestId: idSchema },
     }, input => tool(() => relay.transition({ secret }, input.requestId, 'cancelled')));
     server.registerTool('create_request', { description: 'Create a form or multi-step wizard with optional conditional steps and one final submission. Requires owner approval for forms in Admin.', inputSchema: formSchema.shape }, input => tool(() => relay.forms.create(secret, input)));
-    server.registerTool('inspect_request', { description: 'Inspect your request without marking it opened.', inputSchema: { requestId: idSchema } }, input => tool(() => relay.forms.get({ secret }, input.requestId)));
+    server.registerTool(readToolName('inspect_request'), { description: 'Inspect your request without marking it opened.', inputSchema: { requestId: idSchema } }, input => tool(() => relay.forms.get({ secret }, input.requestId)));
     server.registerTool('cancel_request', { description: 'Cancel your pending request.', inputSchema: { requestId: idSchema } }, input => tool(() => relay.forms.cancel(secret, input.requestId)));
-    server.registerTool('get_request_result', { description: 'Retrieve accepted answers, retained for 24 hours.', inputSchema: { requestId: idSchema } }, input => tool(() => relay.forms.result(secret, input.requestId)));
-    server.registerTool('poll_request_events', { description: 'Poll durable events for your connection. Answers are retrieved separately.', inputSchema: { cursor: z.string().max(128).optional() } }, input => tool(() => relay.forms.events(secret, input.cursor)));
+    server.registerTool(readToolName('get_request_result'), { description: 'Retrieve accepted answers, retained for 24 hours.', inputSchema: { requestId: idSchema } }, input => tool(() => relay.forms.result(secret, input.requestId)));
+    server.registerTool(readToolName('poll_request_events'), { description: 'Poll durable events for your connection. Answers are retrieved separately.', inputSchema: { cursor: z.string().max(128).optional() } }, input => tool(() => relay.forms.events(secret, input.cursor)));
+    for (const message of Array.isArray(req.body) ? req.body : [req.body]) {
+      if (message?.method === 'tools/call' && readTools.has(message?.params?.name)) await agentRead(req);
+    }
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
     res.on('close', () => { void transport.close(); void server.close(); });
     await server.connect(transport); await transport.handleRequest(req, res, req.body);

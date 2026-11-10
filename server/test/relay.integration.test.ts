@@ -861,11 +861,15 @@ integration('HEAD and batched MCP reads consume shared owner and caller budgets'
     assert.equal((await head()).status, 200);
     const rejected = await head(); assert.equal(rejected.status, 429); assert.equal(rejected.headers.get('retry-after'), '60');
     await ownerKey.delete();
-    const batch = [{ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'poll_request_events', arguments: {} } },
-      { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'poll_request_events', arguments: {} } }];
+    const sms = await relay.create(token, input('mcp-read-budget'));
+    const form = await relay.forms.create(token, formInput('mcp-form-budget'));
+    const batch = [
+      ['get_sms_code_request', { requestId: sms.requestId }], ['inspect_request', { requestId: form.requestId }],
+      ['get_request_result', { requestId: form.requestId }], ['poll_request_events', {}],
+    ].map(([name, args], i) => ({ jsonrpc: '2.0', id: i + 1, method: 'tools/call', params: { name, arguments: args } }));
     const mcp = () => call('/mcp', { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', accept: 'application/json, text/event-stream' }, body: JSON.stringify(batch) });
     const accepted = await mcp(); assert.equal(accepted.status, 200); await accepted.text();
-    assert.equal((await callerKey.get()).data()?.count, 2);
+    assert.equal((await callerKey.get()).data()?.count, 4);
     await callerKey.set({ count: 119, purgeAt: new Date(time + 2 * MINUTE) });
     const callerLimited = await mcp(); assert.equal(callerLimited.status, 429); assert.equal(callerLimited.headers.get('retry-after'), '60');
     await callerKey.delete(); await ownerKey.set({ count: 600, purgeAt: new Date(time + 2 * MINUTE) });
