@@ -48,6 +48,7 @@ class RelayViewModel @JvmOverloads constructor(application: Application, private
     private val repo get() = app.repository
     private val mutable = MutableStateFlow(RelayUiState(configured = app.configured))
     val state = mutable.asStateFlow()
+    private val actions = UiActions(mutable, ::error)
     private val gate = ConsentGate()
     private var receiver: BroadcastReceiver? = null
     private var barrier = CompletableDeferred<Boolean>()
@@ -87,24 +88,20 @@ class RelayViewModel @JvmOverloads constructor(application: Application, private
     }
     fun dismissConnection() { mutable.update { it.copy(connection = null, connectionCode = null) } }
     private fun action(waitForIdle: Boolean = false, silent: Boolean = false, block: suspend () -> Unit) = viewModelScope.launch {
-        if (waitForIdle) while (state.value.busy) delay(50)
-        if (state.value.busy) return@launch
-        mutable.update { it.copy(busy = true, error = if (silent) it.error else null) }
-        try { block() } catch (e: CancellationException) { throw e }
-        catch (e: ApiFailure) { if (!silent) error(e.reason.replace('_', ' ')) }
-        catch (_: Exception) { if (!silent) error("Could not connect. Check your network and try again.") }
-        finally { mutable.update { it.copy(busy = false) } }
+        actions.run(waitForIdle, silent, block)
     }
-    fun signedIn(token: String, deleteAfter: Boolean = false, expectedOwner: String = "") = action {
-        check(!deleteAfter || (expectedOwner.isNotBlank() && repo.signedIn && repo.ownerId == expectedOwner)) { "Sign in to the account again before deleting." }
-        repo.signIn(token)
-        if (deleteAfter) {
-            repo.deleteAccount(); clearLocal()
-            mutable.update { RelayUiState(configured = app.configured, foreground = it.foreground, error = "Deletion accepted. Account access is blocked while cleanup continues.") }
-            return@action
+    fun signedIn(token: String, deleteAfter: Boolean = false, expectedOwner: String = "") = viewModelScope.launch {
+        actions.credentials {
+            check(!deleteAfter || (expectedOwner.isNotBlank() && repo.signedIn && repo.ownerId == expectedOwner)) { "Sign in to the account again before deleting." }
+            repo.signIn(token)
+            if (deleteAfter) {
+                repo.deleteAccount(); clearLocal()
+                mutable.update { RelayUiState(configured = app.configured, foreground = it.foreground, error = "Deletion accepted. Account access is blocked while cleanup continues.") }
+                return@credentials
+            }
+            mutable.update { it.copy(signedIn = true, email = repo.email) }
+            refreshData()
         }
-        mutable.update { it.copy(signedIn = true, email = repo.email) }
-        refreshData()
     }
     fun register() = action {
         check(RelayNotifications.enabled(app)) { "Notifications required" }
