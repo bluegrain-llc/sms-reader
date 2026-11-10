@@ -36,7 +36,8 @@ CLOUD_CHECKS = (
 REQUIRED_CI = {
     "Server unit tests and type check", "Firestore, Auth, REST and MCP integration tests",
     "Container build and HTTP smoke test", "Android unit tests, lint and build",
-    "Android emulator UI integration tests", "Play release gate unit tests",
+    "Android UI integration (API 26)", "Android UI integration (API 33)",
+    "Android UI integration (API 36)", "Play release gate unit tests",
     "Staging callback probe container",
 }
 

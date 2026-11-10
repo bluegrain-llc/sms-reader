@@ -275,6 +275,29 @@ class GateTest(unittest.TestCase):
             return output
         self.assertIn("required CI checks missing on candidate commit", self.check(run=run)["blockers"])
 
+    def test_every_android_api_variant_is_required_despite_legacy_ui_success(self):
+        for api in (26, 33, 36):
+            name = f"Android UI integration (API {api})"
+            for conclusion in (None, "skipped", "failure"):
+                with self.subTest(api=api, conclusion=conclusion):
+                    def run(args):
+                        output = self.tools(args)
+                        if args[:2] != ["gh", "api"]:
+                            return output
+                        checks = [json.loads(line) for line in output.splitlines()]
+                        if conclusion is None:
+                            checks = [check for check in checks if check["name"] != name]
+                        else:
+                            for check in checks:
+                                if check["name"] == name:
+                                    check["conclusion"] = conclusion
+                        checks.append({"id": 1000, "name": "Android emulator UI integration tests",
+                                       "status": "completed", "conclusion": "success"})
+                        return "\n".join(json.dumps(check) for check in checks)
+                    blockers = self.check(run=run)["blockers"]
+                    expected = "required CI checks missing on candidate commit" if conclusion is None else "candidate CI is not green"
+                    self.assertIn(expected, blockers)
+
     def test_url_200_with_pilot_or_unconfigured_page_does_not_pass(self):
         class Response:
             status = 200
