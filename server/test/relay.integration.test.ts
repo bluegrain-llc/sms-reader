@@ -1,3 +1,4 @@
+import { Telemetry } from '../src/telemetry.js';
 import { after, before, beforeEach, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { initializeApp, deleteApp } from 'firebase-admin/app';
@@ -13,7 +14,7 @@ import type { Server } from 'node:http';
 const enabled = !!process.env.FIRESTORE_EMULATOR_HOST && !!process.env.FIREBASE_AUTH_EMULATOR_HOST;
 if (!enabled) throw new Error('Integration tests require Firestore and Auth emulators. Run npm run test:integration from the repository root.');
 const integration = test;
-const collections = ['devices', 'grants', 'managers', 'managerCallers', 'connections', 'connectionCodes', 'connectionRates', 'requests', 'results', 'audit', 'accounts', 'formRequests', 'formResults', 'requestEvents', 'deliveryOutbox'];
+const collections = ['devices', 'grants', 'managers', 'managerCallers', 'connections', 'connectionCodes', 'connectionRates', 'requests', 'results', 'audit', 'accounts', 'formRequests', 'formResults', 'requestEvents', 'deliveryOutbox', 'deletionJobs', 'deletionAttempts'];
 let firebase: ReturnType<typeof initializeApp>, db: ReturnType<typeof getFirestore>, relay: Relay;
 let time: number, sends: string[], token: string, grantId: string;
 const uid = 'owner', did = 'installation', second = 'second-phone';
@@ -667,4 +668,70 @@ integration('wizard cancellation, expiry and connection isolation preserve one t
   await relay.forms.approve(uid, grantId, false);
   assert.equal((await relay.forms.get(phone, revoked.requestId)).status, 'cancelled');
   assert.equal((await db.collection('formResults').get()).size, 0);
+});
+
+
+integration('monitoring samples real due queues and timestamp expiries without emitting document data', { timeout: 30_000 }, async () => {
+  await db.collection('requests').doc('sample-a').set({ status: 'pending_phone', notificationSent: false, nextNotificationAt: time - 200_000, purpose: 'private-code' });
+  await db.collection('requests').doc('sample-b').set({ status: 'ready', notificationSent: false, nextNotificationAt: time - 300_000 });
+  await db.collection('requests').doc('not-due').set({ status: 'pending_phone', notificationSent: false, nextNotificationAt: time + 1 });
+  await db.collection('deliveryOutbox').doc('sample').set({ nextAt: time - 181_000, secret: 'private-token' });
+  await db.collection('results').doc('sample').set({ purgeAt: new Date(time - 301_000), code: 'private-answer' });
+  await db.collection('formResults').doc('sample').set({ purgeAt: new Date(time - 2_000), values: { field: 'private-answer' } });
+  await db.collection('deletionJobs').doc('sample').set({ nextAt: time - 400_000, ownerId: 'private-owner' });
+  await db.collection('deletionJobs').doc('complete').set({ nextAt: Number.MAX_SAFE_INTEGER });
+  const entries: unknown[] = [];
+  await new Telemetry(entry => entries.push(entry), () => time).backlogs(db);
+  const samples = entries as { kind: string; count: number; oldest_due_age_s: number }[];
+  assert.equal(samples.length, 6);
+  assert.deepEqual(Object.fromEntries(samples.map(s => [s.kind, [s.count, s.oldest_due_age_s]])), {
+    sms: [2, 300], form: [1, 181], results: [1, 301], form_results: [1, 2], deletion: [1, 400], legacy_deletion: [0, 0],
+  });
+  assert.ok(!JSON.stringify(samples).includes('private'));
+});
+
+integration('failed synchronous identity deletion remains visible until successful retry', { timeout: 30_000 }, async () => {
+  let failIdentity = true;
+  const server = app(relay, { verifyOwner: async () => ({ uid, authTime: Date.now() / 1000 }),
+    verifyScheduler: async () => {}, deleteIdentity: async () => { if (failIdentity) throw Error('auth unavailable'); } }).listen(0, '127.0.0.1');
+  try {
+    await new Promise<void>(resolve => server.once('listening', resolve));
+    const address = server.address(); assert.ok(address && typeof address !== 'string');
+    const response = await fetch(`http://127.0.0.1:${address.port}/v1/account`, { method: 'DELETE', headers: { Authorization: 'Bearer owner' }, signal: AbortSignal.timeout(10_000) });
+    assert.equal(response.status, 500); await response.text();
+    const attempt = await db.collection('deletionAttempts').doc(hash(uid)).get();
+    assert.ok(attempt.exists);
+    const rows: { kind?: string; count?: number }[] = [];
+    await new Telemetry(row => rows.push(row), () => Date.now() + 301_000).backlogs(db);
+    assert.equal(rows.find(row => row.kind === 'legacy_deletion')?.count, 1);
+    failIdentity = false;
+    const retried = await fetch(`http://127.0.0.1:${address.port}/v1/account`, { method: 'DELETE', headers: { Authorization: 'Bearer owner' }, signal: AbortSignal.timeout(10_000) });
+    assert.equal(retried.status, 200); await retried.text();
+    assert.equal((await attempt.ref.get()).exists, false);
+    rows.length = 0;
+    await new Telemetry(row => rows.push(row)).backlogs(db);
+    assert.equal(rows.find(row => row.kind === 'legacy_deletion')?.count, 0);
+    // A previously authenticated overlapping request must not recreate a completed marker.
+    failIdentity = true;
+    const repeated = await fetch(`http://127.0.0.1:${address.port}/v1/account`, { method: 'DELETE', headers: { Authorization: 'Bearer owner' }, signal: AbortSignal.timeout(10_000) });
+    assert.equal(repeated.status, 200); await repeated.text();
+    assert.equal((await attempt.ref.get()).exists, false);
+    assert.equal((await db.collection('accounts').doc(uid).get()).data()?.deletionTelemetryComplete, true);
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+  }
+});
+
+
+integration('deleted account tombstones release maintenance work while preserving completion metadata', async () => {
+  await db.collection('accounts').doc(uid).set({ hasWork: true, queueIds: ['old'], activeRequestId: 'old', deletionTelemetryComplete: true });
+  await relay.deleteAccount(uid);
+  const account = (await db.collection('accounts').doc(uid).get()).data()!;
+  assert.equal(account.deleting, true);
+  assert.equal(account.hasWork, false);
+  assert.deepEqual(account.queueIds, []);
+  assert.equal(account.activeRequestId, null);
+  assert.equal(account.deletionTelemetryComplete, true);
+  assert.equal((await db.collection('accounts').where('hasWork', '==', true).get()).size, 0);
 });
