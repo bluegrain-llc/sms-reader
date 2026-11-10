@@ -30,11 +30,11 @@ Local verification on 2026-11-10:
 | Check | Result |
 | --- | --- |
 | TypeScript compilation and unit tests | Passed; 33 unit tests |
-| Rust formatting, Clippy with warnings denied, unit tests | Passed; 46 tests |
-| Shared emulator scenarios | 59 scenarios per backend selection; TypeScript-specific method-injection tests are named explicitly |
-| Migration contracts | Both document directions, HTTP/MCP parity, durable deletion/read-limit/stream-lease handoff, raw JSON/clock lifecycle cases, UTF-16 edge cases, native worker telemetry and Firebase emulator checks; 13 additional native watch, identity, validation, telemetry and maintenance contracts passed |
+| Rust formatting, Clippy with warnings denied, unit tests | Passed; 54 tests |
+| Shared emulator scenarios | 59 scenarios for each backend selection, including seven explicitly named TypeScript-only watch, maintenance and injected-failure scenarios; native Rust contracts cover those boundaries separately |
+| Migration contracts | Both document directions, HTTP/MCP parity, durable deletion/read-limit/stream-lease handoff, raw JSON/clock lifecycle cases, UTF-16 edge cases, native worker telemetry and Firebase emulator checks; 20 additional native watch, HEAD transport, identity, validation, telemetry and maintenance contracts passed |
 | Dependency audits | npm production audit and Cargo audit passed |
-| Rust production container | CI builds the current image and runs the HTTP/auth smoke; runtime UID 10001 |
+| Rust production container definition | CI builds the image and runs the HTTP/auth smoke; configured runtime UID 10001; current run status is recorded by GitHub |
 | Deployment script | Shell syntax and Python deployment unit tests passed; cloud deployment not performed |
 
 Production cutover and the observation window are separate release gates; these local checks do not establish either.

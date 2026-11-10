@@ -13,7 +13,7 @@ The required jobs check:
 - Android unit tests, lint, debug APK and instrumentation APK builds.
 - Connected Compose UI tests on API 26, 33 and 36 Android emulators; each matrix job must pass. These cover approval, manual entry, automatic submission, cancellation, expiry and navigation. The separate opt-in `SmsInjectionTest` needs the telephony/Play-services runner in `scripts/test-sms-injection.py` and is not included in this UI suite.
 
-Each run retains Android test/lint reports, debug APKs and both tested relay container archives as private workflow artifacts. The Rust image is `relay-rust-container`, with `relay-rust-image.tar.gz` and its SHA-256 checksum; it carries the source commit revision label. Failed backend integration runs also retain emulator logs. Debug APKs have no production configuration and show the setup screen.
+Each run retains Android test/lint reports, debug APKs and both tested relay container archives as private workflow artifacts. The Rust image is `relay-rust-container`, with `relay-rust-image.tar.gz` and its SHA-256 checksum; it carries the workflow commit revision label (`GITHUB_SHA`). On pull requests this is the temporary merge commit; deployment uses the successful `main`-push artifact and its matching commit. Failed backend integration runs also retain emulator logs. Debug APKs have no production configuration and show the setup screen.
 
 The `staging-callback-probe-container` artifact retains the tested callback image
 for seven days. It is separate from the production relay image and is deployed
