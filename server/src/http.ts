@@ -10,6 +10,7 @@ import { codeSchema, ensure, idSchema, RelayError, requestSchema } from './model
 
 export interface Identity { uid: string; authTime: number }
 export interface HttpOptions {
+  assertServing?: () => void;
   verifyOwner: (token: string) => Promise<Identity>;
   verifyScheduler: (token: string) => Promise<void>;
   deleteIdentity: (uid: string) => Promise<void>;
@@ -34,6 +35,10 @@ export function app(relay: Relay, options: HttpOptions) {
   });
   app.use(express.json({ limit: '256kb', strict: true }));
   app.get(['/health', '/healthz'], (_req, res) => { res.json({ ok: true }); });
+  app.use((req, _res, next) => {
+    if (req.get('authorization') || (req.method === 'POST' && req.path === '/v1/connections')) options.assertServing?.();
+    next();
+  });
   const owner = async (req: Request) => {
     try { return await options.verifyOwner(bearer(req)); } catch { throw new RelayError(401, 'invalid_owner_session'); }
   };

@@ -667,3 +667,43 @@ integration('wizard cancellation, expiry and connection isolation preserve one t
   assert.equal((await relay.forms.get(phone, revoked.requestId)).status, 'cancelled');
   assert.equal((await db.collection('formResults').get()).size, 0);
 });
+
+integration('shared grant watches deliver event tails and close on account deletion', async () => {
+  const { EventStreams } = await import('../src/event-streams.js');
+  await relay.forms.approve(uid, grantId, true);
+  const streams = new EventStreams(relay.forms), changed: number[] = [], closed: number[] = [];
+  let a: Awaited<ReturnType<EventStreams['subscribe']>> | undefined, b: typeof a;
+  try {
+    a = await streams.subscribe(token, { changed: () => changed.push(1), closed: () => closed.push(1) });
+    b = await streams.subscribe(token, { changed: () => changed.push(2), closed: () => closed.push(2) });
+    assert.equal(streams.activeFeeds, 1);
+    const form = await relay.forms.create(token, { title:'Watch test',body:'Synthetic',fields:[],actions:[{id:'ack',label:'Acknowledge',type:'acknowledge'}],idempotencyKey:'shared-watch-test' });
+    const deadline = Date.now()+5000;
+    while (!a.tail(0).some(e=>e.requestId===form.requestId)) { assert.ok(Date.now()<deadline,'watch update bound'); await new Promise(r=>setTimeout(r,20)); }
+    assert.ok(changed.includes(2));
+    await relay.ref('accounts',uid).set({deleting:true},{merge:true});
+    while (closed.length<2) { assert.ok(Date.now()<deadline,'revocation close bound'); await new Promise(r=>setTimeout(r,20)); }
+    assert.equal(a.failed(),true); assert.equal(b.failed(),true);
+    a.stop();assert.equal(streams.activeFeeds,1);b.stop();assert.equal(streams.activeFeeds,0);
+  } finally { a?.stop();b?.stop(); }
+});
+integration('maintenance cursors move past poison records beyond page limits and wrap for retry', async () => {
+  const { MaintenancePages } = await import('../src/maintenance-pages.js');
+  const collection='capacityMaintenanceFixture', pages=new MaintenancePages(db), processed=new Set<string>();
+  try {
+    for(let offset=0;offset<501;offset+=200){const batch=db.batch();for(let i=offset;i<Math.min(501,offset+200);i++)batch.set(db.collection(collection).doc(String(i).padStart(4,'0')),{due:i});await batch.commit();}
+    const handle=async(id:string)=>{ if(id==='0000')throw Error('poison');processed.add(id); };
+    await pages.run('capacity-fixture',db.collection(collection),'due',250,handle);
+    await pages.run('capacity-fixture',db.collection(collection),'due',250,handle);
+    await pages.run('capacity-fixture',db.collection(collection),'due',250,handle);
+    assert.equal(processed.size,500);
+    await pages.run('capacity-fixture',db.collection(collection),'due',250,async id=>{processed.add(id);});
+    assert.equal(processed.size,501);
+  } finally { await db.recursiveDelete(db.collection(collection));await db.collection('maintenancePages').doc('capacity-fixture').delete(); }
+});
+integration('independent ledger failure prevents acknowledging grant revocation', async () => {
+  let attempted=false;
+  const guarded=new Relay(db,async()=>{},()=>time,undefined,async action=>{attempted=true;assert.equal(action.kind,'grant.revoke');throw Error('ledger unavailable');});
+  await assert.rejects(guarded.revoke(uid,grantId));assert.equal(attempted,true);
+  assert.equal((await db.collection('grants').doc(grantId).get()).data()!.revoked,false);
+});

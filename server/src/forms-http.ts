@@ -3,8 +3,10 @@ import { z } from 'zod';
 import { Forms } from './forms.js';
 import { formSchema, observationSchema, submissionSchema, webhookSchema } from './forms-model.js';
 import { idSchema } from './model.js';
+import { EventStreams } from './event-streams.js';
 
 export function mountForms(app: Express, forms: Forms, owner: (req: Request) => Promise<{ uid: string }>, bearer: (req: Request) => string, sseDurationMs = 100_000) {
+  const streams = new EventStreams(forms);
   const id = (req: Request) => idSchema.parse(req.params.requestId);
   const phone = async (req: Request) => ({ uid: (await owner(req)).uid, deviceId: idSchema.parse(req.params.deviceId) });
   app.post('/v2/requests', async (req, res) => { res.status(201).json(await forms.create(bearer(req), formSchema.parse(req.body))); });
@@ -25,29 +27,44 @@ export function mountForms(app: Express, forms: Forms, owner: (req: Request) => 
   const cursor = (req: Request) => z.string().max(128).optional().parse(req.query.cursor ?? req.get('Last-Event-ID'));
   app.get('/v2/events', async (req, res) => { res.json(await forms.events(bearer(req), cursor(req))); });
   app.get('/v2/events/stream', async (req, res) => {
+    let closed = res.destroyed, resume: (() => void) | undefined, timer: ReturnType<typeof setTimeout> | undefined;
+    const close = () => { closed = true; clearTimeout(timer); resume?.(); };
+    res.on('close', close);
     const secret = bearer(req); let next = cursor(req);
     let page = await forms.events(secret, next);
-    res.set({ 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache, no-store', 'X-Accel-Buffering': 'no' }); res.flushHeaders();
-    res.write('retry: 1000\n\n');
-    const end = Date.now() + sseDurationMs;
-    let closed = false, timer: ReturnType<typeof setTimeout> | undefined, resume: (() => void) | undefined;
-    res.on('close', () => { closed = true; clearTimeout(timer); resume?.(); });
+    const feed = await streams.subscribe(secret, { changed: () => resume?.(), closed: close });
+    const tail = async () => {
+      const sequence = next ? Number(next.slice(-16)) : 0;
+      const events = feed.tail(sequence), oldest = feed.oldest();
+      return events.length && oldest !== undefined && sequence < oldest - 1
+        ? forms.events(secret, next) : { events, cursor: next ?? null };
+    };
     try {
-      while (!closed && Date.now() < end) {
+      if (closed || feed.failed()) return;
+      res.set({ 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache, no-store', 'X-Accel-Buffering': 'no' }); res.flushHeaders();
+      res.write('retry: 1000\n\n');
+      const end = Date.now() + Math.min(sseDurationMs, 100_000);
+      while (!closed && !feed.failed() && Date.now() < end) {
+        const revision = feed.revision();
         for (const e of page.events) {
-          if (closed) break;
-          if (!res.write(`id: ${e.id}\nevent: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`)) {
-            // A slow consumer reconnects using its last received event ID.
-            res.end(); closed = true; break;
-          }
+          if (closed || feed.failed()) break;
+          if (!res.write(`id: ${e.id}\nevent: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`)) { close(); break; }
           next = e.id;
         }
-        if (closed) break;
-        res.write(': heartbeat\n\n');
-        await new Promise<void>(resolve => { resume = resolve; timer = setTimeout(resolve, Math.min(1000, Math.max(1, end - Date.now()))); });
-        if (!closed) page = await forms.events(secret, next);
+        if (closed || feed.failed()) break;
+        // Replay is paginated from durable storage; the bounded tail handles steady-state delivery.
+        if (page.events.length === 100) { page = await forms.events(secret, next); continue; }
+        page = await tail();
+        if (page.events.length) continue;
+        if (!res.write(': heartbeat\n\n')) { close(); break; }
+        await new Promise<void>(resolve => {
+          const done = () => { clearTimeout(timer); resume = undefined; resolve(); };
+          resume = done;
+          timer = setTimeout(done, Math.min(1000, Math.max(1, end - Date.now())));
+          if (closed || feed.failed() || feed.revision() !== revision) done();
+        });
+        page = await tail();
       }
-    } catch { /* revoked credentials or unavailable storage: reconnect and authenticate again */ }
-    finally { clearTimeout(timer); res.end(); }
+    } finally { clearTimeout(timer); feed.stop(); res.end(); }
   });
 }

@@ -1,4 +1,6 @@
 import { randomUUID } from 'node:crypto';
+import { MaintenancePages } from './maintenance-pages.js';
+import type { RecordSecurity } from './security-ledger.js';
 import { Forms } from './forms.js';
 import { Connections } from './connections.js';
 import { Firestore, Transaction, Query } from 'firebase-admin/firestore';
@@ -10,7 +12,8 @@ const phonePending = (): PhoneState => ({ status: 'pending_phone', reason: null,
 export class Relay {
   readonly connections: Connections;
   readonly forms: Forms;
-  constructor(readonly db: Firestore, readonly notify: Notify, readonly now = Date.now, wake?: () => Promise<void>) { this.connections = new Connections(this); this.forms = new Forms(this, wake); }
+  readonly pages: MaintenancePages;
+  constructor(readonly db: Firestore, readonly notify: Notify, readonly now = Date.now, wake?: () => Promise<void>, readonly recordSecurity: RecordSecurity = async () => {}) { this.pages = new MaintenancePages(db); this.connections = new Connections(this); this.forms = new Forms(this, wake); }
   ref(collection: string, id: string) { return this.db.collection(collection).doc(id); }
   async account(tx: Transaction, uid: string): Promise<Account> {
     const a = (await tx.get(this.ref('accounts', uid))).data() as Account | undefined;
@@ -107,6 +110,12 @@ export class Relay {
 
   async revoke(uid: string, id: string) {
     await this.db.runTransaction(async tx => {
+      await this.account(tx, uid);
+      const g = (await tx.get(this.ref('grants', id))).data();
+      ensure(g?.ownerId === uid, 404, 'grant_not_found');
+    });
+    await this.recordSecurity({ ownerId: uid, kind: 'grant.revoke', target: id });
+    await this.db.runTransaction(async tx => {
       const a = await this.account(tx, uid);
       const g = (await tx.get(this.ref('grants', id))).data() as Grant | undefined;
       ensure(g && g.ownerId === uid, 404, 'grant_not_found');
@@ -118,6 +127,10 @@ export class Relay {
     await this.forms.cancelGrant(id);
   }
   async changeDevice(uid: string, id: string, paused: boolean, deleted = false) {
+    if (paused || deleted) {
+      await this.db.runTransaction(async tx => { await this.account(tx, uid); await this.device(tx, uid, id); });
+      await this.recordSecurity({ ownerId: uid, kind: deleted ? 'device.delete' : 'device.pause', target: id });
+    }
     await this.db.runTransaction(async tx => {
       const a = await this.account(tx, uid);
       await this.device(tx, uid, id);
@@ -139,6 +152,7 @@ export class Relay {
     }
   }
   async deleteAccount(uid: string) {
+    await this.recordSecurity({ ownerId: uid, kind: 'account.delete', target: uid });
     await this.ref('accounts', uid).set({ deleting: true });
     for (const collection of ['devices', 'grants', 'managers', 'managerCallers', 'connections', 'connectionCodes', 'requests', 'results', 'audit', 'formRequests', 'formResults', 'requestEvents', 'deliveryOutbox']) await this.deleteQuery(this.db.collection(collection).where('ownerId', '==', uid));
   }
@@ -321,17 +335,15 @@ export class Relay {
     r.nextNotificationAt = unsent.length ? Math.min(...unsent.map(p => Math.max(p.nextAt, p.lease))) : r.expiresAt;
   }
   async maintenance() {
-    const work = await this.db.collection('accounts').where('hasWork', '==', true).limit(250).get();
-    for (const doc of work.docs) { if (!doc.data().deleting) await this.advance(doc.id); }
+    await this.pages.run('active-owners', this.db.collection('accounts').where('hasWork', '==', true), null, 250, async id => {
+      if (!(await this.ref('accounts', id).get()).data()?.deleting) await this.advance(id);
+    });
     for (const status of ['pending_phone', 'ready', 'awaiting_consent']) {
-      const pending = await this.db.collection('requests').where('status', '==', status).where('notificationSent', '==', false)
-        .where('nextNotificationAt', '<=', this.now()).orderBy('nextNotificationAt').limit(250).get();
-      for (let i = 0; i < pending.docs.length; i += 10) await Promise.all(pending.docs.slice(i, i + 10).map(doc => this.deliver(doc.id)));
+      await this.pages.run(`sms-${status}`, this.db.collection('requests').where('status', '==', status)
+        .where('notificationSent', '==', false).where('nextNotificationAt', '<=', this.now()),
+      'nextNotificationAt', 250, id => this.deliver(id), 10);
     }
-    for (const collection of ['results', 'requests', 'audit', 'connections', 'connectionCodes', 'connectionRates']) {
-      const expired = await this.db.collection(collection).where('purgeAt', '<=', new Date(this.now())).limit(400).get();
-      const batch = this.db.batch(); expired.docs.forEach(d => batch.delete(d.ref)); await batch.commit();
-    }
+    for (const collection of ['results', 'requests', 'audit', 'connections', 'connectionCodes', 'connectionRates']) await this.pages.purge(collection, this.now());
     await this.forms.maintenance();
   }
 }

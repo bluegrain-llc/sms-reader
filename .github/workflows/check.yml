@@ -30,6 +30,7 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: npm run test:unit
+      - run: npm run test:capacity-tools
       - run: npm audit --omit=dev
 
   server-integration:
