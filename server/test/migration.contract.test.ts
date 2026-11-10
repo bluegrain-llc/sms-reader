@@ -11,6 +11,7 @@ import { app } from '../src/http.js';
 import type { HttpOptions } from '../src/http.js';
 import { RustRelay, rustApp } from './rust-adapter.js';
 import { MINUTE, hash } from '../src/model.js';
+import { telemetry } from '../src/telemetry.js';
 if (!process.env.FIRESTORE_EMULATOR_HOST || !process.env.FIREBASE_AUTH_EMULATOR_HOST) throw Error('Migration contracts require emulators');
 const firebase = initializeApp({ projectId: 'demo-sms-relay' }, 'migration-contract');
 const db = getFirestore(firebase);
@@ -102,6 +103,39 @@ for (const direction of ['typescript-to-rust', 'rust-to-typescript']) {
     assert.ok(!prototypeDevice.formListenerUntil);
     await writer.forms.registerWebhook(token, { url: 'https://8.8.8.8/#', events: ['request.created'] });
     assert.equal((await reader.forms.webhooks(token))[0]!.url, 'https://8.8.8.8/#');
+  });
+  test(`${direction}: durable deletion receipts, read counters and stream leases survive runtime handoff`, { timeout: 60_000 }, async () => {
+    const [writer, reader] = direction.startsWith('typescript') ? [ts, rust] : [rust, ts];
+    await writer.register(uid, did, 'Phone', 'synthetic-fcm');
+    const grant = await writer.createGrant(uid, did, 'Caller', 30);
+    const window = Math.floor(time / MINUTE);
+    await db.collection('accessRates').doc(hash(`grant:${grant.grantId}:${window}`)).set({ count: 119, purgeAt: new Date(time + MINUTE) });
+    await writer.access.read(uid, grant.grantId);
+    await assert.rejects(reader.access.read(uid, grant.grantId), /poll_rate_limited/);
+    const first = await writer.access.stream(uid, grant.grantId, 100_000);
+    const second = await reader.access.stream(uid, grant.grantId, 100_000);
+    try { await assert.rejects(writer.access.stream(uid, grant.grantId, 100_000), /stream_limit_reached/); }
+    finally { await first(); await second(); }
+    const replacement = await reader.access.stream(uid, grant.grantId, 100_000); await replacement();
+    const requested = await writer.deletions.request(uid);
+    const repeated = await reader.deletions.request(uid);
+    assert.notEqual(requested.receipt, repeated.receipt);
+    assert.deepEqual(await reader.deletions.status(requested.receipt), { status: 'pending' });
+    assert.equal((await db.collection('deletionJobs').get()).size, 1);
+    assert.equal((await db.collection('deletionJobs').doc(hash(uid)).get()).data()?.purgeAt, null);
+    let deleted = 0;
+    await reader.deletions.dispatch(async owner => {
+      assert.equal(owner, uid);
+      assert.equal((await db.collection('devices').where('ownerId', '==', uid).get()).size, 0);
+      assert.equal((await db.collection('grants').where('ownerId', '==', uid).get()).size, 0);
+      deleted++;
+    });
+    assert.equal(deleted, 1);
+    assert.deepEqual(await writer.deletions.status(repeated.receipt), { status: 'completed' });
+    await assert.rejects(writer.checkAgent(grant.token), /invalid_token|account_deleted/);
+    await assert.rejects(reader.register(uid, 'stale-installation', 'Stale', 'synthetic-fcm'), /account_deleted/);
+    time += 24 * 60 * MINUTE;
+    await assert.rejects(writer.deletions.status(requested.receipt), /invalid_deletion_receipt/);
   });
 }
 const options: HttpOptions = {
@@ -330,4 +364,31 @@ test('isolated UTF-16 JSON and literal marker characters preserve storage and wi
       assert.deepEqual(inspections[1], inspections[0]);
     }
   } finally { await Promise.all(servers.map(server => new Promise<void>(resolve => server.close(() => resolve())))); }
+});
+
+test('Rust durable worker records provider failure and exact backlogs without private context', { timeout: 60_000 }, async () => {
+  const rows: Parameters<typeof telemetry.emit>[0][] = [], original = telemetry.emit;
+  const native = new RustRelay(db, async () => {}, () => time, async () => { throw { code: 'unavailable' }; });
+  telemetry.emit = row => { rows.push(row); };
+  try {
+    await native.deletions.request(uid);
+    assert.equal(rows.filter(row => row.event === 'wakeup_failed').length, 1);
+    time += 6 * MINUTE;
+    await native.deletions.dispatch(async () => { throw { code: 'permission-denied' }; });
+    assert.equal(rows.filter(row => row.event === 'deletion_failed').length, 1);
+    await db.collection('results').doc('private-result-id').set({ code: 'private-answer', purgeAt: new Date(time - 301_000) });
+    await native.call('telemetryBacklogs', []);
+    const snapshot = rows.filter(row => row.event === 'backlog_snapshot');
+    assert.equal(snapshot.length, 6);
+    const deletion = snapshot.find(row => row.kind === 'deletion');
+    assert.ok(deletion?.event === 'backlog_snapshot' && deletion.count === 1 && deletion.oldest_due_age_s >= 360);
+    const result = snapshot.find(row => row.kind === 'results');
+    assert.ok(result?.event === 'backlog_snapshot' && result.count === 1 && result.oldest_due_age_s === 301);
+    assert.ok(!JSON.stringify(rows).includes('private-'));
+    time += MINUTE;
+    let deleted = 0;
+    await native.deletions.dispatch(async () => { deleted++; });
+    assert.equal(deleted, 1);
+    assert.equal((await db.collection('deletionJobs').doc(hash(uid)).get()).data()?.status, 'completed');
+  } finally { telemetry.emit = original; }
 });

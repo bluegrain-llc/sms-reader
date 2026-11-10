@@ -12,6 +12,8 @@ pub enum Error {
     Store(#[from] firestore::errors::FirestoreError),
     #[error("external_call_failed")]
     External,
+    #[error("provider_failed")]
+    Provider(&'static str),
 }
 pub type Result<T> = std::result::Result<T, Error>;
 pub fn ensure(ok: bool, status: u16, reason: &'static str) -> Result<()> {
@@ -30,10 +32,16 @@ impl IntoResponse for Error {
                 (500, "internal_error")
             }
         };
-        (
+        let mut response = (
             StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
             Json(json!({"error":reason})),
         )
-            .into_response()
+            .into_response();
+        if status == 429 {
+            response
+                .headers_mut()
+                .insert("Retry-After", "60".parse().unwrap());
+        }
+        response
     }
 }

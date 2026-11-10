@@ -1,5 +1,13 @@
 //! Emulator-only test host. This target is never copied into the runtime image.
 use axum::{Json, Router, extract::State, response::IntoResponse, routing::post};
+use axum::{
+    body::Body,
+    extract::Request,
+    http::StatusCode,
+    middleware::{self, Next},
+    response::Response,
+};
+use futures::StreamExt;
 use serde_json::{Value, json};
 use sms_code_relay::{
     error::{Error, Result},
@@ -10,7 +18,7 @@ use sms_code_relay::{
     store::Store,
 };
 use std::{collections::HashMap, sync::Arc, time::Duration};
-use tokio::sync::{Mutex, oneshot};
+use tokio::sync::{Mutex, watch};
 #[derive(Clone)]
 struct Callback {
     url: String,
@@ -26,12 +34,33 @@ impl Callback {
             .await
             .map_err(|_| Error::External)?;
         if !response.status().is_success() {
-            return Err(Error::External);
+            let failure = response.json::<Value>().await.unwrap_or(Value::Null);
+            return Err(if failure["error"] == "auth/user-not-found" {
+                Error::Api(404, "auth/user-not-found")
+            } else {
+                Error::External
+            });
         }
         response.json().await.map_err(|_| Error::External)
     }
 }
 impl Delivery for Callback {
+    fn record(&self, event: Value) -> futures::future::BoxFuture<'_, ()> {
+        Box::pin(async move {
+            let _ = self.send("telemetry", json!([event])).await;
+        })
+    }
+
+    fn emit<'a>(&'a self, event: &'a str, category: &'a str) -> futures::future::BoxFuture<'a, ()> {
+        Box::pin(async move {
+            let _ = self
+                .send(
+                    "telemetry",
+                    json!([{ "event": event, "category": category }]),
+                )
+                .await;
+        })
+    }
     fn notify<'a>(
         &'a self,
         t: &'a str,
@@ -98,7 +127,31 @@ impl Authentication for Callback {
 #[derive(Clone)]
 struct Host {
     store: Store,
-    stops: Arc<Mutex<HashMap<String, oneshot::Sender<()>>>>,
+    stops: Arc<Mutex<HashMap<String, TestServer>>>,
+}
+struct TestServer {
+    stop: watch::Sender<bool>,
+    task: tokio::task::JoinHandle<()>,
+}
+async fn cancelled(mut stop: watch::Receiver<bool>) {
+    if !*stop.borrow_and_update() {
+        let _ = stop.changed().await;
+    }
+}
+async fn shutdown_connections(
+    State(stop): State<watch::Receiver<bool>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let response = tokio::select! {
+        _ = cancelled(stop.clone()) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+        response = next.run(request) => response,
+    };
+    let (parts, body) = response.into_parts();
+    Response::from_parts(
+        parts,
+        Body::from_stream(body.into_data_stream().take_until(cancelled(stop))),
+    )
 }
 fn callback(v: &Value) -> Arc<Callback> {
     let url = text(v, "callback").to_owned();
@@ -169,6 +222,34 @@ async fn call(State(h): State<Host>, Json(v): Json<Value>) -> impl IntoResponse 
                 r.delete_account(t(0)).await?;
                 Ok(Value::Null)
             }
+            "deletions.request" => r.deletion_request(t(0)).await,
+            "deletions.status" => r.deletion_status(t(0)).await,
+            "deletions.migrateLegacy" => {
+                r.deletion_migrate_legacy().await?;
+                Ok(Value::Null)
+            }
+            "deletions.step" => Ok(json!(r.deletion_step(t(0), callback(&v)).await?)),
+            "deletions.dispatch" => {
+                r.deletion_dispatch(callback(&v)).await?;
+                Ok(Value::Null)
+            }
+            "access.read" => {
+                r.access_read(t(0), a(1).as_str().map(str::to_owned))
+                    .await?;
+                Ok(Value::Null)
+            }
+            "access.stream" => {
+                r.access_stream(t(0), t(1), a(2).as_i64().unwrap_or(100_000))
+                    .await
+            }
+            "access.release" => {
+                r.access_release(a(0)).await?;
+                Ok(Value::Null)
+            }
+            "access.cleanup" => {
+                r.access_cleanup().await?;
+                Ok(Value::Null)
+            }
             "checkAgent" => {
                 r.check_agent(&t(0)).await?;
                 Ok(Value::Null)
@@ -192,6 +273,10 @@ async fn call(State(h): State<Host>, Json(v): Json<Value>) -> impl IntoResponse 
             }
             "maintenance" => {
                 r.maintenance().await?;
+                Ok(Value::Null)
+            }
+            "telemetryBacklogs" => {
+                r.telemetry_backlogs().await?;
                 Ok(Value::Null)
             }
             "connections.start" => r.connection_start(t(0), a(1)).await,
@@ -244,34 +329,42 @@ async fn call(State(h): State<Host>, Json(v): Json<Value>) -> impl IntoResponse 
 async fn start(State(h): State<Host>, Json(v): Json<Value>) -> Json<Value> {
     let mut r = relay(&h, &v);
     let clock_url = text(&v, "callback").to_owned();
-    // Clock reads must reach the same live injected function as direct calls,
-    // including reads made by the SSE task between HTTP requests. Blocking I/O
-    // stays on a dedicated thread in this emulator-only target.
-    r.clock = Arc::new(move || {
-        let url = clock_url.clone();
-        std::thread::spawn(move || {
-            reqwest::blocking::Client::builder()
-                .no_proxy()
-                .timeout(Duration::from_secs(10))
-                .build()
-                .unwrap()
-                .post(url)
+    // Every read observes the live injected clock, including SSE background work.
+    // Reuse one blocking client and its connection on a dedicated thread; neither
+    // client creation nor its blocking runtime may run on Tokio worker threads.
+    let (clock, requests) = std::sync::mpsc::channel::<std::sync::mpsc::SyncSender<i64>>();
+    std::thread::spawn(move || {
+        let client = reqwest::blocking::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .unwrap();
+        for reply in requests {
+            let now = client
+                .post(&clock_url)
                 .json(&json!({"kind":"now","args":[]}))
                 .send()
                 .unwrap()
                 .error_for_status()
                 .unwrap()
                 .json::<i64>()
-                .unwrap()
-        })
-        .join()
-        .unwrap()
+                .unwrap();
+            let _ = reply.send(now);
+        }
+    });
+    r.clock = Arc::new(move || {
+        let (reply, response) = std::sync::mpsc::sync_channel(1);
+        clock.send(reply).expect("test clock thread stopped");
+        response.recv().expect("test clock request failed")
     });
     let o = &v["options"];
     let options = Options {
         auth: callback(&v),
         public_url: o["publicUrl"].as_str().map(str::to_owned),
         android_cert: o["androidCertSha256"].as_str().map(str::to_owned),
+        android_certs: o.get("androidCertSha256s").cloned(),
+        firebase_web_config: o.get("firebaseWebConfig").cloned(),
+        privacy_contact: o["privacyContact"].as_str().map(str::to_owned),
         origins: arr(o, "origins")
             .iter()
             .map(|v| v.as_str().unwrap().into())
@@ -281,24 +374,35 @@ async fn start(State(h): State<Host>, Json(v): Json<Value>) -> Json<Value> {
     };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
-    let (tx, rx) = oneshot::channel();
+    let (tx, rx) = watch::channel(false);
+    let shutdown = rx.clone();
     let id = uuid::Uuid::new_v4().to_string();
-    h.stops.lock().await.insert(id.clone(), tx);
-    tokio::spawn(async move {
+    let task = tokio::spawn(async move {
         let _ = axum::serve(
             listener,
-            http::app(r, options).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            http::app(r, options)
+                .layer(middleware::from_fn_with_state(rx, shutdown_connections))
+                .into_make_service_with_connect_info::<std::net::SocketAddr>(),
         )
-        .with_graceful_shutdown(async {
-            let _ = rx.await;
-        })
+        .with_graceful_shutdown(cancelled(shutdown))
         .await;
     });
+    h.stops
+        .lock()
+        .await
+        .insert(id.clone(), TestServer { stop: tx, task });
     Json(json!({"id":id,"port":port}))
 }
 async fn stop(State(h): State<Host>, Json(v): Json<Value>) -> Json<Value> {
-    if let Some(tx) = h.stops.lock().await.remove(text(&v, "id")) {
-        let _ = tx.send(());
+    if let Some(mut server) = h.stops.lock().await.remove(text(&v, "id")) {
+        let _ = server.stop.send(true);
+        if tokio::time::timeout(Duration::from_secs(2), &mut server.task)
+            .await
+            .is_err()
+        {
+            server.task.abort();
+            let _ = server.task.await;
+        }
     }
     Json(json!({"ok":true}))
 }

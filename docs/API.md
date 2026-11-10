@@ -99,3 +99,8 @@ Readiness requires a recent listener start. Android-assisted completion (the def
 `POST /internal/maintenance` accepts only the configured scheduler OIDC identity/audience. It promotes/expires SMS work, retries per-phone FCM, and cleans expired results and metadata. Connections retain seven days; comparison-code/rate records expire after their short windows. Firestore TTL is an asynchronous backstop; authorization expiry is immediate.
 
 Android v0.4.1 closes its task after server-confirmed submission on this phone. It does not close for another phone’s winning result or failed uploads.
+
+
+## Resumable account deletion
+
+`DELETE /v1/account` returns HTTP 202 after a durable account tombstone/job is committed, with `{ok:true,status,receipt,receiptExpiresAt}`. It requires Google authentication within five minutes. The opaque receipt authorizes only `GET /v1/account-deletion` through its Bearer header for 24 hours. Status is `pending`, `running` or `completed`. Existing Android clients accept the successful 2xx response and sign out. Workers and Scheduler continue cleanup across crashes. See [complete deletion and rate-limit contract](ACCOUNT_DELETION.md). Read routes may return HTTP 429 with `Retry-After: 60`; creation quotas retain their existing contracts.

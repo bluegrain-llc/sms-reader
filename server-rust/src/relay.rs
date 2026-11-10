@@ -13,6 +13,20 @@ pub struct Relay {
     pub delivery: Arc<dyn Delivery>,
 }
 pub trait Delivery: Send + Sync {
+    fn record(&self, event: Value) -> futures::future::BoxFuture<'_, ()> {
+        Box::pin(async move {
+            use std::io::Write;
+            if let Some(event) = crate::telemetry::entry(event) {
+                let _ = writeln!(std::io::stdout(), "{event}");
+            }
+        })
+    }
+    fn emit<'a>(&'a self, event: &'a str, category: &'a str) -> futures::future::BoxFuture<'a, ()> {
+        Box::pin(async move {
+            self.record(json!({"event":event,"category":category}))
+                .await
+        })
+    }
     fn notify<'a>(
         &'a self,
         token: &'a str,
@@ -206,6 +220,17 @@ impl Relay {
         Ok(json!({"grantId":id,"token":token}))
     }
     pub async fn list_devices(&self, uid: &str) -> Result<Value> {
+        let relay = self.clone();
+        let owner = uid.to_owned();
+        self.store
+            .tx(move |tx| {
+                let (relay, owner) = (relay.clone(), owner.clone());
+                Box::pin(async move {
+                    relay.account(tx, &owner).await?;
+                    Ok(())
+                })
+            })
+            .await?;
         let all = self
             .store
             .query(Query::new("devices").eq("ownerId", uid))
@@ -222,6 +247,17 @@ impl Relay {
  json!({"deviceId":d["id"],"name":d["name"],"paused":d["paused"],"wizardVersion":d["wizardVersion"],"activeRequestId":if has{r["id"].clone()}else{Value::Null}})}).collect::<Vec<_>>()))
     }
     pub async fn list_grants(&self, uid: String, device: Option<String>) -> Result<Value> {
+        let relay = self.clone();
+        let owner = uid.clone();
+        self.store
+            .tx(move |tx| {
+                let (relay, owner) = (relay.clone(), owner.clone());
+                Box::pin(async move {
+                    relay.account(tx, &owner).await?;
+                    Ok(())
+                })
+            })
+            .await?;
         if let Some(id) = device {
             let s = self.clone();
             let u = uid.clone();

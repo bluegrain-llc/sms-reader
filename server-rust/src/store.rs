@@ -5,17 +5,27 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::sync::Arc;
 use tokio::sync::OnceCell;
+#[derive(Default)]
+enum PurgeAt {
+    #[default]
+    Missing,
+    Null,
+    Timestamp(FirestoreInstant),
+}
+impl<'de> Deserialize<'de> for PurgeAt {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        firestore::serialize_as_optional_timestamp::deserialize(deserializer)
+            .map(|value| value.map(Self::Timestamp).unwrap_or(Self::Null))
+    }
+}
 #[derive(Deserialize)]
 struct Document {
     #[serde(flatten)]
     fields: serde_json::Map<String, Value>,
-    #[serde(
-        rename = "purgeAt",
-        default,
-        skip_serializing_if = "Option::is_none",
-        with = "firestore::serialize_as_optional_timestamp"
-    )]
-    purge_at: Option<FirestoreInstant>,
+    #[serde(rename = "purgeAt", default)]
+    purge_at: PurgeAt,
 }
 // The crate omits serde `None` by default, including JSON nulls. Preserve the
 // explicit nulls used by JavaScript clients, recursively through maps and arrays.
@@ -80,27 +90,34 @@ impl Serialize for Document {
     ) -> std::result::Result<S::Ok, S::Error> {
         use serde::ser::SerializeMap;
         let mut map = serializer.serialize_map(Some(
-            self.fields.len() + usize::from(self.purge_at.is_some()),
+            self.fields.len() + usize::from(!matches!(self.purge_at, PurgeAt::Missing)),
         ))?;
         for (key, value) in &self.fields {
             let key = crate::js_string::storage(key)
                 .map_err(|_| serde::ser::Error::custom("invalid_utf16"))?;
             map.serialize_entry(&key, &ExplicitNulls(value))?;
         }
-        if let Some(timestamp) = self.purge_at {
-            map.serialize_entry("purgeAt", &TimestampValue(timestamp))?;
+        match self.purge_at {
+            PurgeAt::Timestamp(timestamp) => {
+                map.serialize_entry("purgeAt", &TimestampValue(timestamp))?
+            }
+            PurgeAt::Null => map.serialize_entry("purgeAt", &ExplicitNulls(&Value::Null))?,
+            PurgeAt::Missing => {}
         }
         map.end()
     }
 }
 impl Document {
     fn from_value(mut v: Value) -> Self {
-        let purge_at = v
-            .as_object_mut()
-            .unwrap()
-            .remove("purgeAt")
-            .and_then(|p| p.as_i64())
-            .and_then(|n| FirestoreInstant::from_millisecond(n).ok());
+        let purge_at = match v.as_object_mut().unwrap().remove("purgeAt") {
+            Some(Value::Null) => PurgeAt::Null,
+            Some(value) => value
+                .as_i64()
+                .and_then(|n| FirestoreInstant::from_millisecond(n).ok())
+                .map(PurgeAt::Timestamp)
+                .unwrap_or_default(),
+            None => PurgeAt::Missing,
+        };
         Self {
             fields: v.as_object().unwrap().clone(),
             purge_at,
@@ -116,8 +133,10 @@ impl Document {
         ] {
             v.as_object_mut().unwrap().remove(key);
         }
-        if let Some(t) = self.purge_at {
-            v["purgeAt"] = json!(t.as_millisecond());
+        match self.purge_at {
+            PurgeAt::Timestamp(t) => v["purgeAt"] = json!(t.as_millisecond()),
+            PurgeAt::Null => v["purgeAt"] = Value::Null,
+            PurgeAt::Missing => {}
         }
         crate::js_string::encode_value(&mut v);
         v
@@ -165,12 +184,13 @@ impl Query {
         self
     }
 }
-async fn query(db: &FirestoreDb, q: Query) -> Result<Vec<Value>> {
+fn query_params(q: &Query) -> FirestoreQueryParams {
     let mut params = FirestoreQueryParams::new(q.col.as_str().into());
     params.limit = q.limit;
     if !q.filters.is_empty() {
         let filters = q
             .filters
+            .clone()
             .into_iter()
             .map(|(k, op, v)| {
                 let mut fields =
@@ -193,6 +213,7 @@ async fn query(db: &FirestoreDb, q: Query) -> Result<Vec<Value>> {
     if !q.order.is_empty() {
         params.order_by = Some(
             q.order
+                .clone()
                 .into_iter()
                 .map(|(k, d)| {
                     FirestoreQueryOrder::new(
@@ -207,6 +228,10 @@ async fn query(db: &FirestoreDb, q: Query) -> Result<Vec<Value>> {
                 .collect(),
         );
     }
+    params
+}
+async fn query(db: &FirestoreDb, q: Query) -> Result<Vec<Value>> {
+    let params = query_params(&q);
     let mut query = db
         .fluent()
         .select()
@@ -257,6 +282,31 @@ impl Store {
     }
     pub async fn query(&self, q: Query) -> Result<Vec<Value>> {
         query(self.db().await?, q).await
+    }
+    pub async fn count(&self, q: Query) -> Result<i64> {
+        #[derive(Deserialize)]
+        struct Count {
+            count: i64,
+        }
+        let params = query_params(&q);
+        let db = self.db().await?;
+        let mut query = db
+            .fluent()
+            .select()
+            .from(q.col.as_str())
+            .filter(|_| params.filter.clone());
+        if let Some(limit) = params.limit {
+            query = query.limit(limit);
+        }
+        if let Some(order) = params.order_by {
+            query = query.order(|_| order.clone());
+        }
+        let results: Vec<Count> = query
+            .aggregate(|a| a.fields([a.field("count").count()]))
+            .obj()
+            .query()
+            .await?;
+        Ok(results.first().map(|r| r.count).unwrap_or(0))
     }
     pub async fn tx<T, F>(&self, f: F) -> Result<T>
     where
@@ -376,6 +426,26 @@ impl Tx {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn document_distinguishes_null_missing_and_timestamp_retention() {
+        for value in [
+            json!({"status":"pending"}),
+            json!({"status":"pending","purgeAt":null}),
+            json!({"purgeAt":1_800_000_000_000i64}),
+        ] {
+            let document = FirestoreDb::serialize_to_doc(
+                "documents/test",
+                &Document::from_value(value.clone()),
+            )
+            .unwrap();
+            assert_eq!(
+                FirestoreDb::deserialize_doc_to::<Document>(&document)
+                    .unwrap()
+                    .value(),
+                value
+            );
+        }
+    }
     #[test]
     fn document_preserves_explicit_nulls_and_timestamp_types() {
         let value = json!({"status":"pending", "reason":null, "phones":{"phone":{"reason":null}}, "values":[null,"x"], "purgeAt":1_800_000_000_000i64});

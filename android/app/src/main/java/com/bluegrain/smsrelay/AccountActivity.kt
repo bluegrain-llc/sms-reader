@@ -34,7 +34,10 @@ abstract class AccountActivity : ComponentActivity() {
         else if (RelayNotifications.enabled(this)) vm.register()
         else vm.error("Enable the code request notification channel in Android settings.")
     }
-    protected fun signIn() {
+    protected fun deleteAccountWithReauthentication() { authenticate(deleteAfter = true) }
+    protected fun signIn() { authenticate(deleteAfter = false) }
+    private fun authenticate(deleteAfter: Boolean) {
+        val expectedOwner = (application as RelayApplication).repository.ownerId
         lifecycleScope.launch {
             try {
                 val option = GetGoogleIdOption.Builder().setServerClientId(BuildConfig.GOOGLE_WEB_CLIENT_ID)
@@ -43,7 +46,7 @@ abstract class AccountActivity : ComponentActivity() {
                     GetCredentialRequest.Builder().addCredentialOption(option).build())
                 val credential = result.credential
                 if (credential.type == GoogleIdTokenCredential.TYPE_GOOGLE_ID_TOKEN_CREDENTIAL) {
-                    vm.signedIn(GoogleIdTokenCredential.createFrom(credential.data).idToken)
+                    vm.signedIn(GoogleIdTokenCredential.createFrom(credential.data).idToken, deleteAfter, expectedOwner)
                 } else vm.error("Choose a Google account to continue.")
             } catch (e: CancellationException) { throw e }
             catch (_: NoCredentialException) { vm.error("Add a Google account to this phone, then try again.") }

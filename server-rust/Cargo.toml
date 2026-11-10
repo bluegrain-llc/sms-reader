@@ -13,6 +13,7 @@ firestore = "=0.65.4"
 futures = "0.3"
 gcp_auth = "0.12.7"
 hmac = "0.12"
+http-body = "1"
 ipnet = "2"
 jsonschema = { version = "0.61", default-features = false }
 jsonwebtoken = { version = "11.1", default-features = false, features = ["aws_lc_rs"] }

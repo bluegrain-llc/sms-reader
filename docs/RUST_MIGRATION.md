@@ -7,18 +7,19 @@ The current TypeScript source is the behavioral baseline. The Rust application l
 | Surface | Existing behavior to preserve |
 | --- | --- |
 | Common HTTP | 256 KiB JSON limit, strict object/array JSON parsing, no-store and nosniff headers, exact origin allowlist, one trusted proxy hop in Cloud Run |
-| Public routes | `/health`, `/healthz`, `/connect`, `/.well-known/assetlinks.json`, connection creation |
+| Public routes | `/health`, `/healthz`, `/connect`, `/privacy`, `/account/delete`, `/.well-known/assetlinks.json`, connection creation |
 | Pairing | Ten-minute pending window, source/global creation quotas, owner lookup quota including invalid codes, five-second polling, owner approval creates the grant atomically |
-| Owner v1 | Device registration/pause/removal, callers and per-device grants, history, request inspection/events, account deletion with sign-in newer than five minutes |
+| Owner v1 | Device registration/pause/removal, callers and per-device grants, history, request inspection/events, durable account deletion with sign-in newer than five minutes and receipt-based status |
 | Caller v1 | SMS creation/status/cancellation; owner-wide serialized queue, per-phone consent, first accepted response wins, five-minute listener cooldown, two-minute code retention |
 | Owner v2 | Inbox, form inspection/events/submissions, separate forms approval |
 | Caller v2 | Forms and conditional wizards, results, cancellation, webhooks, event polling and SSE |
 | MCP | Stateless POST `/mcp`, eight tools; negotiation for 2025-11-25, 2025-06-18, 2025-03-26, 2024-11-05 and 2024-10-07; unknown versions select 2025-11-25 |
-| Maintenance | Verified worker audience/email; SMS leases, form outbox leases, callback retry and expiry cleanup, advisory Tasks wakeups plus Scheduler recovery |
+| Maintenance | Verified worker audience/email; SMS leases, form outbox leases, durable deletion jobs, callback retry and expiry cleanup, advisory Tasks wakeups plus Scheduler recovery |
+| Access and monitoring | Shared owner/caller read budgets, distributed SSE leases, safe structured route/delivery/error logs and aggregated backlog metrics |
 
 MCP tools: `request_sms_code`, `get_sms_code_request`, `cancel_sms_code_request`, `create_request`, `inspect_request`, `cancel_request`, `get_request_result`, `poll_request_events`.
 
-Collections: `accounts`, `devices`, `grants`, legacy `managers` and `managerCallers`, `connections`, `connectionCodes`, `connectionRates`, `requests`, `results`, `audit`, `formRequests`, `formResults`, `requestEvents`, `deliveryOutbox`. Numeric lifecycle times remain Unix milliseconds; `purgeAt` remains a Firestore timestamp. Account deletion retains its deleting tombstone and removes owner documents. Legacy manager credentials remain invalid.
+Collections: `accounts`, `devices`, `grants`, legacy `managers` and `managerCallers`, `connections`, `connectionCodes`, `connectionRates`, `requests`, `results`, `audit`, `formRequests`, `formResults`, `requestEvents`, `deliveryOutbox`, `accessRates`, `streamLimits`, `deletionJobs`, `deletionReceipts`, legacy `deletionAttempts`. Numeric lifecycle times remain Unix milliseconds; `purgeAt` remains a Firestore timestamp. Account deletion retains its deleting tombstone and removes owner documents. Legacy manager credentials remain invalid.
 
 Captured fixtures live in `server-rust/compat`. Unit tests cover normalized defaults, omitted/null values, Unicode, numeric object keys and floating-point formatting. The shared emulator suite exercises both implementations with injectable clocks and delivery adapters. Migration contracts pass active requests, pending connections, credentials, event cursors and claimed jobs between implementations. These tests do not substitute for real Google-signed tokens, IAM, FCM, Cloud Tasks or public TLS acceptance.
 
@@ -28,12 +29,12 @@ Local verification on 2026-11-10:
 
 | Check | Result |
 | --- | --- |
-| TypeScript compilation and unit tests | Passed; 11 unit tests |
-| Rust formatting, Clippy with warnings denied, unit tests | Passed; 18 tests |
-| Shared emulator scenarios | 36 passed on TypeScript and 36 passed on Rust; none skipped |
-| Migration contracts | Eight passed: both document directions, HTTP/MCP parity, raw JSON/clock lifecycle cases, UTF-16 edge cases, and native Firebase emulator checks |
+| TypeScript compilation and unit tests | Passed; 19 unit tests |
+| Rust formatting, Clippy with warnings denied, unit tests | Passed; 28 tests |
+| Shared emulator scenarios | The integration suite runs with both backend selections; TypeScript-specific method-injection tests are named explicitly |
+| Migration contracts | Both document directions, HTTP/MCP parity, durable deletion/read-limit/stream-lease handoff, raw JSON/clock lifecycle cases, UTF-16 edge cases, native worker telemetry and Firebase emulator checks |
 | Dependency audits | npm production audit and Cargo audit passed |
-| Rust production container | Build and HTTP/auth smoke passed; runtime UID 10001 |
+| Rust production container | CI builds the current image and runs the HTTP/auth smoke; runtime UID 10001 |
 | Deployment script | Shell syntax passed; cloud deployment not performed |
 
 Production cutover and the observation window are separate release gates; these local checks do not establish either.

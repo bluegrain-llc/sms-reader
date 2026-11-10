@@ -3,18 +3,24 @@ use crate::{
     error::{Error, Result, ensure},
     google::{Google, Identity},
     model::*,
-    relay::{Auth, Relay},
+    relay::{Auth, Delivery, Relay},
 };
 use axum::{
     Router,
-    body::Body,
+    body::{Body, Bytes, HttpBody},
     extract::{Request, State},
     http::{HeaderMap, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
 };
 use serde_json::{Value, json};
-use std::{convert::Infallible, sync::Arc, time::Duration};
+use std::{
+    convert::Infallible,
+    pin::Pin,
+    sync::Arc,
+    task::{Context, Poll},
+    time::{Duration, Instant},
+};
 pub trait Authentication: Send + Sync {
     fn owner<'a>(&'a self, token: &'a str) -> futures::future::BoxFuture<'a, Result<Identity>>;
     fn worker<'a>(&'a self, token: &'a str) -> futures::future::BoxFuture<'a, Result<()>>;
@@ -36,6 +42,9 @@ pub struct Options {
     pub auth: Arc<dyn Authentication>,
     pub public_url: Option<String>,
     pub android_cert: Option<String>,
+    pub android_certs: Option<Value>,
+    pub firebase_web_config: Option<Value>,
+    pub privacy_contact: Option<String>,
     pub origins: Vec<String>,
     pub trust_proxy_hops: usize,
     pub sse_duration: Duration,
@@ -65,7 +74,7 @@ pub fn bearer(h: &HeaderMap) -> Result<String> {
     Ok(token.unwrap().into())
 }
 impl App {
-    async fn owner(&self, h: &HeaderMap) -> Result<Identity> {
+    async fn owner(&self, h: &HeaderMap, read: bool, allow_deleted: bool) -> Result<Identity> {
         let token = bearer(h).map_err(|_| Error::Api(401, "invalid_owner_session"))?;
         let mut identity = self
             .options
@@ -74,18 +83,72 @@ impl App {
             .await
             .map_err(|_| Error::Api(401, "invalid_owner_session"))?;
         identity.uid = crate::js_string::encode(&identity.uid);
+        if !allow_deleted {
+            let relay = self.relay.clone();
+            let uid = identity.uid.clone();
+            self.relay
+                .store
+                .tx(move |tx| {
+                    let (relay, uid) = (relay.clone(), uid.clone());
+                    Box::pin(async move {
+                        relay.account(tx, &uid).await?;
+                        Ok(())
+                    })
+                })
+                .await?;
+        }
+        if read {
+            self.relay.access_read(identity.uid.clone(), None).await?;
+        }
         Ok(identity)
+    }
+    async fn agent_read(&self, h: &HeaderMap) -> Result<String> {
+        let secret = bearer(h)?;
+        let relay = self.relay.clone();
+        let key = secret.clone();
+        let grant = self
+            .relay
+            .store
+            .tx(move |tx| {
+                let (relay, key) = (relay.clone(), key.clone());
+                Box::pin(async move { Ok(relay.agent(tx, &key).await?.0) })
+            })
+            .await?;
+        self.relay
+            .access_read(
+                text(&grant, "ownerId").into(),
+                Some(text(&grant, "id").into()),
+            )
+            .await?;
+        Ok(secret)
     }
 }
 async fn common(State(s): State<App>, mut request: Request, next: Next) -> Response {
+    let started = std::time::Instant::now();
+    let method = request.method().as_str().to_owned();
     let is_head = request.method() == axum::http::Method::HEAD;
     if is_head {
         *request.method_mut() = axum::http::Method::GET;
     }
     let origin = request.headers().get("origin");
+    let path = request.uri().path().to_ascii_lowercase();
+    let account_route = matches!(
+        path.strip_suffix('/').unwrap_or(&path),
+        "/v1/account" | "/v1/account-deletion"
+    );
+    let account_origin = s
+        .options
+        .public_url
+        .as_deref()
+        .and_then(|url| url::Url::parse(url).ok())
+        .map(|url| url.origin().ascii_serialization());
     let mut response = if origin.is_some_and(|o| {
         o.to_str()
-            .map(|o| !o.is_empty() && !s.options.origins.iter().any(|allowed| allowed == o))
+            .map(|o| {
+                !o.is_empty()
+                    && !(account_route && account_origin.as_deref() == Some(o))
+                    && !s.options.origins.iter().any(|allowed| allowed == o)
+            })
             .unwrap_or(true)
     }) {
         Error::Api(403, "origin_not_allowed").into_response()
@@ -103,12 +166,84 @@ async fn common(State(s): State<App>, mut request: Request, next: Next) -> Respo
     if is_head {
         *response.body_mut() = Body::empty();
     }
-    response
+    measured_response(response, s.relay.delivery, &method, &path, started)
+}
+struct MeasuredBody {
+    body: Body,
+    logger: Arc<dyn Delivery>,
+    event: Option<Value>,
+    started: Instant,
+}
+impl MeasuredBody {
+    fn complete(&mut self) {
+        if let Some(mut event) = self.event.take() {
+            event["duration_ms"] = json!(self.started.elapsed().as_millis());
+            let logger = self.logger.clone();
+            // Logging has no bearing on flushing or closing the response body.
+            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                runtime.spawn(async move {
+                    logger.record(event).await;
+                });
+            }
+        }
+    }
+}
+impl HttpBody for MeasuredBody {
+    type Data = Bytes;
+    type Error = axum::Error;
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<std::result::Result<http_body::Frame<Bytes>, Self::Error>>> {
+        let frame = Pin::new(&mut self.body).poll_frame(cx);
+        if matches!(&frame, Poll::Ready(None)) || self.body.is_end_stream() {
+            self.complete();
+        }
+        frame
+    }
+    fn is_end_stream(&self) -> bool {
+        self.body.is_end_stream()
+    }
+    fn size_hint(&self) -> http_body::SizeHint {
+        self.body.size_hint()
+    }
+}
+impl Drop for MeasuredBody {
+    fn drop(&mut self) {
+        self.complete();
+    }
+}
+fn measured_response(
+    response: Response,
+    logger: Arc<dyn Delivery>,
+    method: &str,
+    path: &str,
+    started: Instant,
+) -> Response {
+    let event = json!({"event":"http_completed","method":method,"route":crate::telemetry::route_template(path),"status_class":format!("{}xx",response.status().as_u16()/100)});
+    let (parts, body) = response.into_parts();
+    Response::from_parts(
+        parts,
+        Body::new(MeasuredBody {
+            body,
+            logger,
+            event: Some(event),
+            started,
+        }),
+    )
 }
 async fn handle(State(s): State<App>, request: Request) -> Response {
+    let logger = s.relay.delivery.clone();
     match route(s, request).await {
         Ok(r) => r,
-        Err(e) => e.into_response(),
+        Err(e) => {
+            if !matches!(e, Error::Api(_, _)) {
+                logger
+                    .emit("request_failed", crate::telemetry::category(&e))
+                    .await;
+            }
+            e.into_response()
+        }
     }
 }
 pub(crate) fn json_response(v: Value, status: u16) -> Response {
@@ -482,16 +617,19 @@ async fn route(s: App, request: Request) -> Result<Response> {
     };
     let output = match (method.as_str(), p) {
         ("GET", ["health" | "healthz"]) => json!({"ok":true}),
+        ("GET", ["privacy"] | ["account", "delete"]) => {
+            return Ok(
+                crate::account_pages::account_page(&path.to_ascii_lowercase(), &s.options)
+                    .expect("matched account page"),
+            );
+        }
+        ("GET", ["v1", "account-deletion"]) => r.deletion_status(bearer(&headers)?).await?,
         ("GET", [".well-known", "assetlinks.json"]) => {
-            let cert = s.options.android_cert.as_deref().unwrap_or("");
-            ensure(
-                regex::Regex::new(r"^(?:[A-Fa-f0-9]{2}:){31}[A-Fa-f0-9]{2}$")
-                    .unwrap()
-                    .is_match(cert),
-                503,
-                "app_links_not_configured",
+            let certificates = signing_fingerprints(
+                s.options.android_cert.as_deref(),
+                s.options.android_certs.as_ref(),
             )?;
-            json!([{"relation":["delegate_permission/common.handle_all_urls"],"target":{"namespace":"android_app","package_name":"com.bluegrain.smsrelay","sha256_cert_fingerprints":[cert.to_uppercase()]}}])
+            json!([{"relation":["delegate_permission/common.handle_all_urls"],"target":{"namespace":"android_app","package_name":"com.bluegrain.smsrelay","sha256_cert_fingerprints":certificates}}])
         }
         ("GET", ["connect"]) => {
             let code = user_code(&query_value("code")?.ok_or(Error::Api(400, "invalid_input"))?)?;
@@ -528,7 +666,10 @@ async fn route(s: App, request: Request) -> Result<Response> {
         }
         ("POST", ["v1", "connections", "poll"]) => r.connection_poll(bearer(&headers)?).await?,
         ("POST", ["v1", "connections", operation @ ("review" | "decision")]) => {
-            let uid = s.owner(&headers).await?.uid;
+            let uid = s
+                .owner(&headers, method == axum::http::Method::GET, false)
+                .await?
+                .uid;
             strict(
                 &input,
                 if *operation == "review" {
@@ -550,9 +691,19 @@ async fn route(s: App, request: Request) -> Result<Response> {
             };
             r.connection_owner(uid, code, decision).await?
         }
-        ("GET", ["v1", "devices"]) => r.list_devices(&s.owner(&headers).await?.uid).await?,
+        ("GET", ["v1", "devices"]) => {
+            r.list_devices(
+                &s.owner(&headers, method == axum::http::Method::GET, false)
+                    .await?
+                    .uid,
+            )
+            .await?
+        }
         ("PUT", ["v1", "devices", did]) => {
-            let uid = s.owner(&headers).await?.uid;
+            let uid = s
+                .owner(&headers, method == axum::http::Method::GET, false)
+                .await?
+                .uid;
             strict(&input, &["name", "fcmToken", "wizardVersion"])?;
             let name = string(&input, "name", 1, 80, true)?;
             let fcm = string(&input, "fcmToken", 1, 4096, false)?;
@@ -572,7 +723,10 @@ async fn route(s: App, request: Request) -> Result<Response> {
             .await?
         }
         ("PATCH", ["v1", "devices", did]) => {
-            let uid = s.owner(&headers).await?.uid;
+            let uid = s
+                .owner(&headers, method == axum::http::Method::GET, false)
+                .await?
+                .uid;
             strict(&input, &["paused"])?;
             let paused = input["paused"]
                 .as_bool()
@@ -581,17 +735,40 @@ async fn route(s: App, request: Request) -> Result<Response> {
             json!({"ok":true})
         }
         ("DELETE", ["v1", "devices", did]) => {
-            r.change_device(s.owner(&headers).await?.uid, check_id(did)?, true, true)
-                .await?;
+            r.change_device(
+                s.owner(&headers, method == axum::http::Method::GET, false)
+                    .await?
+                    .uid,
+                check_id(did)?,
+                true,
+                true,
+            )
+            .await?;
             json!({"ok":true})
         }
-        ("GET", ["v1", "callers"]) => r.list_grants(s.owner(&headers).await?.uid, None).await?,
+        ("GET", ["v1", "callers"]) => {
+            r.list_grants(
+                s.owner(&headers, method == axum::http::Method::GET, false)
+                    .await?
+                    .uid,
+                None,
+            )
+            .await?
+        }
         ("GET", ["v1", "devices", did, "grants"]) => {
-            r.list_grants(s.owner(&headers).await?.uid, Some(check_id(did)?))
-                .await?
+            r.list_grants(
+                s.owner(&headers, method == axum::http::Method::GET, false)
+                    .await?
+                    .uid,
+                Some(check_id(did)?),
+            )
+            .await?
         }
         ("POST", ["v1", "devices", did, "grants"]) => {
-            let uid = s.owner(&headers).await?.uid;
+            let uid = s
+                .owner(&headers, method == axum::http::Method::GET, false)
+                .await?
+                .uid;
             strict(&input, &["callerName", "expiresInDays"])?;
             let name = string(&input, "callerName", 1, 80, true)?;
             let days = integer(&input, "expiresInDays", 1, 90, Some(30))?;
@@ -599,35 +776,60 @@ async fn route(s: App, request: Request) -> Result<Response> {
             r.create_grant(uid, check_id(did)?, name, days).await?
         }
         ("DELETE", ["v1", "grants", gid]) => {
-            r.revoke(s.owner(&headers).await?.uid, check_id(gid)?)
-                .await?;
+            r.revoke(
+                s.owner(&headers, method == axum::http::Method::GET, false)
+                    .await?
+                    .uid,
+                check_id(gid)?,
+            )
+            .await?;
             json!({"ok":true})
         }
         ("DELETE", ["v1", "account"]) => {
-            let identity = s.owner(&headers).await?;
+            let identity = s.owner(&headers, false, true).await?;
+            let now = r.now() as f64 / 1000.0;
             ensure(
-                now() as f64 / 1000.0 - identity.auth_time < 300.0,
+                now - identity.auth_time < 300.0 && identity.auth_time <= now + 30.0,
                 401,
                 "recent_sign_in_required",
             )?;
-            r.delete_account(identity.uid.clone()).await?;
-            s.options
-                .auth
-                .delete(&crate::js_string::utf8(&identity.uid))
-                .await?;
-            json!({"ok":true})
+            r.access_read(identity.uid.clone(), None).await?;
+            status = 202;
+            r.deletion_request(identity.uid).await?
         }
-        ("GET", ["v1", "history"]) => r.history(s.owner(&headers).await?.uid, None).await?,
+        ("GET", ["v1", "history"]) => {
+            r.history(
+                s.owner(&headers, method == axum::http::Method::GET, false)
+                    .await?
+                    .uid,
+                None,
+            )
+            .await?
+        }
         ("GET", ["v1", "devices", did, "history"]) => {
-            r.history(s.owner(&headers).await?.uid, Some(check_id(did)?))
-                .await?
+            r.history(
+                s.owner(&headers, method == axum::http::Method::GET, false)
+                    .await?
+                    .uid,
+                Some(check_id(did)?),
+            )
+            .await?
         }
         ("GET", ["v1", "devices", did, "requests", rid]) => {
-            r.phone_get(s.owner(&headers).await?.uid, check_id(did)?, check_id(rid)?)
-                .await?
+            r.phone_get(
+                s.owner(&headers, method == axum::http::Method::GET, false)
+                    .await?
+                    .uid,
+                check_id(did)?,
+                check_id(rid)?,
+            )
+            .await?
         }
         ("POST", ["v1", "devices", did, "requests", rid, "events"]) => {
-            let uid = s.owner(&headers).await?.uid;
+            let uid = s
+                .owner(&headers, method == axum::http::Method::GET, false)
+                .await?
+                .uid;
             validate_event(&input)?;
             r.transition(
                 Auth::Phone {
@@ -643,7 +845,9 @@ async fn route(s: App, request: Request) -> Result<Response> {
             status = 201;
             r.create(bearer(&headers)?, input).await?
         }
-        ("GET", ["v1", "requests", rid]) => r.get(bearer(&headers)?, check_id(rid)?).await?,
+        ("GET", ["v1", "requests", rid]) => {
+            r.get(s.agent_read(&headers).await?, check_id(rid)?).await?
+        }
         ("POST", ["v1", "requests", rid, "cancel"]) => {
             r.transition(
                 Auth::Agent(bearer(&headers)?),
@@ -657,23 +861,32 @@ async fn route(s: App, request: Request) -> Result<Response> {
             r.form_create(bearer(&headers)?, input).await?
         }
         ("GET", ["v2", "requests", rid]) => {
-            r.form_get(Auth::Agent(bearer(&headers)?), check_id(rid)?)
+            r.form_get(Auth::Agent(s.agent_read(&headers).await?), check_id(rid)?)
                 .await?
         }
         ("GET", ["v2", "requests", rid, "result"]) => {
-            r.form_result(bearer(&headers)?, check_id(rid)?).await?
+            r.form_result(s.agent_read(&headers).await?, check_id(rid)?)
+                .await?
         }
         ("POST", ["v2", "requests", rid, "cancel"]) => {
             r.form_cancel(bearer(&headers)?, check_id(rid)?).await?
         }
         ("GET", ["v2", "devices", did, "inbox"]) => {
-            r.inbox(s.owner(&headers).await?.uid, check_id(did)?)
-                .await?
+            r.inbox(
+                s.owner(&headers, method == axum::http::Method::GET, false)
+                    .await?
+                    .uid,
+                check_id(did)?,
+            )
+            .await?
         }
         ("GET", ["v2", "devices", did, "requests", rid]) => {
             r.form_get(
                 Auth::Phone {
-                    uid: s.owner(&headers).await?.uid,
+                    uid: s
+                        .owner(&headers, method == axum::http::Method::GET, false)
+                        .await?
+                        .uid,
                     device: check_id(did)?,
                 },
                 check_id(rid)?,
@@ -681,13 +894,19 @@ async fn route(s: App, request: Request) -> Result<Response> {
             .await?
         }
         ("POST", ["v2", "devices", did, "requests", rid, "events"]) => {
-            let uid = s.owner(&headers).await?.uid;
+            let uid = s
+                .owner(&headers, method == axum::http::Method::GET, false)
+                .await?
+                .uid;
             let did = check_id(did)?;
             let rid = check_id(rid)?;
             r.observe(uid, did, rid, input).await?
         }
         ("POST", ["v2", "devices", did, "requests", rid, "submissions"]) => {
-            let uid = s.owner(&headers).await?.uid;
+            let uid = s
+                .owner(&headers, method == axum::http::Method::GET, false)
+                .await?
+                .uid;
             r.submit(uid, check_id(did)?, check_id(rid)?, input).await?
         }
         ("PUT", ["v2", "grants", gid, "forms"]) => {
@@ -695,21 +914,27 @@ async fn route(s: App, request: Request) -> Result<Response> {
             let approved = input["approved"]
                 .as_bool()
                 .ok_or(Error::Api(400, "invalid_input"))?;
-            r.approve_forms(s.owner(&headers).await?.uid, check_id(gid)?, approved)
-                .await?;
+            r.approve_forms(
+                s.owner(&headers, method == axum::http::Method::GET, false)
+                    .await?
+                    .uid,
+                check_id(gid)?,
+                approved,
+            )
+            .await?;
             json!({"ok":true})
         }
         ("POST", ["v2", "webhooks"]) => {
             status = 201;
             r.register_webhook(bearer(&headers)?, input).await?
         }
-        ("GET", ["v2", "webhooks"]) => r.webhooks(bearer(&headers)?, None).await?,
+        ("GET", ["v2", "webhooks"]) => r.webhooks(s.agent_read(&headers).await?, None).await?,
         ("DELETE", ["v2", "webhooks", hid]) => {
             r.webhooks(bearer(&headers)?, Some(check_id(hid)?)).await?
         }
-        ("GET", ["v2", "events"]) => r.events(bearer(&headers)?, cursor()?).await?,
+        ("GET", ["v2", "events"]) => r.events(s.agent_read(&headers).await?, cursor()?).await?,
         ("GET", ["v2", "events", "stream"]) => {
-            return stream(s.clone(), bearer(&headers)?, cursor()?).await;
+            return stream(s.clone(), s.agent_read(&headers).await?, cursor()?).await;
         }
         ("POST", ["internal", operation @ ("delivery" | "maintenance")]) => {
             let reason = if *operation == "delivery" {
@@ -724,15 +949,33 @@ async fn route(s: App, request: Request) -> Result<Response> {
                 .await
                 .map_err(|_| Error::Api(401, reason))?;
             if *operation == "delivery" {
+                r.deletion_dispatch(s.options.auth.clone()).await?;
                 r.dispatch().await?;
             } else {
-                r.maintenance().await?;
+                r.telemetry_maintenance(s.options.auth.clone()).await?;
             }
             json!({"ok":true})
         }
         ("POST", ["mcp"]) => {
             let secret = bearer(&headers)?;
             r.check_agent(&secret).await?;
+            let messages = input
+                .as_array()
+                .map(|messages| messages.as_slice())
+                .unwrap_or_else(|| std::slice::from_ref(&input));
+            for message in messages {
+                if message["method"] == "tools/call"
+                    && [
+                        "get_sms_code_request",
+                        "inspect_request",
+                        "get_request_result",
+                        "poll_request_events",
+                    ]
+                    .contains(&text(&message["params"], "name"))
+                {
+                    s.agent_read(&headers).await?;
+                }
+            }
             let request =
                 Request::from_parts(parts, Body::from(serde_json::to_vec(&input).unwrap()));
             return Ok(crate::mcp::handle(r.clone(), secret, request, input).await);
@@ -759,50 +1002,342 @@ fn urlencoding(s: &str) -> Result<String> {
     }
     String::from_utf8(bytes).map_err(|_| Error::External)
 }
-async fn stream(s: App, secret: String, cursor: Option<String>) -> Result<Response> {
-    let mut page = s.relay.events(secret.clone(), cursor.clone()).await?;
-    let (mut next, relay) = (cursor, s.relay);
-    let duration = s.options.sse_duration;
-    let (tx, rx) = tokio::sync::mpsc::channel::<std::result::Result<String, Infallible>>(128);
-    tx.try_send(Ok("retry: 1000\n\n".into())).unwrap();
-    tokio::spawn(async move {
-        let end = tokio::time::Instant::now() + duration;
-        loop {
-            for event in arr(&page, "events") {
-                let frame = format!(
-                    "id: {}\nevent: {}\ndata: {}\n\n",
-                    text(&event, "id"),
-                    text(&event, "type"),
-                    js_json(&event, false)
-                );
-                if tx.try_send(Ok(frame)).is_err() {
-                    return;
-                }
-                next = Some(text(&event, "id").into());
-            }
-            if tx.try_send(Ok(": heartbeat\n\n".into())).is_err() {
-                return;
-            }
-            if tokio::time::Instant::now() >= end {
-                return;
-            }
-            tokio::select! {_=tx.closed()=>return,_=tokio::time::sleep_until(end.min(tokio::time::Instant::now()+Duration::from_secs(1)))=>{}}
-            if tokio::time::Instant::now() >= end {
-                return;
-            }
-            match relay.events(secret.clone(), next.clone()).await {
-                Ok(p) => page = p,
-                Err(_) => return,
-            }
+fn signing_fingerprints(legacy: Option<&str>, additional: Option<&Value>) -> Result<Vec<String>> {
+    ensure(
+        additional.is_none_or(Value::is_array),
+        503,
+        "app_links_not_configured",
+    )?;
+    let values = additional
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .cloned()
+        .chain(
+            legacy
+                .filter(|value| !value.is_empty())
+                .map(|value| json!(value)),
+        );
+    let format = regex::Regex::new(r"^(?:[A-Fa-f0-9]{2}:){31}[A-Fa-f0-9]{2}$").unwrap();
+    let mut fingerprints = Vec::new();
+    for value in values {
+        let value = value
+            .as_str()
+            .filter(|value| format.is_match(value))
+            .ok_or(Error::Api(503, "app_links_not_configured"))?
+            .to_ascii_uppercase();
+        if !fingerprints.contains(&value) {
+            fingerprints.push(value);
         }
-    });
+    }
+    ensure(!fingerprints.is_empty(), 503, "app_links_not_configured")?;
+    Ok(fingerprints)
+}
+async fn stream(s: App, secret: String, cursor: Option<String>) -> Result<Response> {
+    let page = s.relay.events(secret.clone(), cursor.clone()).await?;
+    let relay = s.relay.clone();
+    let key = secret.clone();
+    let grant = s
+        .relay
+        .store
+        .tx(move |tx| {
+            let (relay, key) = (relay.clone(), key.clone());
+            Box::pin(async move { Ok(relay.agent(tx, &key).await?.0) })
+        })
+        .await?;
+    let lease = s
+        .relay
+        .access_stream(
+            text(&grant, "ownerId").into(),
+            text(&grant, "id").into(),
+            s.options.sse_duration.as_millis().min(i64::MAX as u128) as i64,
+        )
+        .await?;
+    let remaining = (num(&lease, "deadline") - s.relay.now()).max(0) as u64;
+    if remaining == 0 {
+        s.relay.access_release(lease).await?;
+        return Ok(Response::new(Body::empty()));
+    }
+    let end = tokio::time::Instant::now() + Duration::from_millis(remaining);
+    let relay = s.relay.clone();
+    let release_relay = s.relay;
+    let body = event_body(
+        page,
+        cursor,
+        end,
+        Duration::from_secs(1),
+        move |next| {
+            let (relay, secret) = (relay.clone(), secret.clone());
+            async move { relay.events(secret, next).await }
+        },
+        move || async move {
+            let _ = release_relay.access_release(lease).await;
+        },
+    );
     Ok((
         [
             ("Content-Type", "text/event-stream"),
             ("Cache-Control", "no-cache, no-store"),
             ("X-Accel-Buffering", "no"),
         ],
-        Body::from_stream(tokio_stream::wrappers::ReceiverStream::new(rx)),
+        body,
     )
         .into_response())
+}
+// The supervisor owns both admission release and the response channel. A pending
+// database read cannot suppress the independent deadline or disconnect signal.
+fn event_body<Read, ReadFuture, Release, ReleaseFuture>(
+    mut page: Value,
+    mut next: Option<String>,
+    end: tokio::time::Instant,
+    interval: Duration,
+    mut read: Read,
+    release: Release,
+) -> Body
+where
+    Read: FnMut(Option<String>) -> ReadFuture + Send + 'static,
+    ReadFuture: std::future::Future<Output = Result<Value>> + Send,
+    Release: FnOnce() -> ReleaseFuture + Send + 'static,
+    ReleaseFuture: std::future::Future<Output = ()> + Send,
+{
+    use futures::StreamExt;
+    let (tx, rx) = tokio::sync::mpsc::channel::<std::result::Result<String, Infallible>>(128);
+    tx.try_send(Ok("retry: 1000\n\n".into())).unwrap();
+    tokio::spawn(async move {
+        let pump = async {
+            loop {
+                for event in arr(&page, "events") {
+                    let frame = format!(
+                        "id: {}\nevent: {}\ndata: {}\n\n",
+                        text(&event, "id"),
+                        text(&event, "type"),
+                        js_json(&event, false)
+                    );
+                    if tx.try_send(Ok(frame)).is_err() {
+                        return;
+                    }
+                    next = Some(text(&event, "id").into());
+                }
+                if tx.try_send(Ok(": heartbeat\n\n".into())).is_err() {
+                    return;
+                }
+                tokio::time::sleep(interval).await;
+                match read(next.clone()).await {
+                    Ok(value) => page = value,
+                    Err(_) => return,
+                }
+            }
+        };
+        tokio::select! {
+            _ = pump => {},
+            _ = tokio::time::sleep_until(end) => {},
+            _ = tx.closed() => {},
+        }
+        drop(tx);
+        release().await;
+    });
+    Body::from_stream(
+        tokio_stream::wrappers::ReceiverStream::new(rx).take_until(tokio::time::sleep_until(end)),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct Capture(tokio::sync::mpsc::UnboundedSender<Value>);
+    impl Delivery for Capture {
+        fn record(&self, event: Value) -> futures::future::BoxFuture<'_, ()> {
+            Box::pin(async move {
+                let _ = self.0.send(event);
+            })
+        }
+        fn notify<'a>(
+            &'a self,
+            _: &'a str,
+            _: &'a str,
+            _: i64,
+            _: bool,
+        ) -> futures::future::BoxFuture<'a, Result<()>> {
+            Box::pin(async { Ok(()) })
+        }
+        fn wake(&self) -> futures::future::BoxFuture<'_, Result<()>> {
+            Box::pin(async { Ok(()) })
+        }
+        fn webhook<'a>(
+            &'a self,
+            _: &'a str,
+            _: &'a str,
+            _: &'a Value,
+        ) -> futures::future::BoxFuture<'a, Result<()>> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    #[tokio::test]
+    async fn http_completion_preserves_json_headers_body_and_exact_size_hint() {
+        let (logger, mut events) = tokio::sync::mpsc::unbounded_channel();
+        let response = json_response(json!({"ok":true}), 200);
+        let headers = response.headers().clone();
+        let length = response.body().size_hint().exact();
+        let response = measured_response(
+            response,
+            Arc::new(Capture(logger)),
+            "GET",
+            "/health",
+            Instant::now(),
+        );
+        assert_eq!(response.headers(), &headers);
+        assert_eq!(response.body().size_hint().exact(), length);
+        assert!(!response.body().is_end_stream());
+        assert!(events.try_recv().is_err());
+        let bytes = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap();
+        assert_eq!(bytes.as_ref(), b"{\"ok\":true}");
+        let event = tokio::time::timeout(Duration::from_secs(1), events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(event["event"], "http_completed");
+        assert_eq!(event["status_class"], "2xx");
+        assert_eq!(event["route"], "/health");
+        assert!(events.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn http_completion_waits_until_the_sse_body_finishes() {
+        let (logger, mut events) = tokio::sync::mpsc::unbounded_channel();
+        let body = event_body(
+            json!({"events":[]}),
+            None,
+            tokio::time::Instant::now() + Duration::from_millis(100),
+            Duration::from_millis(10),
+            |_| std::future::pending::<Result<Value>>(),
+            || async {},
+        );
+        let response = measured_response(
+            Response::new(body),
+            Arc::new(Capture(logger)),
+            "GET",
+            "/v2/events/stream",
+            Instant::now(),
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(events.try_recv().is_err());
+        let bytes = tokio::time::timeout(
+            Duration::from_secs(1),
+            axum::body::to_bytes(response.into_body(), 1024),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(String::from_utf8_lossy(&bytes).contains("heartbeat"));
+        let event = tokio::time::timeout(Duration::from_secs(1), events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(num(&event, "duration_ms") >= 70);
+        assert_eq!(event["route"], "/v2/events/stream");
+        assert!(events.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn stream_deadline_releases_admission_while_event_read_remains_pending() {
+        let reads = Arc::new(AtomicUsize::new(0));
+        let count = reads.clone();
+        let (released, release_seen) = tokio::sync::oneshot::channel();
+        let body = event_body(
+            json!({"events":[]}),
+            None,
+            tokio::time::Instant::now() + Duration::from_millis(100),
+            Duration::from_millis(10),
+            move |_| {
+                count.fetch_add(1, Ordering::SeqCst);
+                std::future::pending::<Result<Value>>()
+            },
+            move || async move {
+                let _ = released.send(());
+            },
+        );
+        let bytes = tokio::time::timeout(Duration::from_secs(1), axum::body::to_bytes(body, 1024))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(String::from_utf8_lossy(&bytes).contains("heartbeat"));
+        assert_eq!(reads.load(Ordering::SeqCst), 1);
+        tokio::time::timeout(Duration::from_secs(1), release_seen)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn stream_disconnect_releases_admission_before_its_deadline() {
+        let (released, release_seen) = tokio::sync::oneshot::channel();
+        let body = event_body(
+            json!({"events":[]}),
+            None,
+            tokio::time::Instant::now() + Duration::from_secs(60),
+            Duration::from_secs(1),
+            |_| std::future::pending::<Result<Value>>(),
+            move || async move {
+                let _ = released.send(());
+            },
+        );
+        drop(body);
+        tokio::time::timeout(Duration::from_secs(1), release_seen)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn stream_backpressure_stops_production_and_releases_admission() {
+        let (released, release_seen) = tokio::sync::oneshot::channel();
+        let events = (0..200)
+            .map(|id| json!({"id":id.to_string(),"type":"request.created"}))
+            .collect::<Vec<_>>();
+        let body = event_body(
+            json!({"events":events}),
+            None,
+            tokio::time::Instant::now() + Duration::from_secs(60),
+            Duration::from_secs(1),
+            |_| std::future::pending::<Result<Value>>(),
+            move || async move {
+                let _ = released.send(());
+            },
+        );
+        // Keep the receiver open without reading, as a stalled HTTP consumer does.
+        tokio::time::timeout(Duration::from_secs(1), release_seen)
+            .await
+            .unwrap()
+            .unwrap();
+        let bytes =
+            tokio::time::timeout(Duration::from_secs(1), axum::body::to_bytes(body, 100_000))
+                .await
+                .unwrap()
+                .unwrap();
+        let frames = String::from_utf8_lossy(&bytes);
+        assert!(frames.contains("event: request.created"));
+        assert!(!frames.contains("id: 199\n"));
+    }
+
+    #[test]
+    fn signing_fingerprints_preserve_order_and_reject_partial_configuration() {
+        let a = ["AA"; 32].join(":");
+        let b = ["BB"; 32].join(":");
+        assert_eq!(
+            signing_fingerprints(Some(&a), Some(&json!([b, a.to_lowercase()]))).unwrap(),
+            vec![b, a.clone()]
+        );
+        for invalid in [json!(null), json!("invalid"), json!([a, "bad"])] {
+            assert!(matches!(
+                signing_fingerprints(Some(&a), Some(&invalid)),
+                Err(Error::Api(503, "app_links_not_configured"))
+            ));
+        }
+        assert!(signing_fingerprints(None, None).is_err());
+    }
 }

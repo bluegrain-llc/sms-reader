@@ -33,6 +33,32 @@ pub struct Identity {
     pub uid: String,
     pub auth_time: f64,
 }
+fn provider_transport(error: reqwest::Error) -> Error {
+    Error::Provider(if error.is_timeout() {
+        "timeout"
+    } else {
+        "unavailable"
+    })
+}
+fn provider_response(status: u16, response: &Value) -> Error {
+    let details = response["error"]["details"].as_array();
+    let fcm = details
+        .into_iter()
+        .flatten()
+        .filter(|d| d["@type"] == "type.googleapis.com/google.firebase.fcm.v1.FcmError")
+        .find_map(|d| d["errorCode"].as_str());
+    Error::Provider(match fcm {
+        Some("UNREGISTERED") => "destination",
+        Some("QUOTA_EXCEEDED") => "quota",
+        Some("UNAVAILABLE") => "unavailable",
+        _ => match status {
+            429 => "quota",
+            502 | 503 => "unavailable",
+            504 => "timeout",
+            _ => "internal",
+        },
+    })
+}
 impl Google {
     pub fn new(project: String) -> Self {
         Self {
@@ -70,9 +96,14 @@ impl Google {
         } else {
             request = request.bearer_auth(self.access().await?);
         }
-        let r = request.send().await.map_err(|_| Error::External)?;
+        let r = request.send().await.map_err(provider_transport)?;
         if !r.status().is_success() {
-            return Err(Error::External);
+            let status = r.status().as_u16();
+            let error = r.json::<Value>().await.unwrap_or(Value::Null);
+            if error["error"]["message"] == "USER_NOT_FOUND" {
+                return Err(Error::Api(404, "auth/user-not-found"));
+            }
+            return Err(provider_response(status, &error));
         }
         r.json().await.map_err(|_| Error::External)
     }
@@ -209,13 +240,17 @@ impl Google {
         })
     }
     pub async fn delete_identity(&self, uid: &str) -> Result<()> {
-        self.api(
-            self.auth_url("delete"),
-            json!({"localId":uid}),
-            self.auth_emulator.is_some(),
-        )
-        .await?;
-        Ok(())
+        match self
+            .api(
+                self.auth_url("delete"),
+                json!({"localId":uid}),
+                self.auth_emulator.is_some(),
+            )
+            .await
+        {
+            Ok(_) | Err(Error::Api(_, "auth/user-not-found")) => Ok(()),
+            Err(error) => Err(error),
+        }
     }
     pub async fn verify_worker(&self, token: &str) -> Result<()> {
         ensure(
@@ -255,8 +290,10 @@ impl Delivery for Google {
                 (&self.queue, &self.service_url, &self.scheduler)
             {
                 let token = self.access().await?;
-                let response=self.client.post(format!("https://cloudtasks.googleapis.com/v2/{queue}/tasks")).timeout(Duration::from_secs(3)).bearer_auth(token).json(&json!({"task":{"httpRequest":{"httpMethod":"POST","url":format!("{url}/internal/delivery"),"oidcToken":{"serviceAccountEmail":email,"audience":url},"headers":{"Content-Type":"application/json"},"body":STANDARD.encode("{}")}}})).send().await.map_err(|_|Error::External)?;
-                response.error_for_status().map_err(|_| Error::External)?;
+                let response=self.client.post(format!("https://cloudtasks.googleapis.com/v2/{queue}/tasks")).timeout(Duration::from_secs(3)).bearer_auth(token).json(&json!({"task":{"httpRequest":{"httpMethod":"POST","url":format!("{url}/internal/delivery"),"oidcToken":{"serviceAccountEmail":email,"audience":url},"headers":{"Content-Type":"application/json"},"body":STANDARD.encode("{}")}}})).send().await.map_err(provider_transport)?;
+                if !response.status().is_success() {
+                    return Err(provider_response(response.status().as_u16(), &Value::Null));
+                }
             }
             Ok(())
         })

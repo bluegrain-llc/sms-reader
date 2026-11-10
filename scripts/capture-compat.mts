@@ -9,6 +9,8 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import { getParseErrorMessage } from '@modelcontextprotocol/sdk/server/zod-compat.js';
 import { CallToolRequestSchema, TaskAugmentedRequestParamsSchema, JSONRPCRequestSchema, JSONRPCMessageSchema, InitializeRequestSchema, ListToolsRequestSchema, PingRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { app } from '../server/src/http.js';
+import { mountAccountPages, type WebConfig } from '../server/src/account-pages.js';
+import type { Express } from 'express';
 import type { Relay } from '../server/src/relay.js';
 import { requestSchema, idSchema } from '../server/src/model.js';
 import { formSchema, submissionSchema, observationSchema, webhookSchema } from '../server/src/forms-model.js';
@@ -107,3 +109,20 @@ const source = readFileSync(new URL('server/src/http.ts', root), 'utf8');
 const start = source.indexOf('<!doctype html>'), end = source.indexOf('`);', start);
 if (start < 0 || end < 0) throw Error('Pairing HTML source moved; update its capture');
 writeFileSync(new URL('connect.html', directory), source.slice(start, end).replaceAll('${formatted}', '{{CODE}}'));
+
+// Capture account page templates through their registered handlers. Replace only
+// generated nonce/configuration values so regeneration remains deterministic.
+const webConfig: WebConfig = { apiKey: 'fixture-key', authDomain: 'fixture.firebaseapp.com', projectId: 'fixture', appId: 'fixture-app' };
+function accountPages(config?: WebConfig) {
+  const handlers = new Map<string, (req: unknown, res: any) => void>();
+  mountAccountPages({ use() {}, get(path: string, handler: (req: unknown, res: any) => void) { handlers.set(path, handler); } } as unknown as Express, config, '{{CONTACT}}');
+  return (path: string) => {
+    let html = '';
+    const response = { set() { return this; }, type() { return this; }, status() { return this; }, send(value: string) { html = value; } };
+    handlers.get(path)!({}, response);
+    return html.replaceAll(/nonce="[^"]+"/g, 'nonce="{{NONCE}}"').replace(JSON.stringify(webConfig), '{{CONFIG}}');
+  };
+}
+writeFileSync(new URL('privacy.html', directory), accountPages()('/privacy'));
+writeFileSync(new URL('account-delete.html', directory), accountPages(webConfig)('/account/delete'));
+writeFileSync(new URL('account-delete-unavailable.html', directory), accountPages()('/account/delete'));

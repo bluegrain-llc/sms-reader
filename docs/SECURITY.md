@@ -41,3 +41,6 @@ Retired manager-issuance APIs are removed and previously manager-issued credenti
 Bot-supplied short titles and Markdown explanations are bounded to 80 and 4,000 characters. CommonMark is parsed locally and rendered as native text; HTML is inert, no WebView is used, and links/images never fetch resources. The title and message never override the server-bound caller name.
 
 Wizard definitions are immutable and declarative. Conditions reference only earlier fields. The server evaluates visibility independently and rejects hidden-branch answers. A final submission validates the whole selected path; step navigation does not upload values. Older phones are excluded from wizard delivery unless they advertise the supported wizard version.
+
+
+Account deletion is an asynchronous durable job with immediate access tombstoning, bounded cleanup and Scheduler lease recovery. Read endpoints and SSE admission use shared Firestore limits. See [account deletion, receipts and deployment settings](ACCOUNT_DELETION.md) for contracts, current security review and remaining live acceptance.

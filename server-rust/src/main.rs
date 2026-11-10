@@ -34,6 +34,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             auth: google,
             public_url: std::env::var("SERVICE_URL").ok(),
             android_cert: std::env::var("ANDROID_SIGNING_SHA256").ok(),
+            android_certs: json_option("ANDROID_SIGNING_SHA256S")?,
+            firebase_web_config: json_option("FIREBASE_WEB_CONFIG")?,
+            privacy_contact: std::env::var("PRIVACY_CONTACT").ok(),
             origins: std::env::var("ALLOWED_ORIGINS")
                 .unwrap_or_default()
                 .split(',')
@@ -56,6 +59,13 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     .with_graceful_shutdown(shutdown())
     .await?;
     Ok(())
+}
+fn json_option(name: &str) -> Result<Option<serde_json::Value>, Box<dyn std::error::Error>> {
+    std::env::var(name)
+        .ok()
+        .filter(|value| !value.is_empty())
+        .map(|value| serde_json::from_str(&value).map_err(Into::into))
+        .transpose()
 }
 async fn shutdown() {
     #[cfg(unix)]

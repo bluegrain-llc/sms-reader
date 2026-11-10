@@ -30,6 +30,10 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: npm run test:unit
+      - name: Monitoring configuration tests
+        run: python3 -m unittest discover -s scripts/monitoring -p 'test_*.py'
+      - run: python3 -m unittest discover -s scripts/tests -p 'test_release*.py'
+      - run: python3 -m unittest discover -s scripts/tests -p 'test_deploy.py'
       - run: npm audit --omit=dev
 
   server-integration:
@@ -70,13 +74,18 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      - run: docker build -f server/Dockerfile -t sms-code-relay:local .
+      - run: docker build --build-arg SOURCE_REVISION="$GITHUB_SHA" -f server/Dockerfile -t sms-code-relay:local .
       - run: scripts/container-smoke.sh
-      - run: docker save sms-code-relay:local | gzip > /tmp/relay-image.tar.gz
+      - run: |
+          docker save sms-code-relay:local | gzip > /tmp/relay-image.tar.gz
+          cd /tmp
+          sha256sum relay-image.tar.gz > relay-image.sha256
       - uses: actions/upload-artifact@v4
         with:
           name: relay-container
-          path: /tmp/relay-image.tar.gz
+          path: |
+            /tmp/relay-image.tar.gz
+            /tmp/relay-image.sha256
           retention-days: 7
 
   rust:

@@ -165,7 +165,11 @@ impl Relay {
         Ok(())
     }
     pub async fn kick(&self) {
-        let _ = self.delivery.wake().await;
+        if let Err(error) = self.delivery.wake().await {
+            self.delivery
+                .emit("wakeup_failed", crate::telemetry::category(&error))
+                .await;
+        }
     }
     pub async fn form_create(&self, secret: String, raw: Value) -> Result<Value> {
         let definition = definition(raw)?;
