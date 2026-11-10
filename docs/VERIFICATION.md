@@ -218,3 +218,34 @@ Executed with an unconfigured debug build and synthetic data:
 | Debug builds and lint | `assembleDebug assembleDebugAndroidTest` and `lintDebug` passed; zero lint errors and 15 dependency-version warnings |
 
 The busy-state Compose check asserts navigation and cancellation callbacks only. The activity check separately exercises the production navigation handlers and mutable ViewModel draft. Discovery uses deterministic server-response fixtures. Authenticated uploads, real SMS reception/consent, FCM delivery and physical-phone races remain outside these checks.
+
+
+## Independent Inbox and Administration entries (2026-11-09)
+
+One installation now exposes separate Inbox and Administration launcher activities, icons and Android tasks. Connection links resolve to Administration; notifications resolve to Inbox. Administration has its own ViewModel and skips SMS recovery/discovery. Inbox refreshes request data without fetching administration lists. Account and device changes synchronize when an activity resumes and on its next automatic refresh.
+
+Validated locally with an unconfigured debug build and synthetic data:
+
+- All **30 Android unit tests** passed.
+- Debug lint, APK and instrumentation APK builds passed.
+- All **41 Compose/activity tests** passed at **360×640dp with 1.3 font scaling**, including empty/populated pull-to-refresh, independent tasks/ViewModels, connection-link routing and recreation, explicit interactive permissions, notification navigation, retained SMS drafts and wizard answers.
+- The connection-link close/recreation test also passed at the normal viewport. Its lifecycle assertion now waits for Android to finish destroying the activity.
+- Inbox and Administration screenshots were refreshed at normal, compact, landscape and dark settings. These previews contain synthetic data only.
+
+Automatic list refresh runs while the UI is visible and on resume; background delivery continues through the existing FCM path. Only a manual pull displays the refresh indicator. SMS listening still requires explicitly opening a request. Production authentication, carrier delivery and Play-services consent acceptance are unchanged from the earlier records above.
+
+
+## Signed v0.7.0 installation and example notifications (2026-11-09)
+
+The configured **v0.7.0 (9)** APK and AAB were built with the existing pilot signing key; unit tests and release lint passed. The APK certificate SHA-256 remains `ac32575608bdccf302625cb45b842bd46497adba9bf36e486141076abee8f0e2`. APK SHA-256: `675f568cd2dca4859292473021df7b7c0000a90123f10abf4d1e0c3df60af4bf`.
+
+Installed successfully over USB on the Samsung SM-G996B using an in-place, non-streaming install. Android reports version 0.7.0 (9), both Inbox and Administration launcher activities, and retained notification permission. Both activities launched successfully. Three fresh interactive examples (expense approval, form controls and multi-step wizard) were accepted by FCM and observed in the phone's notification list. A fourth example, a synthetic SMS-code request, reached `completed`. No actual SMS was triggered and no response values or SMS codes were logged.
+
+Metadata-only installation and notification records are retained privately in `artifacts/pilot-setup/v070-install-verification.json` and the adjacent v070 demo ledgers.
+
+
+## Request-opening transition fix (v0.7.1)
+
+Inbox selection now leaves the feed visible while the selected request loads, with an inline progress indicator. It navigates directly to a ready response. Notification entry and retry initialize loading before rendering, and retained responses stay visible during repeated entry. Back abandons a pending navigation without cancelling the request; recreation retains the target metadata.
+
+All **30 Android unit tests**, debug lint and APK builds passed. All **44 Compose/activity tests** passed on the API 36 emulator, including new coverage for delayed Inbox opening, retained form reopening, pending-navigation Back, and the initial notification loading state.

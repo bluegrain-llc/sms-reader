@@ -2,11 +2,9 @@ package com.bluegrain.smsrelay
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -18,54 +16,34 @@ import java.text.DateFormat
 import java.util.Date
 
 @Composable
-fun ScreenToolbar(title: String, onBack: (() -> Unit)? = null, actions: @Composable RowScope.() -> Unit = {}) {
-    Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-        if (onBack != null) TextButton(onClick = onBack) { Text("Back") }
-        Text(title, Modifier.weight(1f).padding(vertical = 12.dp), style = MaterialTheme.typography.titleLarge)
-        actions()
-    }
-}
-
-@Composable
-fun SwitchRow(label: String, checked: Boolean, enabled: Boolean, onToggle: () -> Unit) {
-    Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).toggleable(value = checked, enabled = enabled, role = Role.Switch, onValueChange = { onToggle() }),
-        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        Text(label, Modifier.weight(1f))
-        Switch(checked = checked, onCheckedChange = null, enabled = enabled)
-    }
-}
-
-@Composable
-fun InboxScreen(state: RelayUiState, forms: List<RequestForm>, onSettings: () -> Unit, onRefresh: () -> Unit,
-    onOpenSms: (String) -> Unit, onOpenForm: (String) -> Unit) {
+fun InboxScreen(state: RelayUiState, forms: List<RequestForm>, onAdministration: () -> Unit, onRefresh: () -> Unit,
+    onOpenSms: (String) -> Unit, onOpenForm: (String) -> Unit, refreshing: Boolean = false, openingTarget: RequestTarget? = null) {
     Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
         Column(Modifier.fillMaxSize().safeDrawingPadding()) {
-            ScreenToolbar("Inbox", actions = {
-                TextButton(onClick = onRefresh, enabled = !state.busy) { Text("Refresh") }
-                TextButton(onClick = onSettings) { Text("Settings") }
-            })
-            if (state.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
-            LazyColumn(Modifier.fillMaxSize().testTag("inbox-list")) {
+            ScreenToolbar("Inbox")
+            RefreshableList(refreshing, onRefresh, modifier = Modifier.testTag("inbox-list")) {
                 state.error?.let { item { Text(it, Modifier.padding(16.dp), color = MaterialTheme.colorScheme.error) } }
                 if (!state.configured || !state.signedIn || !state.registered) item {
                     Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text(if (!state.configured) "Pilot setup needed" else if (!state.signedIn) "Sign in to receive requests" else "Connect this phone",
+                        Text(if (!state.configured) "Service not configured" else if (!state.signedIn) "Sign in to receive requests" else "Connect this phone",
                             style = MaterialTheme.typography.titleMedium)
-                        Text("Open Settings to finish connecting this phone.", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        Button(onClick = onSettings, modifier = Modifier.fillMaxWidth()) { Text("Open Settings") }
+                        Button(onClick = onAdministration, modifier = Modifier.fillMaxWidth()) { Text("Open Administration") }
                     }
                 }
                 val sms = state.pendingSms?.takeIf { (it.listeningDeadline ?: it.expiresAt) > state.now }
                 sms?.let { request -> item(key = "sms:${request.id}") {
                     InboxRow("sms:${request.id}", request.caller, request.title,
-                        "SMS · ${requestStatusLabel(request.status)}", request.listeningDeadline ?: request.expiresAt) { onOpenSms(request.id) }
+                        "SMS · ${requestStatusLabel(request.status)}", request.listeningDeadline ?: request.expiresAt,
+                        openingTarget == RequestTarget(request.id, RequestKind.Sms)) { onOpenSms(request.id) }
                 } }
                 val pending = forms.filter { it.status == "pending" && it.expiresAt > state.now }
                 pending.forEach { form -> item(key = "form:${form.id}") {
-                    InboxRow("form:${form.id}", form.caller, form.title, "Form · Waiting for your response", form.expiresAt) { onOpenForm(form.id) }
+                    InboxRow("form:${form.id}", form.caller, form.title, "Form", form.expiresAt,
+                        openingTarget == RequestTarget(form.id, RequestKind.Form)) { onOpenForm(form.id) }
                 } }
-                if (sms == null && pending.isEmpty()) item {
-                    Text("No pending requests.", Modifier.padding(16.dp), color = MaterialTheme.colorScheme.onSurfaceVariant)
+                if (state.configured && state.signedIn && state.registered && sms == null && pending.isEmpty()) item {
+                    Text("All caught up", Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 48.dp),
+                        style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
         }
@@ -73,12 +51,16 @@ fun InboxScreen(state: RelayUiState, forms: List<RequestForm>, onSettings: () ->
 }
 
 @Composable
-private fun InboxRow(tag: String, caller: String, title: String, status: String, expiresAt: Long, onOpen: () -> Unit) {
-    Column(Modifier.fillMaxWidth().testTag(tag).clickable(role = Role.Button, onClick = onOpen)
+private fun InboxRow(tag: String, caller: String, title: String, status: String, expiresAt: Long, opening: Boolean, onOpen: () -> Unit) {
+    Column(Modifier.fillMaxWidth().testTag(tag).clickable(enabled = !opening, role = Role.Button, onClick = onOpen)
         .padding(horizontal = 16.dp, vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Text(caller, style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
         Text(title, style = MaterialTheme.typography.titleMedium)
-        Text(status, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            if (opening) CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
+            Text(if (opening) "Opening…" else status, style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
         Text("Expires ${DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT).format(Date(expiresAt))}",
             style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }

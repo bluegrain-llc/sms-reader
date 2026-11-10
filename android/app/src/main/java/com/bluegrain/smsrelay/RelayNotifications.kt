@@ -46,7 +46,7 @@ object RelayNotifications {
             .setData("smsrelay://request/$id".toUri()).putExtra("requestId", id).putExtra("kind", kind).putExtra("notificationTap", true), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
         val notification = NotificationCompat.Builder(context, CHANNEL).setSmallIcon(com.bluegrain.smsrelay.R.drawable.ic_relay)
             .setContentTitle(if (consent) "Review your SMS approval" else if (kind == "form") "A response has been requested" else "A code has been requested")
-            .setContentText("Open SMS Code Relay to review and continue.").setContentIntent(tap)
+            .setContentText("Open Inbox to respond.").setContentIntent(tap)
             .setVisibility(NotificationCompat.VISIBILITY_PRIVATE).setAutoCancel(true).setOnlyAlertOnce(true)
             .setTimeoutAfter(if (kind == "form") 24 * 60 * 60_000L else 10 * 60_000L).build()
         try { NotificationManagerCompat.from(context).notify(id, 1, notification) }

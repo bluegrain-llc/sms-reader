@@ -35,6 +35,14 @@ class NavigationScreenTest {
         assertEquals("first", opened)
     }
 
+    @Test fun notificationEntryStartsLoadingWithoutAnErrorPlaceholder() {
+        compose.setContent { RelayTheme { RelayScreen(session,
+            RelayDestination.Response(RequestTarget("new", RequestKind.Form), RequestOrigin.Notification)) } }
+        compose.onNodeWithText("Opening this request…").assertIsDisplayed()
+        compose.onNodeWithText("Could not open this request.").assertDoesNotExist()
+        compose.onNodeWithText("Retry").assertDoesNotExist()
+    }
+
     @Test fun notificationEntryShowsOnlyAuthenticationLoadingOrRetryForItsTarget() {
         var state by mutableStateOf(session.copy(signedIn = false, registered = false))
         var loading by mutableStateOf(false)
@@ -54,17 +62,39 @@ class NavigationScreenTest {
         compose.onNodeWithText("Inbox").assertDoesNotExist(); compose.onNodeWithText("Settings").assertDoesNotExist()
     }
 
-    @Test fun settingsIsNotInterruptedByAnArrivingSmsAndBackReturnsToInbox() {
+    @Test fun administrationIsNotInterruptedByAnArrivingSmsAndBackClosesIt() {
         var state by mutableStateOf(session)
-        var route by mutableStateOf<RelayDestination>(RelayDestination.Settings(SettingsSection.History))
-        compose.setContent { RelayTheme { RelayScreen(state, route, onBack = { route = RelayDestination.Inbox }) } }
+        var closes = 0
+        compose.setContent { RelayTheme { AdministrationScreen(state, AdministrationSection.History, onClose = { closes++ }) } }
         compose.runOnIdle { state = session.copy(request = request) }
-        compose.onNodeWithText("Recent outcomes").assertIsDisplayed()
+        compose.onNodeWithText("No history yet.").assertIsDisplayed()
         compose.onNodeWithText("SMS code").assertDoesNotExist()
-        preview("settings-history-preview.png")
+        preview("administration-history-preview.png")
         compose.runOnUiThread { compose.activity.onBackPressedDispatcher.onBackPressed() }
-        compose.onNodeWithText("Inbox").assertIsDisplayed()
-        compose.onNodeWithText("SMS assistant").assertIsDisplayed()
+        assertEquals(1, closes)
+        compose.onNodeWithText("Inbox").assertDoesNotExist()
+    }
+
+    @Test fun pullingDownRefreshesBothEmptyAndPopulatedInboxWithoutAButton() {
+        var refreshes = 0
+        var requests by mutableStateOf(emptyList<RequestForm>())
+        compose.setContent { RelayTheme { InboxScreen(session, requests, {}, { refreshes++ }, {}, {}) } }
+        compose.onNodeWithTag("inbox-list").performTouchInput { swipeDown() }
+        compose.waitUntil { refreshes == 1 }
+        compose.runOnIdle { requests = listOf(form()) }
+        compose.onNodeWithTag("inbox-list").performTouchInput { swipeDown() }
+        compose.waitUntil { refreshes == 2 }
+        compose.onNodeWithText("Refresh").assertDoesNotExist()
+        compose.onNodeWithText("Settings").assertDoesNotExist()
+    }
+
+    @Test fun administrationSupportsPullToRefreshWithoutAButton() {
+        var refreshes = 0
+        compose.setContent { RelayTheme { AdministrationScreen(session, AdministrationSection.Access, onRefresh = { refreshes++ }) } }
+        compose.onNodeWithTag("administration-list").performTouchInput { swipeDown() }
+        compose.waitUntil { refreshes == 1 }
+        compose.onNodeWithText("Refresh settings").assertDoesNotExist()
+        preview("administration-preview.png")
     }
 
     @Test fun smsCloseAndSystemBackInvokeNavigationWhileBusyAndCancelIsExplicit() {

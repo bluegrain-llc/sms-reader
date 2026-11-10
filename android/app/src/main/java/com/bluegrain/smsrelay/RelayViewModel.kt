@@ -43,7 +43,7 @@ data class RelayUiState(
     val consentAvailable: Boolean = false, val now: Long = System.currentTimeMillis(), val foreground: Boolean = false,
     val opening: Boolean = false,
 )
-class RelayViewModel(application: Application) : AndroidViewModel(application) {
+class RelayViewModel @JvmOverloads constructor(application: Application, private val administrationOnly: Boolean = false) : AndroidViewModel(application) {
     private val app = application as RelayApplication
     private val repo get() = app.repository
     private val mutable = MutableStateFlow(RelayUiState(configured = app.configured))
@@ -57,11 +57,21 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
     private var boundId: String? = null
     private var poll: Job? = null
     private var blocked = false
+    private var sessionOwner: String? = if (app.configured) repo.ownerId else null
     private var recovered = false
     private val recoveryMutex = Mutex()
     init {
         if (app.configured) mutable.update { it.copy(signedIn = repo.signedIn, email = repo.email, registered = repo.registered, autoConnect = repo.autoConnect) }
-        viewModelScope.launch { while (true) { mutable.update { it.copy(now = System.currentTimeMillis()) }; delay(1_000) } }
+        viewModelScope.launch {
+            var ticks = 0
+            while (true) {
+                mutable.update { it.copy(now = System.currentTimeMillis()) }
+                // A bound SMS has its own poll; list refresh must not disable its code input.
+                if (++ticks % 15 == 0 && state.value.foreground && app.configured && !state.value.busy &&
+                    !state.value.opening && boundId == null) refresh(silent = true)
+                delay(1_000)
+            }
+        }
         if (app.configured && repo.signedIn) refresh()
     }
     fun error(message: String) { mutable.update { it.copy(error = message) } }
@@ -76,13 +86,13 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
     fun dismissConnection() { mutable.update { it.copy(connection = null, connectionCode = null) } }
-    private fun action(waitForIdle: Boolean = false, block: suspend () -> Unit) = viewModelScope.launch {
+    private fun action(waitForIdle: Boolean = false, silent: Boolean = false, block: suspend () -> Unit) = viewModelScope.launch {
         if (waitForIdle) while (state.value.busy) delay(50)
         if (state.value.busy) return@launch
-        mutable.update { it.copy(busy = true, error = null) }
+        mutable.update { it.copy(busy = true, error = if (silent) it.error else null) }
         try { block() } catch (e: CancellationException) { throw e }
-        catch (e: ApiFailure) { error(e.reason.replace('_', ' ')) }
-        catch (_: Exception) { error("Could not connect. Check your network and try again.") }
+        catch (e: ApiFailure) { if (!silent) error(e.reason.replace('_', ' ')) }
+        catch (_: Exception) { if (!silent) error("Could not connect. Check your network and try again.") }
         finally { mutable.update { it.copy(busy = false) } }
     }
     fun signedIn(token: String) = action {
@@ -96,10 +106,19 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         mutable.update { it.copy(registered = true, paused = device.getBoolean("paused"), autoConnect = true) }
         refreshData()
     }
-    fun refresh() = action { refreshData() }
+    fun refresh(silent: Boolean = false) = action(silent = silent) { if (app.configured) refreshData() }
     private suspend fun refreshData() {
+        val owner = repo.ownerId
+        if (owner != sessionOwner) {
+            clearLocal()
+            sessionOwner = owner
+            recovered = false
+            mutable.update { RelayUiState(configured = app.configured, foreground = it.foreground, busy = it.busy) }
+        }
+        mutable.update { it.copy(signedIn = repo.signedIn, email = repo.email, registered = repo.registered, autoConnect = repo.autoConnect) }
         if (!repo.signedIn) return
-        recover()
+        // Administration never owns or recovers the Inbox's SMS listening session.
+        if (!administrationOnly) recover()
         val devices = repo.devices()
         val d = (0 until devices.length()).map { devices.getJSONObject(it) }.find { it.optString("deviceId") == repo.deviceId }
         if (d == null && repo.registered) repo.autoConnect = false
@@ -108,13 +127,15 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         mutable.update { it.copy(registered = d != null, autoConnect = repo.autoConnect, paused = d?.getBoolean("paused") ?: false,
             devices = (0 until devices.length()).map { devices.getJSONObject(it).let { row ->
                 DeviceRow(row.getString("deviceId"), row.getString("name"), row.getBoolean("paused"), row.getString("deviceId") == repo.deviceId) } }) }
-        val grants = repo.grants()
-        val history = repo.history()
-        mutable.update { s -> s.copy(grants = (0 until grants.length()).map { grants.getJSONObject(it).let { g ->
-            GrantRow(g.getString("grantId"), g.getString("callerName"), g.getBoolean("revoked"), g.getLong("expiresAt"), g.optBoolean("formsApproved")) } },
-            history = (0 until history.length()).map { history.getJSONObject(it).let { h -> HistoryRow(h.optString("callerName"), h.getString("status"), h.nullString("reason")) } }) }
+        if (administrationOnly) {
+            val grants = repo.grants()
+            val history = repo.history()
+            mutable.update { s -> s.copy(grants = (0 until grants.length()).map { grants.getJSONObject(it).let { g ->
+                GrantRow(g.getString("grantId"), g.getString("callerName"), g.getBoolean("revoked"), g.getLong("expiresAt"), g.optBoolean("formsApproved")) } },
+                history = (0 until history.length()).map { history.getJSONObject(it).let { h -> HistoryRow(h.optString("callerName"), h.getString("status"), h.nullString("reason")) } }) }
+        }
         // Discover missed requests for Inbox; only an explicit open starts SMS reception.
-        refreshSmsDiscovery(d?.nullString("activeRequestId"), { boundId != null }, repo::request) { request ->
+        if (!administrationOnly) refreshSmsDiscovery(d?.nullString("activeRequestId"), { boundId != null }, repo::request) { request ->
             mutable.update { it.withSmsDiscovery(request) }
         }
     }
@@ -176,11 +197,11 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
         mutable.update { it.copy(foreground = value) }
         if (!value) {
             if (consent != null) state.value.request?.id?.let { RelayNotifications.show(app, it, true) }
-        } else if (app.configured && repo.signedIn && !state.value.opening) refresh()
+        } else if (app.configured && !state.value.opening) refresh(silent = true)
     }
     fun open(id: String) = viewModelScope.async {
         while (state.value.busy || state.value.opening) delay(50)
-        if (!RelayNotifications.validId.matches(id) || !app.configured || !repo.signedIn) return@async false
+        if (administrationOnly || !RelayNotifications.validId.matches(id) || !app.configured || !repo.signedIn) return@async false
         if (state.value.request.blocksSmsOpen(boundId, id)) { error("Finish or cancel the current request first."); return@async false }
         mutable.update { it.copy(busy = true, opening = true, error = null) }
         var loaded = false
