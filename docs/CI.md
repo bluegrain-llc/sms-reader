@@ -1,6 +1,6 @@
 # CI and delivery
 
-[CI and delivery](../.github/workflows/check.yml) runs on pushes, pull requests and manual dispatches. It uses Node 24, JDK 21 and Android SDK 36 without production credentials.
+[CI and delivery](../.github/workflows/check.yml) runs on pushes to `main`, pull requests and manual dispatches. Feature-branch pushes use the pull-request run rather than starting a second full suite; a branch without a pull request can be checked by manual dispatch. It uses Node 24, JDK 21 and Android SDK 36 without production credentials.
 
 The required jobs check:
 
