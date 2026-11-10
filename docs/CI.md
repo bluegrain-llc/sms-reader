@@ -4,11 +4,11 @@
 
 The required jobs check:
 
-- Server TypeScript compilation, unit tests and production dependency audit.
+- Server TypeScript compilation, unit tests and production dependency audit. Python acceptance-recorder tests verify that missing physical metadata, incomplete matrices, duplicate devices and invalid artifacts cannot produce a passing gate.
 - Firestore and Firebase Auth Emulator integration tests, including transactional lifecycle, races, expiry, caller isolation, REST authentication and MCP client requests. Missing emulators fail this suite.
 - A production Docker build with startup, health and unauthenticated-request smoke checks.
 - Android unit tests, lint, debug APK and instrumentation APK builds.
-- Connected Compose UI tests on an API 36 Android emulator. These cover approval, manual entry, automatic submission, cancellation, expiry and navigation. The separate opt-in `SmsInjectionTest` needs the telephony/Play-services runner in `scripts/test-sms-injection.py` and is not included in this UI suite.
+- Connected Compose UI tests on API 26, 33 and 36 Android emulators; each matrix job must pass. These cover approval, manual entry, automatic submission, cancellation, expiry and navigation. The separate opt-in `SmsInjectionTest` needs the telephony/Play-services runner in `scripts/test-sms-injection.py` and is not included in this UI suite.
 
 Each run retains Android test/lint reports, debug APKs and the tested container archive as private workflow artifacts. Failed backend integration runs also retain emulator logs. Debug APKs have no production configuration and show the setup screen.
 

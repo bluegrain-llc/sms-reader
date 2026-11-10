@@ -30,6 +30,7 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: npm run test:unit
+      - run: python3 -m unittest discover -s scripts/tests -p "test_*.py"
       - run: npm audit --omit=dev
 
   server-integration:
@@ -104,7 +105,11 @@ jobs:
           retention-days: 14
 
   android-integration:
-    name: Android emulator UI integration tests
+    name: Android UI integration (API ${{ matrix.api }})
+    strategy:
+      fail-fast: false
+      matrix:
+        api: [26, 33, 36]
     needs: android-unit
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -132,7 +137,7 @@ jobs:
           sudo udevadm trigger --name-match=kvm
       - uses: reactivecircus/android-emulator-runner@v2
         with:
-          api-level: 36
+          api-level: ${{ matrix.api }}
           arch: x86_64
           target: google_apis
           disk-size: 2048M
@@ -143,7 +148,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: android-integration-reports
+          name: android-integration-reports-api-${{ matrix.api }}
           path: |
             android/app/build/reports/androidTests/
             android/app/build/outputs/androidTest-results/
