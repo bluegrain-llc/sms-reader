@@ -48,6 +48,12 @@ android {
 // Release builds cannot silently ship placeholders or an unsigned artifact.
 tasks.configureEach {
     if (name == "preReleaseBuild") doFirst {
+        // Validate the exact property-preferred values that BuildConfig will embed.
+        val publicKeys = listOf("RELAY_URL", "FIREBASE_APP_ID", "FIREBASE_API_KEY", "FIREBASE_PROJECT_ID", "FIREBASE_SENDER_ID", "GOOGLE_WEB_CLIENT_ID")
+        val validation = ProcessBuilder("python3", rootProject.file("../scripts/release-config.py").absolutePath)
+            .inheritIO().also { process -> publicKeys.forEach { process.environment()[it] = setting(it) } }.start()
+        require(validation.waitFor() == 0) { "Release configuration validation failed" }
+
         require(setting("RELAY_URL").startsWith("https://")) { "Set HTTPS RELAY_URL" }
         for (key in listOf("FIREBASE_APP_ID", "FIREBASE_API_KEY", "FIREBASE_PROJECT_ID", "FIREBASE_SENDER_ID", "GOOGLE_WEB_CLIENT_ID", "RELAY_KEYSTORE", "RELAY_STORE_PASSWORD", "RELAY_KEY_ALIAS", "RELAY_KEY_PASSWORD")) {
             require(setting(key).isNotBlank()) { "Missing release setting: $key" }

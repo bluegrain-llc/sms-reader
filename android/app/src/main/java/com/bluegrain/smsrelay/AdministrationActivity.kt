@@ -37,7 +37,7 @@ class AdministrationActivity : AccountActivity() {
                             try { vm.refresh().join() } finally { refreshing = false }
                         }
                     },
-                    onRevoke = { vm.revoke(it) }, onDelete = { vm.deleteAccount() },
+                    onRevoke = { vm.revoke(it) }, onDelete = ::deleteAccountWithReauthentication,
                     onPauseDevice = { vm.pauseDevice(it) }, onRemoveDevice = { vm.removeDevice(it) },
                     onApproveForms = { id, approved -> vm.approveForms(id, approved) },
                     onReviewConnection = { vm.reviewConnection(it) }, onConnectionDecision = { code, approved -> vm.decideConnection(code, approved) },
