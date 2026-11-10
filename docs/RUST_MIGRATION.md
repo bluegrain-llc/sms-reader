@@ -30,7 +30,7 @@ Local verification on 2026-11-10:
 | Check | Result |
 | --- | --- |
 | TypeScript compilation and unit tests | Passed; 33 unit tests |
-| Rust formatting, Clippy with warnings denied, unit tests | Passed; 54 tests |
+| Rust formatting, Clippy with warnings denied, unit tests | Passed; 56 tests |
 | Shared emulator scenarios | 59 scenarios for each backend selection, including seven explicitly named TypeScript-only watch, maintenance and injected-failure scenarios; native Rust contracts cover those boundaries separately |
 | Migration contracts | Both document directions, HTTP/MCP parity, durable deletion/read-limit/stream-lease handoff, raw JSON/clock lifecycle cases, UTF-16 edge cases, native worker telemetry and Firebase emulator checks; 20 additional native watch, HEAD transport, identity, validation, telemetry and maintenance contracts passed |
 | Dependency audits | npm production audit and Cargo audit passed |

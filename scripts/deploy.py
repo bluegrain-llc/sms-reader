@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Deploy an already tested image, smoke a tagged revision, and promote safely."""
+"""Stage a tested image, verify its tagged revision, and optionally promote it."""
 import datetime
 import json
 import os

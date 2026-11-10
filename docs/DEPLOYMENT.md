@@ -42,7 +42,7 @@ Environment secrets: `RELAY_KEYSTORE_BASE64`, `RELAY_STORE_PASSWORD`, `RELAY_KEY
 
 The release workflow serializes production deploys and does not cancel an in-progress deployment for a later one. Staging may use the same scripts with a separate explicit project and identities. For an operator-run deployment set `PROJECT_ID`, `IMAGE_URI` (`LOCATION-docker.pkg.dev/PROJECT/REPO/IMAGE@sha256:...`), full `COMMIT_SHA`, `RELAY_SMOKE_TOKEN`, and certificate configuration before invoking `scripts/deploy.sh`. The operator must first establish the same successful-CI provenance; the protected workflow automates that check.
 
-`DEPLOYMENT_MANIFEST_PATH` defaults to `artifacts/deployment.json`. Its JSON fields include `projectId`, `region`, `service`, `serviceUrl`, `revision`, `image`, `commit`, `schedulerEmail`, `deliveryQueue`, `candidateUrl`, `previousTraffic`, `previousImages` and `status`. No token or signing secret is written. `PROMOTION_HOLD_SECONDS` may extend, but cannot shorten, the 60-second observation period.
+`DEPLOYMENT_MANIFEST_PATH` defaults to `artifacts/deployment.json`. Its JSON fields include `projectId`, `region`, `service`, `serviceUrl`, `revision`, `image`, `commit`, `backend`, `trafficMode`, `schedulerEmail`, `deliveryQueue`, `candidateUrl`, `previousTraffic`, `previousImages` and `status`. Stage mode records status `staged` after verifying the zero-traffic candidate. No token or signing secret is written. `PROMOTION_HOLD_SECONDS` may extend, but cannot shorten, the 60-second observation period.
 
 ## Failure and rollback
 
