@@ -2,6 +2,7 @@ package com.bluegrain.smsrelay
 
 import android.content.Intent
 import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.viewModelScope
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
 import androidx.test.core.app.ActivityScenario
@@ -10,6 +11,12 @@ import org.junit.Assert.*
 import org.junit.Assume.assumeFalse
 import org.junit.Rule
 import org.junit.Test
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 
 // Exercises actual activity entry/recreation without an account, FCM, or service traffic.
 class NotificationNavigationTest {
@@ -112,6 +119,55 @@ class NotificationNavigationTest {
             openBusyResponse()
             scenario.onActivity { it.onBackPressedDispatcher.onBackPressed() }
             assertDraftRetained()
+        }
+    }
+    @Test fun terminalSmsStopsPendingPollBeforeSuccessorListening() {
+        isolatedBuild()
+        val old = PhoneRequest("c".repeat(64), "ready", "Assistant", "Sign in", null,
+            System.currentTimeMillis() + 600_000, System.currentTimeMillis() - 1, null)
+        val terminal = old.copy(status = "cancelled")
+        val successor = old.copy(id = "d".repeat(64), status = "pending_phone", listeningDeadline = null)
+        val delayedResponse = CompletableDeferred<PhoneRequest>()
+        var pendingPoll: Job? = null
+        ActivityScenario.launch<MainActivity>(Intent(context, MainActivity::class.java)).use { scenario ->
+            try {
+                scenario.onActivity { activity ->
+                    val vm = androidx.lifecycle.ViewModelProvider(activity)[RelayViewModel::class.java]
+                    val applyRequest = RelayViewModel::class.java.getDeclaredMethod("applyRequest", PhoneRequest::class.java)
+                        .apply { isAccessible = true }
+                    val boundId = RelayViewModel::class.java.getDeclaredField("boundId").apply { isAccessible = true }
+                    val repo = (activity.application as RelayApplication).repository
+                    applyRequest.invoke(vm, old)
+                    boundId.set(vm, old.id)
+                    // Model an in-flight poll response with a suspended ViewModel job after the old window ended.
+                    pendingPoll = vm.viewModelScope.launch(start = CoroutineStart.UNDISPATCHED) {
+                        applyRequest.invoke(vm, delayedResponse.await())
+                    }
+                    RelayViewModel::class.java.getDeclaredField("poll").apply { isAccessible = true }.set(vm, pendingPoll)
+                    MainActivity::class.java.getDeclaredMethod("openFromInbox", String::class.java, RequestKind::class.java)
+                        .apply { isAccessible = true }.invoke(activity, old.id, RequestKind.Sms)
+                    MainActivity::class.java.getDeclaredMethod("closeDestination").apply { isAccessible = true }.invoke(activity)
+                    assertTrue(requireNotNull(pendingPoll).isActive)
+                    applyRequest.invoke(vm, terminal)
+                    assertEquals(terminal, vm.state.value.request)
+                    applyRequest.invoke(vm, successor)
+                    boundId.set(vm, successor.id)
+                    repo.inFlight = successor.id
+                    delayedResponse.complete(terminal)
+                }
+                runBlocking { withTimeout(5_000) { requireNotNull(pendingPoll).join() } }
+                scenario.onActivity { activity ->
+                    val vm = androidx.lifecycle.ViewModelProvider(activity)[RelayViewModel::class.java]
+                    assertEquals(successor, vm.state.value.request)
+                    assertEquals(successor.id, RelayViewModel::class.java.getDeclaredField("boundId")
+                        .apply { isAccessible = true }.get(vm))
+                    assertEquals(successor.id, (activity.application as RelayApplication).repository.inFlight)
+                }
+            } finally {
+                pendingPoll?.cancel()
+                delayedResponse.cancel()
+                (context.applicationContext as RelayApplication).repository.inFlight = null
+            }
         }
     }
     @Test fun connectionLinksOpenAccessAndKeepItAcrossRecreation() {

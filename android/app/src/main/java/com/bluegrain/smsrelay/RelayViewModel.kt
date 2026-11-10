@@ -280,7 +280,7 @@ class RelayViewModel(application: Application) : AndroidViewModel(application) {
     private fun applyRequest(r: PhoneRequest) {
         val id = r.id
         mutable.update { it.copy(request = r) }
-        if (!r.active) { repo.inFlight = null; clearSensitive(); unregisterReceiver(); boundId = null; RelayNotifications.dismiss(app, id) }
+        if (!r.active) { poll?.cancel(); repo.inFlight = null; clearSensitive(); unregisterReceiver(); boundId = null; RelayNotifications.dismiss(app, id) }
     }
     fun takeConsent(): Pair<String, Intent>? {
         if (!state.value.foreground || blocked || consentLaunched) return null
