@@ -1,0 +1,103 @@
+{
+  "commit": null,
+  "versionCode": null,
+  "minimumTargetApi": 36,
+  "policyCheckedAt": null,
+  "operator": {
+    "legalName": null,
+    "privacyEmail": null,
+    "supportEmail": null
+  },
+  "urls": {
+    "privacy": null,
+    "deletion": null,
+    "support": null
+  },
+  "signing": {
+    "pilotSha256": null,
+    "uploadSha256": null,
+    "playSha256": []
+  },
+  "artifacts": {
+    "aab": {
+      "path": null,
+      "sha256": null
+    },
+    "playApk": {
+      "path": null,
+      "sha256": null
+    },
+    "playSplits": []
+  },
+  "play": {
+    "accountType": null,
+    "newPersonalAccount": null,
+    "developerAccountVerified": false,
+    "productionAccessGranted": false,
+    "noConsoleBlockers": false
+  },
+  "cohort": {
+    "startedAt": null,
+    "endedAt": null,
+    "continuousTesters": null,
+    "noReleaseBlockers": false
+  },
+  "evidence": {
+    "physicalAcceptance": {
+      "path": null,
+      "sha256": null
+    },
+    "cloudAcceptance": {
+      "path": null,
+      "sha256": null
+    },
+    "deploymentRollback": {
+      "path": null,
+      "sha256": null
+    },
+    "monitoringDrill": {
+      "path": null,
+      "sha256": null
+    },
+    "accountDeletion": {
+      "path": null,
+      "sha256": null
+    },
+    "capacityCostRestore": {
+      "path": null,
+      "sha256": null
+    },
+    "playInstalledSmoke": {
+      "path": null,
+      "sha256": null
+    },
+    "pageSizeRuntime": {
+      "path": null,
+      "sha256": null
+    },
+    "signingContinuity": {
+      "path": null,
+      "sha256": null
+    },
+    "dataSafetyApproval": {
+      "path": null,
+      "sha256": null
+    },
+    "reviewerAccess": {
+      "path": null,
+      "sha256": null
+    },
+    "storeAssets": {
+      "path": null,
+      "sha256": null
+    },
+    "consoleEligibility": {
+      "path": null,
+      "sha256": null
+    },
+    "finalCiAndReviews": {
+      "path": null,
+      "sha256": null
+    }
+  }
+}

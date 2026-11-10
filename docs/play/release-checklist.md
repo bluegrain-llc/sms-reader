@@ -1,0 +1,32 @@
+# Signing, testing and publication gates
+
+## Signing continuity
+
+- Keep package `com.bluegrain.smsrelay`. Increment versionCode above every version uploaded to any Play track, not only the checked-in value.
+- Preserve the pilot app signing identity so installed pilots can upgrade. In Play App Signing, use the option to supply the existing app signing key, following Console's encrypted PEPK transfer process. Only the account owner performs enrollment; never put private keys or export passwords in Git, issues or command transcripts.
+- Generate a distinct private upload key and register its certificate. The upload key authenticates AAB uploads; it is not the certificate used by the Play-installed APK. Back up the upload key and recovery instructions privately.
+- Record the pilot certificate, upload certificate, and **all** Play app signing fingerprints reported by Console, including additional certificates if key upgrades/hybrid signing apply. Register applicable SHA-1/SHA-256 values with Firebase/Google OAuth and publish the app signing SHA-256 set in assetlinks. Do not replace the pilot fingerprint prematurely.
+- Verify Google sign-in and verified App Links on the actual Play-installed APK. Test an in-place pilot upgrade; package equality alone does not prove signing continuity. Keep distinct upload and app signer expectations in the private record.
+- Do not upload the candidate until signed release lint/R8/build, AAB validation and final-head CI pass. Retain artifact hashes, version and signing reports outside Git.
+
+See [Play App Signing](https://support.google.com/googleplay/android-developer/answer/9842756?hl=en) and [Android signing](https://developer.android.com/studio/publish/app-signing). Policy checked 2026-11-09; recheck before submission.
+
+## Platform and listing
+
+- Confirm developer account legal identity, ownership, contact verification and production eligibility in Console. Do not infer account type from Firebase billing or a Google account name.
+- The current [target API policy](https://support.google.com/googleplay/android-developer/answer/11926878?hl=en) requires phone app submissions to target API 36 or higher. The readiness record's minimum target is 36; update it if policy changes.
+- Inspect all APK/AAB native libraries, including transitive SDK libraries, for 16 KiB ELF load alignment. Check uncompressed APK library ZIP alignment and run a 16 KiB emulator/device test. Structural alignment alone cannot prove runtime compatibility. See [16 KiB guidance](https://developer.android.com/guide/practices/page-sizes).
+- Inspect merged manifest: no debuggable application, cleartext networking, backups, broad SMS, Contacts, accessibility or notification-listener access. Notification permission and SMS User Consent are distinct.
+- Finish Data safety, privacy and account-deletion URLs, content rating questionnaire, target-audience and ads declarations, reviewer access and store assets. No ratings, age group or legal contact may be invented by this package.
+
+## Internal and closed testing
+
+1. Install from the internal Play track. Record delivered APK hash/signer, AAB hash/version, installation source, Android and Play-services versions. A sideloaded pilot is not Play acceptance.
+2. Run sign-in, App Links/pairing, notifications, manual entry, SMS consent, forms/wizards, competing-phone results, recent-login deletion and web deletion. Follow #5's complete physical matrix on the exact candidate. Keep codes/SMS bodies in memory only.
+3. Run a closed cohort for at least seven complete days. If the account is a new personal developer account covered by [the testing requirement](https://support.google.com/googleplay/android-developer/answer/14151465?hl=en), use at least 12 continuously opted-in testers for at least 14 days, then obtain production access. Organization accounts must satisfy their actual Console requirements. Record start/end and eligibility evidence privately; the validator does not prove continuous tester participation.
+4. Record crash/ANR and functional outcomes, open defects, reviewer-access rehearsal and cost/alert observations. No release-blocking defects may remain. The elapsed test period cannot be simulated by changing dates in the record.
+5. Re-run checks after fixes and record which evidence remains applicable to the exact new artifact. Candidate-bound acceptance evidence must match its APK/AAB hashes. A first release must complete its controlled cohort **before** production publication; do not assume Play offers percentage rollout for a first production release. For later updates, use Console's supported staged-rollout controls.
+
+## Final action
+
+The release owner reviews evidence, verifies #5–#10 are complete, checks final CI/review records and current Console warnings, then submits/publishes the approved candidate through Console. Record publication receipt and post-launch health only after they exist. Monitor alerts, delivery and deletion; stop further distribution on access-control defects or sensitive-content leakage. Halt an update rollout if available; Android rollback generally needs a higher-version corrective release, not installing an older versionCode.
