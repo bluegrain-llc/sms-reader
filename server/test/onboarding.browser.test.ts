@@ -26,6 +26,7 @@ test('registration defaults owner access off, needs one confirmation, no phone s
     else await r.fulfill({json:review});
   });
   await page.goto(origin+'/register/public-session'); await expect(page.locator('#review')).toBeVisible();
+  await expect(page.locator('#operator')).toBeVisible();
   await page.screenshot({path:'artifacts/onboarding-desktop.png',fullPage:true});
   await expect(page.locator('#self')).not.toBeChecked();await expect(page.locator('#permissions')).toBeHidden();
   await page.locator('#confirm').click();await expect(page.locator('#status')).toContainText('Service registered');await expect(page.locator('#phone')).toBeHidden();expect(approvals).toBe(1);

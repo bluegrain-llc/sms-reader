@@ -17,6 +17,7 @@ export class ServiceSession {
     await this.save();return {...s.registration,link:new URL(s.registration.registrationPath,s.baseUrl).href};
   }
   async waitForRegistration() {
+    if (!this.state.registered) await this.startRegistration();
     const s = this.state, approved=await this.client.poll(()=>this.client.request('/v3/registration-sessions/current',s.registrationToken),r=>r.status==='approved');
     s.serviceId=approved.serviceId;s.servicePath=approved.servicePath;s.registered=true;await this.save();await this.consumeDeliveries();return {serviceId:s.serviceId,link:new URL(s.servicePath,s.baseUrl).href};
   }

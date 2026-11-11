@@ -77,6 +77,18 @@ export class Onboarding {
           keyId(old.deliveryPublicKey) === keyId(input.deliveryPublicKey) && JSON.stringify(sorted(old.capabilities)) === JSON.stringify(sorted(input.capabilities)), 409, 'idempotency_conflict');
         return this.registrationView(old);
       }
+      const receipt = (await tx.get(this.ref('serviceCredentials', input.credentialHash))).data();
+      if (receipt) {
+        ensure(receipt.registrationId === id && receipt.registrationKeyId === keyId(input.deliveryPublicKey), 409, 'idempotency_conflict');
+        const s = await this.activeService(tx, receipt.serviceId);
+        ensure(s.credentialHash === input.credentialHash && s.name === input.name && s.purpose === input.purpose &&
+          JSON.stringify(sorted(s.capabilities)) === JSON.stringify(sorted(input.capabilities)), 409, 'idempotency_conflict');
+        const recovered: Registration = { id, serviceId: s.id, ownerId: s.ownerId, ...input, status: 'approved',
+          createdAt: s.createdAt, expiresAt: s.createdAt + 10 * MINUTE, connectionId: receipt.registrationConnectionId ?? null,
+          pollAfter: 0, purgeAt: new Date(this.now() + HISTORY) };
+        tx.create(this.ref('registrationSessions', id), recovered);
+        return this.registrationView(recovered);
+      }
       const rate = await this.rate(tx, `registration:${source}`, 30), global = await this.rate(tx, 'registration:global', 600);
       const session: Registration = { id, serviceId, ownerId: null, ...input, status: 'pending', createdAt: this.now(),
         expiresAt: this.now() + 10 * MINUTE, connectionId: null, pollAfter: 0, purgeAt: new Date(this.now() + HISTORY) };
@@ -149,7 +161,8 @@ export class Onboarding {
         ? await this.prepareGrant(tx, uid, s, r.deliveryPublicKey, input.capabilities, input.expiresInDays, null) : undefined;
       if (input.decision === 'approved') {
         tx.create(this.ref('services', s.id), s);
-        tx.create(this.ref('serviceCredentials', s.credentialHash), { serviceId: s.id, ownerId: uid });
+        tx.create(this.ref('serviceCredentials', s.credentialHash), { serviceId: s.id, ownerId: uid,
+          registrationId: r.id, registrationKeyId: s.deliveryKeyId, registrationConnectionId: grant?.connectionId ?? null });
         tx.create(this.ref('serviceDeliveryKeys', `${s.id}_${s.deliveryKeyId}`), { id: s.deliveryKeyId, serviceId: s.id, ownerId: uid, publicKey: r.deliveryPublicKey, retired: false } satisfies Key);
         grant?.commit();
       }

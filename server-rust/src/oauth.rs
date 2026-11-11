@@ -159,8 +159,11 @@ impl Relay {
             400,
             "invalid_input",
         )?;
-        let auth = text(&input, "token_endpoint_auth_method");
-        let auth = if auth.is_empty() { "none" } else { auth }.to_owned();
+        let auth = input
+            .get("token_endpoint_auth_method")
+            .map_or(Some("none"), Value::as_str)
+            .ok_or(Error::Api(400, "invalid_input"))?
+            .to_owned();
         ensure(
             ["none", "client_secret_post"].contains(&auth.as_str()),
             400,

@@ -35,6 +35,9 @@
     },
     "execution": {
       "taskSupport": "forbidden"
+    },
+    "_meta": {
+      "com.bluegrain.smsrelay/capability": "sms"
     }
   },
   {
@@ -55,6 +58,9 @@
     },
     "execution": {
       "taskSupport": "forbidden"
+    },
+    "_meta": {
+      "com.bluegrain.smsrelay/capability": "sms"
     }
   },
   {
@@ -75,6 +81,9 @@
     },
     "execution": {
       "taskSupport": "forbidden"
+    },
+    "_meta": {
+      "com.bluegrain.smsrelay/capability": "sms"
     }
   },
   {
@@ -432,6 +441,9 @@
     },
     "execution": {
       "taskSupport": "forbidden"
+    },
+    "_meta": {
+      "com.bluegrain.smsrelay/capability": "forms"
     }
   },
   {
@@ -452,6 +464,9 @@
     },
     "execution": {
       "taskSupport": "forbidden"
+    },
+    "_meta": {
+      "com.bluegrain.smsrelay/capability": "forms"
     }
   },
   {
@@ -472,6 +487,9 @@
     },
     "execution": {
       "taskSupport": "forbidden"
+    },
+    "_meta": {
+      "com.bluegrain.smsrelay/capability": "forms"
     }
   },
   {
@@ -492,6 +510,9 @@
     },
     "execution": {
       "taskSupport": "forbidden"
+    },
+    "_meta": {
+      "com.bluegrain.smsrelay/capability": "forms"
     }
   },
   {
@@ -509,6 +530,9 @@
     },
     "execution": {
       "taskSupport": "forbidden"
+    },
+    "_meta": {
+      "com.bluegrain.smsrelay/capability": "forms"
     }
   }
 ]

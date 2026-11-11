@@ -5,7 +5,7 @@ import { CompactEncrypt, importJWK } from 'jose';
 import QRCode from 'qrcode';
 import { createRequire } from 'node:module';
 const jsQR = createRequire(import.meta.url)('jsqr') as (data: Uint8ClampedArray, width: number, height: number) => { data: string } | null;
-import { providerTools } from '../../integrations/providers.mjs';
+import { providerTools, capabilityTools } from '../../integrations/providers.mjs';
 import { deliveryKey, credential } from '../../cli/client.mjs';
 import { ServiceSession } from '../../sdks/javascript/index.mjs';
 test('locally generated QR decodes to the public HTTPS link', async () => {
@@ -40,6 +40,12 @@ test('provider declarations expose only caller tools and never lifecycle authori
   assert.ok(!JSON.stringify([t.openai,t.anthropic,t.google]).includes('token'));
   await assert.rejects(t.execute('register_service',{}));assert.equal(calls.length,0);
   assert.deepEqual(await t.execute('request_form',{title:'Review'}),{status:'pending'});assert.equal(calls.length,1);
+});
+test('provider discovery fails closed for missing or unknown capability metadata', () => {
+  const tool = (name: string, cap?: string) => ({name,...(cap ? {_meta:{'com.bluegrain.smsrelay/capability':cap}} : {})});
+  const tools=[tool('new_tool'),tool('unknown','admin'),tool('a_form','forms'),tool('a_code','sms')];
+  assert.deepEqual(capabilityTools(tools,['forms']).map((t: {name:string})=>t.name),['a_form']);
+  assert.deepEqual(capabilityTools(tools,['sms']).map((t: {name:string})=>t.name),['a_code']);
 });
 
 test('Python key rotation resumes the saved retirement intent',()=>{

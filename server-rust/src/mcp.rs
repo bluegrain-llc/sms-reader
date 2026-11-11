@@ -60,20 +60,15 @@ impl ServerHandler for Mcp {
                 .into_iter()
                 .filter(|tool| {
                     g.get("capabilities").is_none()
-                        || crate::onboarding::capability(
-                            &g,
-                            if [
-                                "request_sms_code",
-                                "get_sms_code_request",
-                                "cancel_sms_code_request",
-                            ]
-                            .contains(&tool.name.as_ref())
-                            {
-                                "sms"
-                            } else {
-                                "forms"
-                            },
-                        )
+                        || tool
+                            .meta
+                            .as_ref()
+                            .and_then(|m| m.get("com.bluegrain.smsrelay/capability"))
+                            .and_then(Value::as_str)
+                            .is_some_and(|cap| {
+                                ["forms", "sms"].contains(&cap)
+                                    && crate::onboarding::capability(&g, cap)
+                            })
                 })
                 .collect(),
         ))

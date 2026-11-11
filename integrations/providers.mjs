@@ -16,6 +16,9 @@ export function providerTools(tools, call) {
     execute,
   };
 }
+export function capabilityTools(tools, capabilities) {
+  return tools.filter(t => ['forms','sms'].includes(t._meta?.['com.bluegrain.smsrelay/capability']) && capabilities?.includes(t._meta['com.bluegrain.smsrelay/capability']));
+}
 export async function connectProviderTools({directory,profile='default',connectionId,signal}) {
   const state = await new PrivateStore(directory,profile).read();
   const connection = state?.connections?.[connectionId];
@@ -26,8 +29,7 @@ export async function connectProviderTools({directory,profile='default',connecti
   await remote.connect(new StreamableHTTPClientTransport(new URL('/mcp',relay.baseUrl),{requestInit:{headers:{Authorization:`Bearer ${connection.token}`}}}));
   try {
     const all = (await remote.listTools()).tools;
-    const sms = new Set(['request_sms_code','get_sms_code_request','cancel_sms_code_request']);
-    const tools = all.filter(t => status.capabilities?.includes(sms.has(t.name)?'sms':'forms'));
+    const tools = capabilityTools(all, status.capabilities);
     return {...providerTools(tools,async(name,args)=>{
       // Reauthorization happens on every MCP call; a saved tool declaration cannot expand a grant.
       return remote.callTool({name,arguments:args});

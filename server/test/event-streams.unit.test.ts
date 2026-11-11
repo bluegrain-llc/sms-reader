@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { setImmediate } from 'node:timers/promises';
+import { setTimeout as realSetTimeout, clearTimeout as realClearTimeout } from 'node:timers';
 import type { Firestore } from 'firebase-admin/firestore';
 import type { Forms } from '../src/forms.js';
 import { EventStreams } from '../src/event-streams.js';
@@ -68,7 +69,8 @@ test('scoped feeds follow updated expiry and discard delivery guards after ackno
   } } as unknown as Firestore;
   const streams = new EventStreams({ db, now: () => Date.now(), retained: () => true } as unknown as Forms);
   let closed = 0;
-  const pending = streams.subscribe('synthetic', {changed: () => {}, closed: () => { closed++; }});
+  const controller = new AbortController(), deadline = realSetTimeout(() => controller.abort(), 1000);
+  const pending = streams.subscribe('synthetic', {changed: () => {}, closed: () => { closed++; }}, controller.signal);
   let subscription: Awaited<typeof pending> | undefined;
   try {
     await setImmediate();
@@ -88,5 +90,5 @@ test('scoped feeds follow updated expiry and discard delivery guards after ackno
     grant = {...grant, expiresAt:1200};
     callbacks.get('grants/grant')!({data:()=>grant});
     t.mock.timers.tick(99); assert.equal(closed,1); assert.equal(subscription.failed(),true);
-  } finally { subscription?.stop(); t.mock.timers.reset(); }
+  } finally { controller.abort(); await Promise.allSettled([pending]); subscription?.stop(); realClearTimeout(deadline); t.mock.timers.reset(); }
 });

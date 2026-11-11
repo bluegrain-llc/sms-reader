@@ -18,6 +18,7 @@ import { RustRelay, rustApp } from './rust-adapter.js';
 import { hash, HISTORY, MINUTE } from '../src/model.js';
 import type { HttpOptions } from '../src/http.js';
 import type { Server } from 'node:http';
+import { capabilityTools } from '../../integrations/providers.mjs';
 
 if (!process.env.FIRESTORE_EMULATOR_HOST) throw Error('Onboarding contracts require the Firestore emulator');
 process.env.OAUTH_CODE_KEY = '64'.repeat(32); // Isolated contract key, never used for deployment.
@@ -41,7 +42,7 @@ async function register(runtime = 0, self = false, capabilities = ['forms']) {
   const input = { name: 'Personal agent', purpose: 'Ask for decisions', deliveryPublicKey: publicKey, credentialHash: hash(credential), capabilities };
   const session = await call(runtime, '/v3/registration-sessions', pending, input, 'POST', 201);
   const approved = await call(1 - runtime, `/v3/registration-sessions/${session.sessionId}/decision`, owner(uid), decision(self, capabilities));
-  return { credential, pending, publicKey, privateKey, session, approved };
+  return { credential, pending, publicKey, privateKey, session, approved, input };
 }
 async function connect(s: Awaited<ReturnType<typeof register>>, runtime = 0, capabilities = ['forms'], externalAccountRef?: string) {
   const p = await call(runtime, '/v3/service/pairing-sessions', s.credential, { capabilities, expiresInDays: null, idempotencyKey: randomUUID(), ...(externalAccountRef ? { externalAccountRef } : {}) }, 'POST', 201);
@@ -64,6 +65,23 @@ before(async () => {
 });
 after(async () => { for (const s of servers) { s.closeAllConnections(); await new Promise<void>(resolve => s.close(() => resolve())); } await deleteApp(firebase); });
 for (const runtime of [0, 1]) {
+  test(`runtime ${runtime}: approved registration recovers after session retention without new consent or duplicate service`, async () => {
+    for (const self of [false, true]) {
+      const s = await register(runtime, self);
+      time += HISTORY + 1;
+      if (runtime === 0) await relay.onboarding.cleanup(); else await native.call('onboarding.cleanup', []);
+      assert.equal((await db.collection('registrationSessions').doc(s.session.sessionId).get()).exists, false);
+      await call(runtime, '/v3/registration-sessions', secrets('smsreg'), s.input, 'POST', 409);
+      const recovered = await call(runtime, '/v3/registration-sessions', s.pending, s.input, 'POST', 201);
+      assert.equal(recovered.status, 'approved'); assert.equal(recovered.serviceId, s.session.serviceId);
+      assert.equal(recovered.connectionId, s.approved.connectionId);
+      assert.equal((await call(1-runtime, '/v3/registration-sessions/current', s.pending)).serviceId, s.session.serviceId);
+      await call(runtime, '/v3/registration-sessions', s.pending, {...s.input,name:'Changed'}, 'POST', 409);
+      await db.collection('registrationSessions').doc(s.session.sessionId).delete();
+      await call(runtime, `/v3/services/${s.session.serviceId}`, owner(uid), {active:false}, 'PATCH');
+      await call(1-runtime, '/v3/registration-sessions', s.pending, s.input, 'POST', 404);
+    }
+  });
   test(`runtime ${runtime}: registration without receiving phone or self access; idempotent approval and private payloads`, async () => {
     const s = await register(runtime);
     assert.equal(s.approved.status, 'approved'); assert.equal(s.approved.connectionId, null);
@@ -145,9 +163,14 @@ for (const runtime of [0, 1]) {
     const client = new Client({name:'scoped-test',version:'1'});
     try {
       await client.connect(new StreamableHTTPClientTransport(new URL(bases[runtime]+'/mcp'),{requestInit:{headers:{Authorization:`Bearer ${payload.token}`}}}));
-      const tools=(await client.listTools()).tools.map(t=>t.name); assert.ok(tools.includes('create_request')); assert.ok(!tools.includes('request_sms_code'));
+      const forms=(await client.listTools()).tools;
+      assert.equal(forms.length,5); assert.ok(forms.every(t=>t._meta?.['com.bluegrain.smsrelay/capability']==='forms'));
+      assert.equal(capabilityTools(forms,['forms']).length,5); assert.equal(capabilityTools(forms,['sms']).length,0);
       await call(runtime, `/v3/connections/${first.approved.connectionId}`,owner(recipient),{capabilities:['forms','sms'],expiresAt:null},'PATCH');
-      assert.ok((await client.listTools()).tools.some(t=>t.name==='request_sms_code'));
+      const all=(await client.listTools()).tools; assert.equal(all.length,8);
+      assert.equal(capabilityTools(all,['sms']).length,3); assert.equal(capabilityTools(all,['forms']).length,5);
+      await call(runtime, `/v3/connections/${first.approved.connectionId}`,owner(recipient),{capabilities:['sms'],expiresAt:null},'PATCH');
+      assert.deepEqual((await client.listTools()).tools.map(t=>t.name).sort(),capabilityTools(all,['sms']).map((t: {name:string})=>t.name).sort());
       const other = await connect(s, runtime, ['forms'],randomUUID());
       assert.notEqual(other.approved.connectionId,first.approved.connectionId);
       await db.collection('accounts').doc(recipient).set({deleting:true});
@@ -207,6 +230,18 @@ async function oauthFlow(runtime: number, confidential = false) {
   const sessionId = location.split('/').at(-1)!;
   return { s, client, verifier, params, sessionId };
 }
+for (const runtime of [0,1]) test(`runtime ${runtime}: OAuth rejects malformed resources and explicit invalid authentication methods`, async () => {
+  for (const method of ['', null, 7]) {
+    await call(runtime, '/oauth/register', '', {client_name:'Invalid client',redirect_uris:[callback],token_endpoint_auth_method:method}, 'POST', 400);
+  }
+  const defaults = await call(runtime, '/oauth/register', '', {client_name:'Default client',redirect_uris:[callback]}, 'POST', 201);
+  assert.equal(defaults.token_endpoint_auth_method,'none');
+  const f = await oauthFlow(runtime);
+  for (const resource of ['not-a-url','https://']) {
+    const response = await fetch(bases[runtime]+'/oauth/authorize?'+new URLSearchParams({...f.params,resource}), {redirect:'manual'});
+    assert.equal(response.status,400); assert.equal((await response.json()).error,'invalid_target');
+  }
+});
 async function formCall(runtime: number, endpoint: string, fields: Record<string, string>, expected = 200) {
   const response = await fetch(bases[runtime] + endpoint, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams(fields) });
   const value = await response.json();assert.equal(response.status, expected, JSON.stringify(value));return value;

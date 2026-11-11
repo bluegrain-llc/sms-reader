@@ -163,7 +163,7 @@ private fun OnboardingContent(target: OnboardingLink, attempt: String, account: 
             else if (!account.signedIn) { Text("Sign in to review this link. Opening it grants no access."); Button(onClick = onSignIn, enabled = !account.busy) { Text("Continue with Google") } }
             else {
                 Text("Signed in as ${account.email}", style = MaterialTheme.typography.bodySmall)
-                if (!registration && session != null) Text("The service name is supplied by its operator. Registration is not verification or endorsement.", style = MaterialTheme.typography.bodySmall)
+                if (session != null) Text("The service name is supplied by its operator. Registration is not verification or endorsement.", style = MaterialTheme.typography.bodySmall)
                 if (oauth && session != null) Text("Requested by ${session.optString("clientName")} (${session.optString("clientOrigin")}). These app details are supplied by the app operator.")
                 session?.nullString("comparisonCode")?.let { Text("Compare code $it", style = MaterialTheme.typography.titleLarge) }
                 if (pending) {

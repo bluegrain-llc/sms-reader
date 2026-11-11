@@ -65,7 +65,7 @@ async function load() {
     session = await api(`/v3/services/${encodeURIComponent(destination)}/connections`, { capabilities: service.capabilities, expiresInDays: null, idempotencyKey: attempt });
   } else session = await api(`/v3/${registration ? 'registration' : 'pairing'}-sessions/${encodeURIComponent(destination)}`);
   $('title').textContent = registration ? `Register ${session.name}` : management ? `Manage ${session.name}` : `Connect to ${session.name}`;
-  $('purpose').textContent = session.purpose; $('operator').hidden = registration;
+  $('purpose').textContent = session.purpose; $('operator').hidden = false;
   $('client').hidden = !oauth;
   $('handoff').hidden = !oauth;
   if (oauth) {

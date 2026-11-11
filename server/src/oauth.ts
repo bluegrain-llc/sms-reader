@@ -80,7 +80,9 @@ export class OAuth {
   }
   async start(raw: unknown, source: string) {
     this.code("configuration", "check");
-    const input = authorizationSchema.parse(raw), url = new URL(input.resource);
+    const input = authorizationSchema.parse(raw);
+    ensure(URL.canParse(input.resource), 400, 'invalid_target');
+    const url = new URL(input.resource);
     const match = /^\/mcp\/services\/([A-Za-z0-9_-]{1,128})$/.exec(url.pathname);
     ensure(match && input.resource === this.resource(match[1]!), 400, 'invalid_target');
     if (input.client_id.startsWith('https://')) {

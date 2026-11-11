@@ -412,6 +412,15 @@ impl Relay {
                 "register"=>{
                     let session_id=hash(&auth);let old=tx.get("registrationSessions",&session_id).await?;
                     if !old.is_null(){for p in ["name","purpose","credentialHash"]{ensure(old[p]==input[p],409,"idempotency_conflict")?;}ensure(key_id(&old["deliveryPublicKey"])==key_id(&input["deliveryPublicKey"])&&same_caps(&old["capabilities"],&input["capabilities"]),409,"idempotency_conflict")?;return Ok(registration_view(&old,now));}
+                    let receipt=tx.get("serviceCredentials",text(&input,"credentialHash")).await?;
+                    if !receipt.is_null(){
+                        ensure(text(&receipt,"registrationId")==session_id&&text(&receipt,"registrationKeyId")==key_id(&input["deliveryPublicKey"]),409,"idempotency_conflict")?;
+                        let service=s.active_service(tx,text(&receipt,"serviceId")).await?;
+                        for p in ["name","purpose","credentialHash"]{ensure(service[p]==input[p],409,"idempotency_conflict")?;}
+                        ensure(same_caps(&service["capabilities"],&input["capabilities"]),409,"idempotency_conflict")?;
+                        let mut p=input;p["id"]=json!(session_id);p["serviceId"]=service["id"].clone();p["ownerId"]=service["ownerId"].clone();p["status"]=json!("approved");p["createdAt"]=service["createdAt"].clone();p["expiresAt"]=json!(num(&service,"createdAt")+10*MINUTE);p["connectionId"]=receipt["registrationConnectionId"].clone();p["pollAfter"]=json!(0);p["purgeAt"]=json!(now+HISTORY);
+                        tx.create("registrationSessions",&session_id,p.clone())?;return Ok(registration_view(&p,now));
+                    }
                     let rate=s.onboarding_rate(tx,&format!("registration:{id}"),30).await?;let global=s.onboarding_rate(tx,"registration:global",600).await?;
                     let mut p=input;p["id"]=json!(session_id);p["serviceId"]=json!(random_service_id);p["ownerId"]=Value::Null;p["status"]=json!("pending");p["createdAt"]=json!(now);p["expiresAt"]=json!(now+10*MINUTE);p["connectionId"]=Value::Null;p["pollAfter"]=json!(0);p["purgeAt"]=json!(now+HISTORY);
                     tx.set("onboardingRates",&rate.0,rate.1)?;tx.set("onboardingRates",&global.0,global.1)?;tx.create("registrationSessions",&session_id,p.clone())?;Ok(registration_view(&p,now))
@@ -427,7 +436,7 @@ impl Relay {
                     if input["decision"]=="approved"{let owned=tx.query(Query::new("services").eq("ownerId",auth.clone()).eq("deleted",false).limit(100)).await?;ensure(owned.len()<100,409,"service_limit_reached")?;}
                     let service=json!({"id":p["serviceId"],"ownerId":auth,"name":p["name"],"purpose":p["purpose"],"capabilities":p["capabilities"],"active":true,"deleted":false,"credentialHash":p["credentialHash"],"deliveryKeyId":key_id(&p["deliveryPublicKey"]),"createdAt":now});
                     let grant=if input["decision"]=="approved"&&flag(&input,"selfAccess"){Some(s.prepare_connection(tx,&auth,&service,&p["deliveryPublicKey"],&input["capabilities"],(&input["expiresInDays"],&Value::Null)).await?)}else{None};
-                    if input["decision"]=="approved"{tx.create("services",text(&service,"id"),service.clone())?;tx.create("serviceCredentials",text(&service,"credentialHash"),json!({"serviceId":service["id"],"ownerId":auth}))?;tx.create("serviceDeliveryKeys",&format!("{}_{}",text(&service,"id"),text(&service,"deliveryKeyId")),json!({"id":service["deliveryKeyId"],"serviceId":service["id"],"ownerId":auth,"publicKey":p["deliveryPublicKey"],"retired":false}))?;}
+                    if input["decision"]=="approved"{tx.create("services",text(&service,"id"),service.clone())?;tx.create("serviceCredentials",text(&service,"credentialHash"),json!({"serviceId":service["id"],"ownerId":auth,"registrationId":p["id"],"registrationKeyId":service["deliveryKeyId"],"registrationConnectionId":grant.as_ref().map(|g|json!(g.0)).unwrap_or(Value::Null)}))?;tx.create("serviceDeliveryKeys",&format!("{}_{}",text(&service,"id"),text(&service,"deliveryKeyId")),json!({"id":service["deliveryKeyId"],"serviceId":service["id"],"ownerId":auth,"publicKey":p["deliveryPublicKey"],"retired":false}))?;}
                     if let Some((id,writes))=grant{p["connectionId"]=json!(id);for(c,id,value)in writes{tx.set(c,&id,value)?;}}
                     p["status"]=input["decision"].clone();p["ownerId"]=json!(auth);tx.set("registrationSessions",&session_id,p.clone())?;Ok(registration_view(&p,now))
                 },

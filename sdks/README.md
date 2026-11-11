@@ -33,7 +33,9 @@ const registration = await service.startRegistration();
 await service.waitForRegistration();
 // service.permanentLink() can be used while this process is offline.
 await service.consumeDeliveries();
-// Choose a returned connection ID, then call service.connection(id).requestForm(definition).
+// Stored connection IDs are available after a recipient approves and delivery is consumed:
+const connectionIds = Object.keys(service.state.connections);
+// Choose an ID from connectionIds, then call service.connection(id).requestForm(definition).
 ```
 
 For a particular external account, call `startPairing` with a cryptographically random opaque `externalAccountRef` produced by its authenticated backend. Repeated calls resume the saved attempt. `restartPairing` deliberately creates a fresh attempt and requires approval again. No email, Firebase UID or external username belongs in that reference.
