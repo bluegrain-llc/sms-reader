@@ -62,13 +62,13 @@ pub fn route_template(path: &str) -> &'static str {
     }
 }
 
-fn safe_category(value: &Value) -> &'static str {
-    match value.as_str() {
-        Some("quota") => "quota",
-        Some("timeout") => "timeout",
-        Some("destination") => "destination",
-        Some("rejected") => "rejected",
-        Some("unavailable") => "unavailable",
+fn safe_category(value: &str) -> &'static str {
+    match value {
+        "quota" => "quota",
+        "timeout" => "timeout",
+        "destination" => "destination",
+        "rejected" => "rejected",
+        "unavailable" => "unavailable",
         _ => "internal",
     }
 }
@@ -108,7 +108,7 @@ pub fn entry(event: Value) -> Option<Value> {
             };
             let mut record = json!({"event":name,"kind":kind,"outcome":outcome,"age_ms":nonnegative(&event["age_ms"])});
             if outcome == "failed" {
-                record["category"] = json!(safe_category(&event["category"]));
+                record["category"] = json!(safe_category(text(&event, "category")));
             }
             record
         }
@@ -121,7 +121,7 @@ pub fn entry(event: Value) -> Option<Value> {
         | "backlog_sampling_failed"
         | "request_failed"
         | "mcp_tool_failed" => {
-            json!({"event":name,"category":safe_category(&event["category"])})
+            json!({"event":name,"category":safe_category(text(&event, "category"))})
         }
         "backlog_snapshot" => {
             let kind = match text(&event, "kind") {
@@ -146,14 +146,7 @@ pub fn entry(event: Value) -> Option<Value> {
 
 pub fn category(error: &Error) -> &'static str {
     match error {
-        Error::Provider(value) => match *value {
-            "quota" => "quota",
-            "timeout" => "timeout",
-            "destination" => "destination",
-            "rejected" => "rejected",
-            "unavailable" => "unavailable",
-            _ => "internal",
-        },
+        Error::Provider(value) => safe_category(value),
         Error::Api(_, "private_webhook_destination" | "invalid_webhook_url") => "destination",
         Error::Api(_, "webhook_timeout" | "webhook_dns_timeout") => "timeout",
         Error::Api(_, "webhook_rejected") => "rejected",
