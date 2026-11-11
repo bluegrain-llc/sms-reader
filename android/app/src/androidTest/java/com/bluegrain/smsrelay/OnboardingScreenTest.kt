@@ -1,6 +1,9 @@
 package com.bluegrain.smsrelay
 
 import androidx.compose.ui.test.*
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.test.junit4.createComposeRule
 import kotlinx.coroutines.CompletableDeferred
 import org.json.JSONArray
@@ -125,4 +128,29 @@ class OnboardingScreenTest {
         assertEquals("[\"forms\"]", decisions.single().getJSONArray("capabilities").toString())
         compose.onNodeWithText("never-displayed", substring = true).assertDoesNotExist()
     }
+    @Test fun changingDestinationCancelsTheOldDecision() {
+        var target by mutableStateOf(OnboardingLink("pair", "first"))
+        val started = CompletableDeferred<Unit>()
+        val oldDecision = CompletableDeferred<JSONObject>()
+        compose.setContent {
+            RelayTheme {
+                OnboardingScreen(target, target.id, account, request = { method, path, _ ->
+                    if (method == "POST") { started.complete(Unit); oldDecision.await() }
+                    else review().put("sessionId", target.id).put("name", if (path.contains("first")) "First service" else "Second service")
+                }, onSignIn = {}, onRegister = {}, onClose = {}, onRestart = {}, onManage = {})
+            }
+        }
+        compose.waitForIdle()
+        compose.onNode(hasText("Connect") and hasClickAction()).performScrollTo().performClick()
+        compose.waitUntil(5000) { started.isCompleted }
+        compose.runOnIdle { target = OnboardingLink("pair", "second") }
+        compose.waitForIdle()
+        compose.onNodeWithText("Second service").assertIsDisplayed()
+        compose.runOnIdle { oldDecision.complete(review("approved").put("name", "First service")) }
+        compose.waitForIdle()
+        compose.onNodeWithText("Second service").assertIsDisplayed()
+        compose.onNodeWithText("First service").assertDoesNotExist()
+        compose.onNode(hasText("Connect") and hasClickAction()).assertIsEnabled()
+    }
+
 }

@@ -156,6 +156,7 @@ export class OAuth {
       await this.relay.onboarding.activeService(tx, p.serviceId);
       ensure(p.expiresAt > this.relay.now(), 410, 'session_expired');
       const redirect = new URL(p.redirect_uri);
+      for (const name of ['state', 'code', 'error']) redirect.searchParams.delete(name);
       if (p.state !== undefined) redirect.searchParams.set('state', p.state);
       if (p.status === 'approved') {
         const code = this.code(id, uid), codeRef = this.ref('oauthCodes', hash(code)), record = (await tx.get(codeRef)).data();

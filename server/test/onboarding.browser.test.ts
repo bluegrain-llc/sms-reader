@@ -138,3 +138,24 @@ test('owner service management requires explicit enable and confirmed deletion w
   page.once('dialog',dialog=>dialog.accept());await page.locator('#delete').click();
   await expect(page.locator('#status')).toContainText('Service deleted');expect(deletes).toBe(1);
 });
+
+test('cancelled and disconnected permanent links allow a fresh explicit confirmation',async({page})=>{
+  let nonce='',status='pending',revoked=false,approvals=0;
+  const attempts:string[]=[];
+  await page.route('**/v3/**',async r=>{
+    const url=r.request().url();
+    if(url.endsWith('/services/public-service'))return r.fulfill({json:{name:review.name,purpose:review.purpose,capabilities:review.capabilities}});
+    if(url.endsWith('/services/public-service/connections')){
+      const attempt=r.request().postDataJSON().idempotencyKey;attempts.push(attempt);
+      if(attempt!==nonce){nonce=attempt;status='pending';}
+      return r.fulfill({json:{...review,status,connectionId:status==='approved'?'connection':null}});
+    }
+    if(url.endsWith('/decision')){status=r.request().postDataJSON().decision;if(status==='approved')approvals++;return r.fulfill({json:{...review,status,connectionId:status==='approved'?'connection':null}});}
+    return r.fulfill({json:{setup:revoked?'disconnected':'setup_complete',revoked,receivingDeviceAvailable:!revoked}});
+  });
+  await page.goto(origin+'/services/public-service');await expect(page.locator('#review')).toBeVisible();
+  await page.locator('#cancel').click();await expect(page.locator('#status')).toContainText('Cancelled');
+  await page.reload();await expect(page.locator('#review')).toBeVisible();expect(attempts[1]).not.toBe(attempts[0]);expect(approvals).toBe(0);
+  await page.locator('#confirm').click();await expect(page.locator('#status')).toContainText('Setup complete');
+  revoked=true;await page.reload();await expect(page.locator('#review')).toBeVisible();expect(attempts[2]).not.toBe(attempts[1]);expect(approvals).toBe(1);
+});

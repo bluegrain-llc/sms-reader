@@ -218,14 +218,20 @@ class ServiceSession:
         s = self.state
         if not s.get("nextKey"):
             s["nextKey"] = delivery_key()
+            s["nextRetireKeyId"] = retire_key_id
+        elif "nextRetireKeyId" not in s:
+            s["nextRetireKeyId"] = retire_key_id
+        elif retire_key_id is not None and retire_key_id != s["nextRetireKeyId"]:
+            raise ValueError("Resume the pending key rotation before changing retirement")
         self.save()
         body = {"deliveryPublicKey": s["nextKey"]["publicKey"]}
-        if retire_key_id:
-            body["retireKeyId"] = retire_key_id
+        if s["nextRetireKeyId"]:
+            body["retireKeyId"] = s["nextRetireKeyId"]
         self.client.request("/v3/service", s["serviceToken"], body, "PATCH")
         if all(key["id"] != s["nextKey"]["id"] for key in s["keys"]):
             s["keys"].append(s["nextKey"])
         del s["nextKey"]
+        del s["nextRetireKeyId"]
         self.save()
 
     def connection(self, connection_id):

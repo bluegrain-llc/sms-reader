@@ -1,8 +1,9 @@
 import { after, before, test } from 'node:test';
+import { readFileSync } from 'node:fs';
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import { spawn } from 'node:child_process';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -191,7 +192,7 @@ test('all SDK broker bindings share durable registration, approval and credentia
   } finally {await rm(directory,{recursive:true,force:true});}
 });
 
-const callback = 'https://8.8.8.8/relay-callback'; // Validation only; tests never navigate or send to this address.
+const callback = 'https://8.8.8.8/relay-callback?state=old&state=older&code=stale&error=stale&keep=opaque'; // Validation only; tests never navigate or send to this address.
 async function oauthFlow(runtime: number, confidential = false) {
   time += 11 * MINUTE;
   const s = await register(runtime, false, ['forms', 'sms']);
@@ -218,7 +219,7 @@ async function approvedOAuth(f: Awaited<ReturnType<typeof oauthFlow>>, runtime: 
   assert.equal((await db.collection('oauthCodes').doc(pending.codeHash).get()).exists,false);
   time += 2 * MINUTE; // Phone setup may take longer than the authorization-code lifetime.
   const completed = await call(runtime, `/v3/oauth/sessions/${f.sessionId}/response`, owner(recipientUid), {});
-  const redirect = new URL(completed.redirect);assert.equal(redirect.origin, new URL(callback).origin);assert.equal(redirect.searchParams.get('state'), 'opaque-state');
+  const redirect = new URL(completed.redirect);assert.equal(redirect.origin, new URL(callback).origin);assert.deepEqual(redirect.searchParams.getAll('state'), ['opaque-state']);assert.equal(redirect.searchParams.getAll('code').length,1);assert.equal(redirect.searchParams.has('error'),false);assert.equal(redirect.searchParams.get('keep'),'opaque');
   const again = await call(1-runtime, `/v3/oauth/sessions/${f.sessionId}/decision`, owner(recipientUid), fields);assert.deepEqual(again, result);
   const resumed = await call(1-runtime, `/v3/oauth/sessions/${f.sessionId}/response`, owner(recipientUid), {});assert.deepEqual(resumed, completed);
   return { grant_type: 'authorization_code', code: redirect.searchParams.get('code')!, client_id: f.client.client_id,
@@ -290,7 +291,7 @@ for (const runtime of [0, 1]) {
     const bad=await fetch(bases[runtime]+'/oauth/authorize?'+new URLSearchParams({...f.params,redirect_uri:'https://8.8.4.4/wrong'}),{redirect:'manual'});assert.equal(bad.status,400);assert.equal(bad.headers.get('location'),null);
     await call(1-runtime,`/v3/oauth/sessions/${f.sessionId}/decision`,owner(recipient),{decision:'denied',capabilities:['forms'],expiresInDays:null});
     const denied=await call(runtime,`/v3/oauth/sessions/${f.sessionId}/response`,owner(recipient),{});
-    assert.equal(new URL(denied.redirect).searchParams.get('error'),'access_denied');assert.equal(new URL(denied.redirect).searchParams.get('code'),null);
+    assert.equal(new URL(denied.redirect).searchParams.get('error'),'access_denied');assert.equal(new URL(denied.redirect).searchParams.get('code'),null);assert.deepEqual(new URL(denied.redirect).searchParams.getAll('state'),['opaque-state']);assert.deepEqual(new URL(denied.redirect).searchParams.getAll('error'),['access_denied']);
     const expired=await oauthFlow(runtime);time+=11*MINUTE;
     assert.equal((await call(runtime,`/v3/oauth/sessions/${expired.sessionId}`,owner(recipient))).status,'expired');
     await call(1-runtime,`/v3/oauth/sessions/${expired.sessionId}/decision`,owner(recipient),{decision:'approved',capabilities:['forms'],expiresInDays:null},'POST',410);
@@ -336,4 +337,93 @@ test('Unicode owner identities keep OAuth response codes and reusable grant bind
   const approved=await call(0,`/v3/pairing-sessions/${a.sessionId}/decision`,owner(recipientUid),decision);
   const fresh=await call(1,`/v3/services/${f.s.session.serviceId}/connections`,owner(recipientUid),{...pairing,idempotencyKey:randomUUID()},'POST',201);
   assert.equal((await call(1,`/v3/pairing-sessions/${fresh.sessionId}/decision`,owner(recipientUid),decision)).connectionId,approved.connectionId);
+});
+
+const sdkCommands: Record<string,string[]> = process.env.RELAY_SDK_CONFORMANCE ? JSON.parse(readFileSync(process.env.RELAY_SDK_CONFORMANCE,'utf8')) : {};
+for(const runtime of [0,1]) for(const [family,command] of Object.entries(sdkCommands)) {
+  test(`SDK family ${family} runtime ${runtime}: durable hooks, lifecycle, encrypted delivery and request conformance`,{timeout:120000},async()=>{
+    time+=11*MINUTE;
+    const directory=await mkdtemp(join(tmpdir(),'relay-language-conformance-'));
+    const common={broker:new URL('../../scripts/sdk-conformance-broker.mjs',import.meta.url).pathname,storageCommand:new URL('../../scripts/sdk-conformance-storage.py',import.meta.url).pathname,directory,profile:'sdk-'+family,relayUrl:bases[runtime],allowHttpLoopback:true};
+    let failSave=false;
+    const invoke=async(operation:string,input:unknown={},connectionId?:string,expected=true)=>{
+      const child=spawn(command[0]!,command.slice(1),{detached:true,stdio:['pipe','pipe','pipe'],env:{...process.env,RELAY_TEST_STORAGE_DIR:directory,RELAY_TEST_FAIL_SAVE:failSave?'1':'',PYTHONPATH:new URL('../../sdks/python',import.meta.url).pathname}});
+      let output='';child.stdout.on('data',b=>{output+=b;});child.stderr.resume();
+      const stop=()=>{if(child.pid)try{process.kill(-child.pid,'SIGKILL');}catch{};};
+      const bound=setTimeout(stop,20000);
+      child.stdin.on('error',()=>{});
+      try {child.stdin.end(JSON.stringify({...common,operation,input,connectionId}));await once(child,'close');const result=JSON.parse(output);assert.equal(result.ok,expected,`${family}: ${operation}`);return result.value;}
+      finally {clearTimeout(bound);stop();}
+    };
+    try {
+      failSave=true;await invoke('startRegistration',{name:'SDK '+family,purpose:'Synthetic decisions'},undefined,false);failSave=false;
+      const start=await invoke('startRegistration',{name:'SDK '+family,purpose:'Synthetic decisions',capabilities:['forms','sms']});
+      assert.ok(start.link.startsWith(bases[runtime]));
+      const approved=await call(1-runtime,`/v3/registration-sessions/${start.sessionId}/decision`,owner(uid),decision(true,['forms']));
+      await invoke('pollRegistration');
+      const ids=await invoke('listConnections');assert.deepEqual(ids,[approved.connectionId]);
+      const connection=ids[0];
+      assert.deepEqual((await invoke('status',{},connection)).capabilities,['forms']);
+      await invoke('requestSms',{purpose:'Not authorized',idempotencyKey:randomUUID()},connection,false);
+      const permanent=await invoke('permanentLink');assert.ok(permanent.includes('/services/'));
+      await relay.register(uid,'sdk-phone-'+family,'Synthetic phone','fake-fcm',1);
+      const definition={title:'Decision',body:'Synthetic request',fields:[],actions:[{id:'approve',label:'Approve',type:'approve'}],idempotencyKey:randomUUID()};
+      const created=await invoke('requestForm',definition,connection);assert.ok(created.requestId);
+      assert.equal((await invoke('requestForm',definition,connection)).requestId,created.requestId);
+      assert.equal((await invoke('getForm',{id:created.requestId},connection)).status,'pending');
+      await relay.register(uid,'sdk-phone-'+family,'Synthetic phone','fake-fcm',1);
+      await relay.forms.submit(uid,'sdk-phone-'+family,created.requestId,{submissionId:randomUUID(),action:'approve',values:{}});
+      assert.ok(await invoke('formResult',{id:created.requestId},connection));
+      const hook=await invoke('registerWebhook',{url:'https://8.8.8.8/sdk-callback',events:['request.submitted']},connection);assert.ok((await invoke('webhooks',{},connection)).some((h:any)=>h.id===hook.id));await invoke('deleteWebhook',{id:hook.id},connection);assert.equal((await invoke('webhooks',{},connection)).length,0);
+      const events=await invoke('events',{},connection);assert.ok(JSON.stringify(events).includes('request.submitted'));
+      const cancelled=await invoke('requestForm',{...definition,idempotencyKey:randomUUID()},connection);await invoke('cancelForm',{id:cancelled.requestId},connection);
+      assert.equal((await invoke('getForm',{id:cancelled.requestId},connection)).status,'cancelled');
+      const hookState=JSON.parse(await readFile(join(directory,common.profile+'.json'),'utf8'));
+      assert.equal(hookState.keys.length,1);assert.ok(hookState.connections[connection].token);
+      await invoke('rotateKey',{retireKeyId:hookState.keys[0].id});await invoke('rotateCredential');await invoke('resume');
+      const attempt=await invoke('startPairing',{capabilities:['forms'],externalAccountRef:randomUUID()});
+      assert.equal((await invoke('startPairing')).sessionId,attempt.sessionId);
+      assert.equal((await invoke('pollPairing')).status,'pending');
+      await call(1-runtime,`/v3/pairing-sessions/${attempt.sessionId}/decision`,owner(recipient),{decision:'approved',capabilities:['forms'],expiresInDays:null});
+      time+=5001;
+      failSave=true;await invoke('consumeDeliveries',{},undefined,false);failSave=false;
+      const unack=await db.collection('credentialDeliveries').where('serviceId','==',start.serviceId).where('acknowledged','==',false).get();assert.equal(unack.size,1);
+      await invoke('waitForPairing');const allIds=await invoke('listConnections');assert.equal(allIds.length,2);await invoke('getForm',{id:created.requestId},allIds.find((id:string)=>id!==connection),false);
+      await call(1-runtime,`/v3/connections/${connection}`,owner(uid),{capabilities:['forms','sms'],expiresAt:null},'PATCH');
+      const sms=await invoke('requestSms',{purpose:'Synthetic SMS consent',idempotencyKey:randomUUID()},connection);assert.ok(sms.requestId);await invoke('getSms',{id:sms.requestId},connection);await invoke('cancelSms',{id:sms.requestId},connection);
+      await call(1-runtime,`/v3/connections/${connection}`,owner(uid),undefined,'DELETE');await invoke('status',{},connection,false);
+      assert.equal(await invoke('consumeDeliveries'),0);
+    } finally {await rm(directory,{recursive:true,force:true});}
+  });
+}
+
+test('native scoped stream closes at undelivered expiry and tracks shortened grant expiry',{timeout:15000},async()=>{
+  for(const delivered of [false,true]) {
+    time+=11*MINUTE;
+    const s=await register(1,true);const {d,payload}=await consume(s,1);
+    const ref=db.collection('grants').doc(hash(payload.token));
+    await ref.update({deliveryExpiresAt:time+1000});
+    const subscription=await native.call('streamSubscribe',[payload.token]) as {subscriptionId:string};
+    try {
+      if(delivered) {
+        await call(0,`/v3/service/deliveries/${d.deliveryId}/acknowledgement`,s.credential,{});
+        await call(0,`/v3/connections/${payload.connectionId}`,owner(uid),{capabilities:['forms'],expiresAt:time+1000},'PATCH');
+        const observedBy=Date.now()+3000;let observed=false;
+        while(Date.now()<observedBy) {
+          const snapshot=await native.call('streamSnapshot',[subscription.subscriptionId]) as {failed:boolean,expiresAt:number};
+          if(snapshot.expiresAt===time+1000){assert.equal(snapshot.failed,false);observed=true;break;}
+          await new Promise(resolve=>setTimeout(resolve,10));
+        }
+        assert.equal(observed,true,'watch must observe the shortened future expiry before clock advances');
+      }
+      time+=1001;
+      const until=Date.now()+4000;let failed=false;
+      while(Date.now()<until) {
+        const snapshot=await native.call('streamSnapshot',[subscription.subscriptionId]) as {failed:boolean};
+        if(snapshot.failed){failed=true;break;}
+        await new Promise(resolve=>setTimeout(resolve,25));
+      }
+      assert.equal(failed,true,delivered?'shortened expiry must close':'undelivered expiry must close');
+    } finally {await native.call('streamStop',[subscription.subscriptionId]);}
+  }
 });

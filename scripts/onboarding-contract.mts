@@ -6,9 +6,9 @@ import { authorizationSchema, clientSchema, oauthDecisionSchema } from '../serve
 import { formSchema } from '../server/src/forms-model.js';
 import { requestSchema } from '../server/src/model.js';
 const schemas = Object.fromEntries(Object.entries({ OAuthAuthorization: authorizationSchema, OAuthClient: clientSchema, OAuthDecision: oauthDecisionSchema, Capabilities: capabilitiesSchema, DeliveryPublicKey: publicKeySchema, ServiceRegistration: serviceSchema,
-  Pairing: pairingSchema, PairingDecision: decisionSchema, RegistrationDecision: registrationDecisionSchema, FormRequest: formSchema, SmsRequest: requestSchema }).map(([key,s]) => [key,z.toJSONSchema(s)]));
+  Pairing: pairingSchema, PairingDecision: decisionSchema, RegistrationDecision: registrationDecisionSchema, FormRequest: formSchema, SmsRequest: requestSchema }).map(([key,s]) => [key,z.toJSONSchema(s, { io: 'input' })]));
 (schemas.Capabilities as Record<string,unknown>).uniqueItems = true;
-for (const name of ['ServiceRegistration','Pairing','PairingDecision','RegistrationDecision']) {
+for (const name of ['ServiceRegistration','Pairing','PairingDecision','RegistrationDecision','OAuthDecision']) {
   const schema = schemas[name] as unknown as { properties: { capabilities: Record<string,unknown> } }; schema.properties.capabilities.uniqueItems = true;
 }
 const methods: [string,string,string,string,string?][] = [
@@ -67,7 +67,7 @@ const document = { openapi:'3.1.0',info:{ title:'Request Relay onboarding and ca
   components:{securitySchemes:{HostedOAuth:{type:'oauth2',flows:{authorizationCode:{authorizationUrl:'/oauth/authorize',tokenUrl:'/oauth/token',scopes:{forms:'Information and decisions through forms',sms:'Upcoming SMS codes, shared with your approval'}}}},...Object.fromEntries(['RegistrationCredential','ServiceCredential','ConnectionCredential','OwnerSession'].map(name=>[name,{type:'http',scheme:'bearer',description:{RegistrationCredential:'Private smsreg_ credential generated before starting registration.',ServiceCredential:'Private smss_ credential, limited to pairing and delivery.',ConnectionCredential:'Private smsr_ recipient credential delivered by JWE.',OwnerSession:'Firebase ID token; never sent to the service.'}[name]}]))},schemas:{...schemas,
   ServiceUpdate:{type:'object',additionalProperties:false,properties:{credentialHash:{type:'string',pattern:'^[a-f0-9]{64}$'},deliveryPublicKey:schemaRef('DeliveryPublicKey'),retireKeyId:{type:'string',pattern:'^[a-f0-9]{64}$'},active:{type:'boolean'},delete:{const:true}}},
   ConnectionUpdate:{type:'object',additionalProperties:false,required:['capabilities','expiresAt'],properties:{capabilities:schemaRef('Capabilities'),expiresAt:{type:['integer','null'],minimum:1,maximum:FOREVER}}},
-  Webhook:z.toJSONSchema((await import('../server/src/forms-model.js')).webhookSchema),
+  Webhook:z.toJSONSchema((await import('../server/src/forms-model.js')).webhookSchema, { io: 'input' }),
   Error:{type:'object',required:['error'],properties:{error:{type:'string'}},additionalProperties:false} }} };
 writeFileSync(new URL('../contracts/onboarding.openapi.json',import.meta.url),JSON.stringify(document,null,2)+'\n');
 writeFileSync(new URL('../contracts/onboarding.schemas.json',import.meta.url),JSON.stringify(schemas,null,2)+'\n');

@@ -10,10 +10,11 @@ import (
 )
 
 type Client struct {
-	Broker    string
-	Profile   string
-	Directory string
-	RelayURL  string
+	Broker         string
+	Profile        string
+	Directory      string
+	RelayURL       string
+	StorageCommand string
 }
 
 func (c Client) Invoke(ctx context.Context, operation string, input any, connectionID string) (json.RawMessage, error) {
@@ -21,7 +22,14 @@ func (c Client) Invoke(ctx context.Context, operation string, input any, connect
 	if broker == "" {
 		broker = "relay-broker"
 	}
-	payload, err := json.Marshal(map[string]any{"operation": operation, "input": input, "connectionId": connectionID, "profile": c.Profile, "directory": c.Directory, "relayUrl": c.RelayURL})
+	settings := map[string]any{"operation": operation, "input": input, "connectionId": connectionID, "profile": c.Profile, "relayUrl": c.RelayURL}
+	if c.Directory != "" {
+		settings["directory"] = c.Directory
+	}
+	if c.StorageCommand != "" {
+		settings["storageCommand"] = c.StorageCommand
+	}
+	payload, err := json.Marshal(settings)
 	if err != nil {
 		return nil, err
 	}

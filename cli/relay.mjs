@@ -5,6 +5,7 @@ import { spawn } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 import QRCode from 'qrcode';
 import { PrivateStore } from './store.mjs';
+import { ServiceSession } from './service.mjs';
 import { credential, deliveryKey, hash, RelayClient } from './client.mjs';
 const usage = `relay service register --name "My agent" --relay https://RELAY [--purpose TEXT] [--sms]
 relay service connect | link | hosted-link | manage | deliveries | rotate-credential | rotate-key [--retire-key ID]
@@ -75,10 +76,8 @@ export async function main(args = process.argv.slice(2)) {
       catch (e) { if (e.status !== 401) throw e; await client.request('/v3/service/deliveries', state.nextServiceToken); }
       state.serviceToken = state.nextServiceToken; delete state.nextServiceToken; await save(); console.log('Service credential rotated.');
     } else if (command === 'rotate-key') {
-      state.nextKey ??= await deliveryKey(); await save();
-      await client.request('/v3/service', state.serviceToken, { deliveryPublicKey: state.nextKey.publicKey, ...(v['retire-key'] ? { retireKeyId: v['retire-key'] } : {}) }, 'PATCH');
-      if (!state.keys.some(k => k.id === state.nextKey.id)) state.keys.push(state.nextKey);
-      delete state.nextKey; await save(); console.log('Delivery key rotated; previous private keys retained for outstanding deliveries.');
+      await new ServiceSession(state, store, { signal: abort.signal, allowHttpLoopback: v['allow-http-loopback'] }).rotateKey(v['retire-key']);
+      console.log('Delivery key rotated; previous private keys retained for outstanding deliveries.');
     } else if (command === 'status') {
       console.log(state.registered ? `Registered service ${state.serviceId}` : 'Registration pending');
       for (const [id, connection] of Object.entries(state.connections)) {

@@ -26,6 +26,7 @@ const selection = () => ['forms', 'sms'].filter(c => $(c).checked && (session.av
 function permissions() { $('permissions').hidden = registration && !$('self').checked; }
 async function completed() {
   $('review').hidden = true;
+  if (kind === 'services') { localStorage.removeItem(`relay-onboarding:${auth.currentUser.uid}:${destination}`); $('restart').hidden = false; }
   if (oauth && session.status === 'denied') { await returnToClient(); return; }
   if (session.status === 'expired') {
     status('This ten-minute session has expired. Ask the service for a fresh link and approve it again.');
@@ -58,7 +59,7 @@ async function load() {
     session = await api(`/v3/oauth/sessions/${encodeURIComponent(destination)}`);
   } else if (kind === 'services') {
     service = await api(`/v3/services/${encodeURIComponent(destination)}`);
-    const key = `relay-onboarding:${destination}`;
+    const key = `relay-onboarding:${auth.currentUser.uid}:${destination}`;
     let attempt = localStorage.getItem(key);
     if (!attempt) { attempt = crypto.randomUUID(); localStorage.setItem(key, attempt); }
     session = await api(`/v3/services/${encodeURIComponent(destination)}/connections`, { capabilities: service.capabilities, expiresInDays: null, idempotencyKey: attempt });
@@ -117,7 +118,7 @@ $('confirm').onclick = () => run(async () => {
 });
 $('cancel').onclick = () => run(async () => { if (oauth) { const result = await api(`/v3/oauth/sessions/${destination}/decision`, { decision: 'denied', capabilities: session.capabilities, expiresInDays: null }); clearTimeout(monitor); session = {...session,...result}; await returnToClient(); return; } if (management) { await api(`/v3/connections/${destination}`, undefined, 'DELETE'); $('review').hidden = true; status('Disconnected.'); return; } session = await api(`/v3/${registration ? 'registration' : 'pairing'}-sessions/${session.sessionId}/decision`, { decision: 'denied', ...(registration ? { selfAccess: false } : {}), capabilities: session.capabilities, expiresInDays: session.expiresInDays ?? null }); await completed(); });
 $('retry').onclick = () => run(retry);
-$('restart').onclick = () => run(async () => { localStorage.removeItem(`relay-onboarding:${destination}`); $('restart').hidden = true; await load(); });
+$('restart').onclick = () => run(async () => { localStorage.removeItem(`relay-onboarding:${auth.currentUser.uid}:${destination}`); $('restart').hidden = true; await load(); });
 window.relayOnboardingReady = true;
 try {
   const install = new URL(window.relayWebConfig?.androidInstallUrl);

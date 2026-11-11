@@ -294,6 +294,7 @@ struct FeedSnapshot {
     failed: bool,
     revision: u64,
     events: Vec<Value>,
+    expires_at: i64,
 }
 struct Feed {
     updates: watch::Sender<FeedSnapshot>,
@@ -440,6 +441,9 @@ impl FeedSubscription {
     pub fn failed(&self) -> bool {
         self.updates.borrow().failed
     }
+    pub fn expires_at(&self) -> i64 {
+        self.updates.borrow().expires_at
+    }
     pub fn revision(&self) -> u64 {
         self.updates.borrow().revision
     }
@@ -496,7 +500,13 @@ async fn run_feed(relay: Relay, grant: Value, feed: Arc<Feed>, cancel: watch::Re
             )
             .await?;
         let scoped = !text(&grant, "serviceId").is_empty();
-        let guard = service_guard(relay.clone(), grant.clone());
+        let (validated, service_ready) = watch::channel(false);
+        let guard = service_guard(
+            relay.clone(),
+            grant.clone(),
+            authorization.updates.clone(),
+            validated,
+        );
         let monitor = monitor_feed(
             relay,
             grant,
@@ -504,7 +514,10 @@ async fn run_feed(relay: Relay, grant: Value, feed: Arc<Feed>, cancel: watch::Re
             account,
             authorization,
             events,
-            tokio::time::Instant::now() + Duration::from_secs(10),
+            (
+                tokio::time::Instant::now() + Duration::from_secs(10),
+                scoped.then_some(service_ready),
+            ),
         );
         if scoped {
             tokio::try_join!(monitor, guard).map(|_| ())
@@ -514,7 +527,12 @@ async fn run_feed(relay: Relay, grant: Value, feed: Arc<Feed>, cancel: watch::Re
     };
     supervise_feed(feed.clone(), cancel, task).await;
 }
-async fn service_guard(relay: Relay, grant: Value) -> Result<()> {
+async fn service_guard(
+    relay: Relay,
+    grant: Value,
+    mut authorization: watch::Receiver<WatchSnapshot>,
+    validated: watch::Sender<bool>,
+) -> Result<()> {
     let service = relay
         .store
         .get("services", text(&grant, "serviceId"))
@@ -530,7 +548,8 @@ async fn service_guard(relay: Relay, grant: Value) -> Result<()> {
             .watch_document("accounts", text(&service, "ownerId"))
             .await?,
     ];
-    if !flag(&grant, "deliveryAcknowledged") {
+    let mut watching_key = !flag(&grant, "deliveryAcknowledged");
+    if watching_key {
         watches.push(
             relay
                 .store
@@ -546,16 +565,14 @@ async fn service_guard(relay: Relay, grant: Value) -> Result<()> {
         );
     }
     loop {
-        for watch in &mut watches {
-            ensure(
-                !watch.updates.borrow_and_update().failed,
-                503,
-                "event_watch_unavailable",
-            )?;
-        }
+        ensure(
+            !authorization.borrow_and_update().failed,
+            503,
+            "event_watch_unavailable",
+        )?;
         let r = relay.clone();
         let g = grant.clone();
-        relay
+        let current = relay
             .store
             .tx(move |tx| {
                 let (r, g) = (r.clone(), g.clone());
@@ -565,16 +582,44 @@ async fn service_guard(relay: Relay, grant: Value) -> Result<()> {
                         r.valid_grant(tx, &current).await?,
                         503,
                         "event_watch_unavailable",
-                    )
+                    )?;
+                    Ok(current)
                 })
             })
             .await?;
+        if watching_key && flag(&current, "deliveryAcknowledged") {
+            watches.pop();
+            watching_key = false;
+        }
+        for watch in &mut watches {
+            ensure(
+                !watch.updates.borrow_and_update().failed,
+                503,
+                "event_watch_unavailable",
+            )?;
+        }
+        validated.send_if_modified(|ready| {
+            if *ready {
+                false
+            } else {
+                *ready = true;
+                true
+            }
+        });
+        let until = if flag(&current, "deliveryAcknowledged") {
+            num(&current, "expiresAt")
+        } else {
+            num(&current, "expiresAt").min(num(&current, "deliveryExpiresAt"))
+        };
         let changes = watches
             .iter_mut()
             .map(|watch| Box::pin(watch.updates.changed()))
             .collect::<Vec<_>>();
-        let (changed, _, _) = futures::future::select_all(changes).await;
-        changed.map_err(|_| Error::External)?;
+        tokio::select! {
+            (changed, _, _) = futures::future::select_all(changes) => { changed.map_err(|_| Error::External)?; },
+            changed = authorization.changed() => { changed.map_err(|_| Error::External)?; },
+            _ = tokio::time::sleep(Duration::from_millis((until - relay.now()).clamp(1, 2_147_483_647) as u64)) => {},
+        }
     }
 }
 async fn supervise_feed<F: std::future::Future<Output = Result<()>>>(
@@ -595,13 +640,9 @@ async fn monitor_feed(
     mut account: WatchHandle,
     mut authorization: WatchHandle,
     mut events: WatchHandle,
-    ready_by: tokio::time::Instant,
+    (ready_by, mut service_ready): (tokio::time::Instant, Option<watch::Receiver<bool>>),
 ) -> Result<()> {
     let mut initialized = false;
-    let expiry = tokio::time::sleep(Duration::from_millis(
-        (num(&grant, "expiresAt") - relay.now()).clamp(1, 2_147_483_647) as u64,
-    ));
-    tokio::pin!(expiry);
     let mut snapshot = FeedSnapshot::default();
     let mut last_events = 0;
     loop {
@@ -636,7 +677,12 @@ async fn monitor_feed(
                 "event_watch_unavailable",
             )?;
         }
-        snapshot.ready = owner.current && access.current && tail.current;
+        snapshot.ready = owner.current
+            && access.current
+            && tail.current
+            && service_ready
+                .as_mut()
+                .is_none_or(|ready| *ready.borrow_and_update());
         initialized |= snapshot.ready;
         if tail.revision != last_events {
             snapshot.events = tail.docs;
@@ -644,13 +690,19 @@ async fn monitor_feed(
             snapshot.revision += 1;
             last_events = tail.revision;
         }
+        let expires_at = access
+            .docs
+            .first()
+            .map_or(num(&grant, "expiresAt"), |g| num(g, "expiresAt"));
+        snapshot.expires_at = expires_at;
         feed.updates.send_replace(snapshot.clone());
         tokio::select! {
+            changed = async { service_ready.as_mut().unwrap().changed().await }, if service_ready.is_some() => { changed.map_err(|_| Error::External)?; },
             result = account.updates.changed() => { result.map_err(|_| Error::External)?; },
             result = authorization.updates.changed() => { result.map_err(|_| Error::External)?; },
             result = events.updates.changed() => { result.map_err(|_| Error::External)?; },
             _ = tokio::time::sleep_until(ready_by), if !initialized => return Err::<(),Error>(Error::Api(503, "event_watch_unavailable")),
-            _ = &mut expiry => return Err::<(),Error>(Error::Api(503, "event_watch_unavailable")),
+            _ = tokio::time::sleep(Duration::from_millis((expires_at - relay.now()).clamp(1, 2_147_483_647) as u64)) => {},
         }
     }
 }
@@ -946,7 +998,10 @@ mod tests {
                 account,
                 authorization,
                 events,
-                tokio::time::Instant::now() + Duration::from_millis(20),
+                (
+                    tokio::time::Instant::now() + Duration::from_millis(20),
+                    None,
+                ),
             );
             tokio::spawn(supervise_feed(feed, cancel, monitor));
         })

@@ -60,6 +60,15 @@ class OnboardingActivity : AccountActivity() {
 internal fun OnboardingScreen(target: OnboardingLink, attempt: String, account: RelayUiState,
     request: suspend (String, String, JSONObject?) -> JSONObject,
     onSignIn: () -> Unit, onRegister: () -> Unit, onClose: () -> Unit, onRestart: () -> Unit, onManage: (String) -> Unit) {
+    key(target, attempt, account.signedIn, account.email) {
+        OnboardingContent(target, attempt, account, request, onSignIn, onRegister, onClose, onRestart, onManage)
+    }
+}
+
+@Composable
+private fun OnboardingContent(target: OnboardingLink, attempt: String, account: RelayUiState,
+    request: suspend (String, String, JSONObject?) -> JSONObject,
+    onSignIn: () -> Unit, onRegister: () -> Unit, onClose: () -> Unit, onRestart: () -> Unit, onManage: (String) -> Unit) {
     var sessionText by rememberSaveable(target, attempt) { mutableStateOf<String?>(null) }
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }

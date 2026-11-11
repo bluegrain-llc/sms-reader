@@ -2,11 +2,11 @@
 using System.Diagnostics;
 using System.Text.Json;
 namespace Bluegrain.RequestRelay;
-public sealed class RelayClient(string? broker=null,string profile="default",string? directory=null,string? relayUrl=null) {
+public sealed class RelayClient(string? broker=null,string profile="default",string? directory=null,string? relayUrl=null,string? storageCommand=null) {
  public async Task<JsonElement> InvokeAsync(string operation,object? input=null,string? connectionId=null,CancellationToken cancellationToken=default) {
   using var process=new Process{StartInfo=new ProcessStartInfo(broker??"relay-broker"){RedirectStandardInput=true,RedirectStandardOutput=true,RedirectStandardError=true,UseShellExecute=false}};
   process.Start();using var registration=cancellationToken.Register(()=>{try{process.Kill(true);}catch(InvalidOperationException){}});
-  await process.StandardInput.WriteAsync(JsonSerializer.Serialize(new{operation,input=input??new{},connectionId,profile,directory,relayUrl}));process.StandardInput.Close();
+  await process.StandardInput.WriteAsync(JsonSerializer.Serialize(new{operation,input=input??new{},connectionId,profile,directory,relayUrl,storageCommand}));process.StandardInput.Close();
   var output=await process.StandardOutput.ReadToEndAsync(cancellationToken);await process.WaitForExitAsync(cancellationToken);using var result=JsonDocument.Parse(output);
   if(!result.RootElement.GetProperty("ok").GetBoolean())throw new InvalidOperationException(result.RootElement.GetProperty("error").GetString());return result.RootElement.GetProperty("value").Clone();
  }

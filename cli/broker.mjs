@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 /** SDK process transport. Lifecycle credentials never cross stdout or process arguments. */
 import { PrivateStore } from './store.mjs';
+import { CommandStore } from './command-store.mjs';
 import { ServiceSession } from './service.mjs';
 import { credential } from './client.mjs';
 const abort = new AbortController();
@@ -11,7 +12,7 @@ try {
   for await(const chunk of process.stdin){size+=chunk.length;if(size>262144)throw Error('input_too_large');chunks.push(chunk);}
   const request=JSON.parse(Buffer.concat(chunks).toString());
   const {operation,connectionId}=request;const input=request.input??{};
-  const store=new PrivateStore(request.directory??undefined,request.profile||undefined);
+  const store=request.storageCommand ? new CommandStore(request.storageCommand,request.directory??undefined,request.profile||undefined,abort.signal) : new PrivateStore(request.directory??undefined,request.profile||undefined);
   unlock=await store.lock();
   const timeout=Math.min(700000,Math.max(1000,Number(request.timeoutMs)||(operation?.startsWith('waitFor')?700000:120000)));
   const options={signal:AbortSignal.any([abort.signal,AbortSignal.timeout(timeout)]),allowHttpLoopback:request.allowHttpLoopback===true};

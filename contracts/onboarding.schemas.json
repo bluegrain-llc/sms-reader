@@ -114,12 +114,8 @@
     },
     "required": [
       "client_name",
-      "redirect_uris",
-      "token_endpoint_auth_method",
-      "grant_types",
-      "response_types"
-    ],
-    "additionalProperties": false
+      "redirect_uris"
+    ]
   },
   "OAuthDecision": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -142,7 +138,8 @@
             "forms",
             "sms"
           ]
-        }
+        },
+        "uniqueItems": true
       },
       "expiresInDays": {
         "anyOf": [
@@ -273,7 +270,6 @@
     "required": [
       "name",
       "purpose",
-      "capabilities",
       "deliveryPublicKey",
       "credentialHash"
     ],
@@ -321,7 +317,6 @@
     },
     "required": [
       "capabilities",
-      "expiresInDays",
       "idempotencyKey"
     ],
     "additionalProperties": false
@@ -475,9 +470,7 @@
               "required": [
                 "id",
                 "label",
-                "required",
-                "type",
-                "maxLength"
+                "type"
               ],
               "additionalProperties": false
             },
@@ -511,7 +504,6 @@
               "required": [
                 "id",
                 "label",
-                "required",
                 "type"
               ],
               "additionalProperties": false
@@ -540,7 +532,6 @@
               "required": [
                 "id",
                 "label",
-                "required",
                 "type"
               ],
               "additionalProperties": false
@@ -596,7 +587,6 @@
               "required": [
                 "id",
                 "label",
-                "required",
                 "type",
                 "options"
               ],
@@ -626,7 +616,6 @@
               "required": [
                 "id",
                 "label",
-                "required",
                 "type"
               ],
               "additionalProperties": false
@@ -770,9 +759,7 @@
     "required": [
       "title",
       "body",
-      "fields",
       "actions",
-      "expiresInSeconds",
       "idempotencyKey"
     ],
     "additionalProperties": false

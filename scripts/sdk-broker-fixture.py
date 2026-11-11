@@ -4,6 +4,7 @@ import json
 import sys
 request = json.load(sys.stdin)
 assert request.get('profile') == 'conformance'
+assert request.get('directory') is None, 'default storage must be omitted or null, never CWD'
 assert request.get('connectionId') == 'public-connection'
 assert not any(key in request for key in ('token', 'serviceToken', 'privateKey'))
 operation = request['operation']

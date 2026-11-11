@@ -41,3 +41,8 @@ test('provider declarations expose only caller tools and never lifecycle authori
   await assert.rejects(t.execute('register_service',{}));assert.equal(calls.length,0);
   assert.deepEqual(await t.execute('request_form',{title:'Review'}),{status:'pending'});assert.equal(calls.length,1);
 });
+
+test('Python key rotation resumes the saved retirement intent',()=>{
+  const program=`import copy\nfrom request_relay import ServiceSession\nclass Store:\n state=None\n def load(self):return copy.deepcopy(self.state)\n def save(self,state):self.state=copy.deepcopy(state)\nstore=Store()\ns=ServiceSession.create('https://relay.example','Agent','Decisions',store)\ndef interrupted(path,token,body,method=None):\n assert store.state['nextRetireKeyId']=='compromised'\n assert body['retireKeyId']=='compromised'\n raise RuntimeError('interrupted')\ns.client.request=interrupted\ntry:\n s.rotate_key('compromised')\n raise AssertionError('interruption expected')\nexcept RuntimeError:pass\nr=ServiceSession.resume(store)\ndef completed(path,token,body,method=None):\n assert body['retireKeyId']=='compromised'\n return {}\nr.client.request=completed\nr.rotate_key()\nassert 'nextKey' not in store.state and 'nextRetireKeyId' not in store.state\nassert len(store.state['keys'])==2\n`;
+  const r=spawnSync('python3',['-c',program],{env:{...process.env,PYTHONPATH:new URL('../../sdks/python',import.meta.url).pathname},encoding:'utf8',timeout:10000});assert.equal(r.status,0,r.stderr);
+});

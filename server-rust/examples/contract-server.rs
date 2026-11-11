@@ -336,7 +336,7 @@ async fn call(State(h): State<Host>, body: Bytes) -> impl IntoResponse {
                 let subscriptions = h.subscriptions.lock().await;
                 let subscription = subscriptions.get(&t(0)).ok_or(Error::Api(404,"unknown_subscription"))?;
                 let active = h.feeds.lock().await.get(text(&v,"callback")).map(EventStreams::active_feeds).unwrap_or(0);
-                Ok(json!({"failed":subscription.failed(),"revision":subscription.revision(),"oldest":subscription.oldest(),"events":subscription.tail(0,r.now()),"activeFeeds":active}))
+                Ok(json!({"failed":subscription.failed(),"revision":subscription.revision(),"expiresAt":subscription.expires_at(),"oldest":subscription.oldest(),"events":subscription.tail(0,r.now()),"activeFeeds":active}))
             }
             "streamStop" => {
                 h.subscriptions.lock().await.remove(&t(0));

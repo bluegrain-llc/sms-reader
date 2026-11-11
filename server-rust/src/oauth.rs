@@ -122,8 +122,15 @@ fn selected(requested: &Value, caps: &Value) -> Result<()> {
 fn redirect(p: &Value, auth_code: Option<&str>) -> Result<String> {
     let mut u =
         url::Url::parse(text(p, "redirect_uri")).map_err(|_| Error::Api(400, "invalid_client"))?;
+    let retained = u
+        .query_pairs()
+        .filter(|(name, _)| !["state", "code", "error"].contains(&name.as_ref()))
+        .map(|(k, v)| (k.into_owned(), v.into_owned()))
+        .collect::<Vec<_>>();
+    u.set_query(None);
     {
         let mut q = u.query_pairs_mut();
+        q.extend_pairs(retained);
         if let Some(state) = p["state"].as_str() {
             q.append_pair("state", state);
         }

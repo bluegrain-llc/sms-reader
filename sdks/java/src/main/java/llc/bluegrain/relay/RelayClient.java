@@ -5,11 +5,12 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.LinkedHashMap;
 import java.util.Map;
 public final class RelayClient {
- private final String broker,profile,directory,relayUrl;
+ private final String broker,profile,directory,relayUrl,storageCommand;
  private final ObjectMapper json=new ObjectMapper();
- public RelayClient(String broker,String profile,String directory,String relayUrl){this.broker=broker;this.profile=profile;this.directory=directory;this.relayUrl=relayUrl;}
+ public RelayClient(String broker,String profile,String directory,String relayUrl){this(broker,profile,directory,relayUrl,null);}
+ public RelayClient(String broker,String profile,String directory,String relayUrl,String storageCommand){this.broker=broker;this.profile=profile;this.directory=directory;this.relayUrl=relayUrl;this.storageCommand=storageCommand;}
  public JsonNode invoke(String operation,Object input,String connectionId)throws Exception{
-  Map<String,Object> payload=new LinkedHashMap<>();payload.put("operation",operation);payload.put("input",input==null?Map.of():input);payload.put("connectionId",connectionId);payload.put("profile",profile);payload.put("directory",directory);payload.put("relayUrl",relayUrl);
+  Map<String,Object> payload=new LinkedHashMap<>();payload.put("operation",operation);payload.put("input",input==null?Map.of():input);payload.put("connectionId",connectionId);payload.put("profile",profile);payload.put("directory",directory);payload.put("relayUrl",relayUrl);payload.put("storageCommand",storageCommand);
   Process process=new ProcessBuilder(broker==null?"relay-broker":broker).redirectError(ProcessBuilder.Redirect.DISCARD).start();
   try {try(var stream=process.getOutputStream()){json.writeValue(stream,payload);}JsonNode result=json.readTree(process.getInputStream());process.waitFor();if(result==null||!result.path("ok").asBoolean())throw new IllegalStateException(result==null?"relay broker unavailable":result.path("error").asText("relay operation failed"));return result.get("value");}finally{process.destroy();}
  }

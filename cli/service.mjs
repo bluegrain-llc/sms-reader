@@ -40,9 +40,13 @@ export class ServiceSession {
     s.serviceToken=s.nextServiceToken;delete s.nextServiceToken;await this.save();
   }
   async rotateKey(retireKeyId) {
-    const s=this.state;s.nextKey??=await deliveryKey();await this.save();
-    await this.client.request('/v3/service',s.serviceToken,{deliveryPublicKey:s.nextKey.publicKey,...(retireKeyId?{retireKeyId}:{})},'PATCH');
-    if(!s.keys.some(k=>k.id===s.nextKey.id))s.keys.push(s.nextKey);delete s.nextKey;await this.save();
+    const s=this.state;
+    if (!s.nextKey) { s.nextKey=await deliveryKey(); s.nextRetireKeyId=retireKeyId??null; }
+    else if (!('nextRetireKeyId' in s)) s.nextRetireKeyId=retireKeyId??null;
+    else if (retireKeyId!==undefined && retireKeyId!==s.nextRetireKeyId) throw Error('Resume the pending key rotation before changing retirement.');
+    await this.save();
+    await this.client.request('/v3/service',s.serviceToken,{deliveryPublicKey:s.nextKey.publicKey,...(s.nextRetireKeyId?{retireKeyId:s.nextRetireKeyId}:{})},'PATCH');
+    if(!s.keys.some(k=>k.id===s.nextKey.id))s.keys.push(s.nextKey);delete s.nextKey;delete s.nextRetireKeyId;await this.save();
   }
   connection(id) {return new Connection(this.client,this.state.connections[id]?.token);}
 }

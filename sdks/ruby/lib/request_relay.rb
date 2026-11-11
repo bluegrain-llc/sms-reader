@@ -3,11 +3,11 @@ require 'json'
 require 'open3'
 module RequestRelay
  class Client
-  def initialize(broker: 'relay-broker', profile: 'default', directory: nil, relay_url: nil)
-   @broker,@profile,@directory,@relay_url=broker,profile,directory,relay_url
+  def initialize(broker: 'relay-broker', profile: 'default', directory: nil, relay_url: nil, storage_command: nil)
+   @broker,@profile,@directory,@relay_url,@storage_command=broker,profile,directory,relay_url,storage_command
   end
   def invoke(operation,input: {},connection_id: nil)
-   payload=JSON.generate({operation:operation,input:input,connectionId:connection_id,profile:@profile,directory:@directory,relayUrl:@relay_url})
+   payload=JSON.generate({operation:operation,input:input,connectionId:connection_id,profile:@profile,directory:@directory,relayUrl:@relay_url,storageCommand:@storage_command})
    output,status=Open3.capture2([@broker,@broker],stdin_data:payload,err:File::NULL)
    result=JSON.parse(output)
    raise(result['error']||'relay operation failed') unless result['ok'] && status.success?

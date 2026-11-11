@@ -20,6 +20,7 @@
   "exports": {
     "./client": "./client.mjs",
     "./store": "./store.mjs",
+    "./command-store": "./command-store.mjs",
     "./service": "./service.mjs"
   }
 }
