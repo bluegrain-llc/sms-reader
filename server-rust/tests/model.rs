@@ -1,6 +1,23 @@
 use serde_json::{Value, json};
 use sms_code_relay::{forms_model::*, model::*, webhooks::*};
 #[test]
+fn object_values_enumerate_array_indices_before_other_keys() {
+    let value = json!({"10":"ten","02":"leading zero","4294967295":"not an index","2":"two","0":"zero","4294967294":"last index","phone":"named"});
+    assert_eq!(
+        js_values(&value),
+        vec![
+            &json!("zero"),
+            &json!("two"),
+            &json!("ten"),
+            &json!("last index"),
+            &json!("leading zero"),
+            &json!("not an index"),
+            &json!("named"),
+        ]
+    );
+    assert_eq!(value.as_object().unwrap().keys().next().unwrap(), "10");
+}
+#[test]
 fn secrets_requests_and_codes() {
     let token = secret();
     assert!(valid_secret(&token));

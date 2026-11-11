@@ -58,6 +58,11 @@ fn array_index(k: &str) -> Option<u32> {
         .ok()
         .filter(|n| *n < u32::MAX && n.to_string() == k)
 }
+pub fn js_values(value: &Value) -> Vec<&Value> {
+    let mut entries = value.as_object().unwrap().iter().collect::<Vec<_>>();
+    entries.sort_by_key(|(k, _)| array_index(k).map(|n| (0, n)).unwrap_or((1, 0)));
+    entries.into_iter().map(|(_, v)| v).collect()
+}
 // JSON.parse uses IEEE-754 numbers and enumerates array-index keys numerically.
 pub fn js_numbers(value: &mut Value) {
     match value {

@@ -35,6 +35,23 @@ beforeEach(async () => {
 });
 after(async () => { await deleteApp(firebase); });
 for (const direction of ['typescript-to-rust', 'rust-to-typescript']) {
+  test(`${direction}: numeric device IDs preserve aggregate SMS failure precedence`, { timeout: 60_000 }, async () => {
+    const [writer, reader] = direction.startsWith('typescript') ? [ts, rust] : [rust, ts];
+    await writer.register(uid, '10', 'Ten', 'synthetic-ten');
+    await writer.register(uid, '2', 'Two', 'synthetic-two');
+    const grant = await writer.createGrant(uid, '10', 'Caller', 30);
+    const request = await writer.create(grant.token, { purpose: 'Failure precedence', idempotencyKey: 'numeric-device-failure' });
+    await writer.transition({ uid, deviceId: '2' }, request.requestId, 'failed', 'listener_failed');
+    await reader.transition({ uid, deviceId: '10' }, request.requestId, 'failed', 'process_restarted');
+    for (const backend of [writer, reader]) {
+      const result = await backend.get(grant.token, request.requestId);
+      assert.equal(result.status, 'failed'); assert.equal(result.reason, 'listener_failed');
+    }
+    const stored = (await db.collection('requests').doc(request.requestId).get()).data()!;
+    assert.equal(stored.reason, 'listener_failed');
+    assert.equal(stored.phones['2'].reason, 'listener_failed');
+    assert.equal(stored.phones['10'].reason, 'process_restarted');
+  });
   test(`${direction}: credentials, active SMS, legacy documents and result timestamps`, { timeout: 60_000 }, async () => {
     const [writer, reader] = direction.startsWith('typescript') ? [ts, rust] : [rust, ts];
     await writer.register(uid, did, 'Phone', 'synthetic-fcm', 1);
