@@ -2,7 +2,7 @@ import type { Firestore } from 'firebase-admin/firestore';
 import type { Forms } from './forms.js';
 import { publicEvent } from './forms.js';
 import type { RelayEvent } from './forms-model.js';
-import { ensure, hash } from './model.js';
+import { ensure, hasCapability, hash } from './model.js';
 
 type Subscriber = { changed: () => void; closed: () => void };
 type Feed = { subscribers: Set<Subscriber>; stops: (() => void)[]; events: RelayEvent[]; revision: number; failed: boolean; ready: Promise<void> };
@@ -25,7 +25,7 @@ export class EventStreams {
       this.feeds.set(key, feed);
       const current = feed;
       const seen = new Set<string>();
-      const loaded = (name: string) => { seen.add(name); if (seen.size === 3) resolve(); };
+      const loaded = (name: string) => { seen.add(name); if (seen.size === (grant.serviceId ? 5 + (grant.deliveryAcknowledged ? 0 : 1) : 3)) resolve(); };
       const fail = () => {
         if (current.failed) return;
         current.failed = true; reject(Error('event_watch_unavailable'));
@@ -39,13 +39,36 @@ export class EventStreams {
       current.stops.push(() => clearTimeout(expiry));
       current.stops.push(this.db.collection('grants').doc(grant.id).onSnapshot(doc => {
         const g = doc.data();
-        if (!g || g.ownerId !== grant.ownerId || g.revoked || g.managerId || !g.formsApproved || g.expiresAt <= this.forms.now()) return fail();
+        if (!g || g.ownerId !== grant.ownerId || g.revoked || g.managerId || !hasCapability(g as typeof grant, 'forms') || g.expiresAt <= this.forms.now()) return fail();
         loaded('grant');
       }, fail));
       current.stops.push(this.db.collection('accounts').doc(grant.ownerId).onSnapshot(doc => {
         if (doc.data()?.deleting) return fail();
         loaded('account');
       }, fail));
+      if (grant.serviceId) {
+        let watchingOperator = false;
+        current.stops.push(this.db.collection('services').doc(grant.serviceId).onSnapshot(doc => {
+          const service = doc.data();
+          if (!service?.active || service.deleted) return fail();
+          if (!watchingOperator) {
+            watchingOperator = true;
+            current.stops.push(this.db.collection('accounts').doc(service.ownerId).onSnapshot(owner => {
+              if (owner.data()?.deleting) return fail();
+              loaded('operator');
+            }, fail));
+          }
+          loaded('service');
+        }, fail));
+        if (!grant.deliveryAcknowledged) {
+          const expiry = setTimeout(fail, Math.max(1, Math.min(2_147_483_647, (grant.deliveryExpiresAt ?? 0) - this.forms.now())));
+          current.stops.push(() => clearTimeout(expiry));
+          current.stops.push(this.db.collection('serviceDeliveryKeys').doc(`${grant.serviceId}_${grant.deliveryKeyId}`).onSnapshot(key => {
+            if (!key.exists || key.data()?.retired) return fail();
+            loaded('deliveryKey');
+          }, fail));
+        }
+      }
       current.stops.push(this.db.collection('requestEvents').where('grantId', '==', grant.id)
         .orderBy('sequence', 'desc').limit(100).onSnapshot(snapshot => {
           current.events = snapshot.docs.map(d => d.data() as RelayEvent).reverse();

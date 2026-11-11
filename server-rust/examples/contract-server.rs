@@ -347,6 +347,7 @@ async fn call(State(h): State<Host>, body: Bytes) -> impl IntoResponse {
                 r.telemetry_backlogs().await?;
                 Ok(Value::Null)
             }
+            "onboarding.cleanup" => {r.onboarding_cleanup().await?; Ok(Value::Null)},
             "connections.start" => r.connection_start(t(0), a(1)).await,
             "connections.poll" => r.connection_poll(t(0)).await,
             "connections.owner" => {

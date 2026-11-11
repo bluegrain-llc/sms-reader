@@ -3,7 +3,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { Transaction } from 'firebase-admin/firestore';
 import { z } from 'zod';
 import type { Relay } from './relay.js';
-import { Account, bump, ensure, Grant, hash, HISTORY, MINUTE } from './model.js';
+import { Account, hasCapability, bump, ensure, Grant, hash, HISTORY, MINUTE } from './model.js';
 import { DAY, FormRequest, formSchema, formView, observationSchema, RelayEvent, Submission, submissionSchema, validateSubmission, webhookSchema } from './forms-model.js';
 import { sendWebhook, validateDestination } from './webhooks.js';
 
@@ -12,6 +12,8 @@ type FormGrant = Grant & { formsApproved?: boolean; formsCancellationPending?: b
 type Job = { id: string; ownerId: string; grantId: string; requestId: string; eventId: string; kind: 'push' | 'webhook'; deviceId?: string; hookId?: string; nextAt: number; lease: string | null; attempts: number; purgeAt: Date };
 export const publicEvent = ({ ownerId: _o, grantId: _g, purgeAt: _p, ...event }: RelayEvent) => event;
 const canonical = (v: unknown): string => JSON.stringify(v, (_key, value) => value && typeof value === 'object' && !Array.isArray(value) ? Object.fromEntries(Object.keys(value).sort().map(k => [k, value[k]])) : value);
+const requiresSms = (definition: FormRequest['definition']) => definition.fields.some(f => 'input' in f && f.input === 'sms_code');
+const allowed = (g: FormGrant, definition: FormRequest['definition']) => hasCapability(g, 'forms') && (!requiresSms(definition) || hasCapability(g, 'sms'));
 export class Forms {
   constructor(readonly relay: Relay, readonly wake: () => Promise<void> = async () => {}, readonly callback = sendWebhook) {}
   get db() { return this.relay.db; }
@@ -23,7 +25,7 @@ export class Forms {
   async kick() { try { await this.wake(); } catch (error) { telemetry.emit({ event: 'wakeup_failed', category: category(error) }); } }
   async agent(tx: Transaction, secret: string) {
     const { grant, account } = await this.relay.agent(tx, secret);
-    ensure((grant as FormGrant).formsApproved, 403, 'forms_approval_required'); return { grant: grant as FormGrant, account };
+    ensure(hasCapability(grant as FormGrant, 'forms'), 403, 'forms_approval_required'); return { grant: grant as FormGrant, account };
   }
   async approve(uid: string, id: string, approved: boolean) {
     if (!approved) {
@@ -38,6 +40,7 @@ export class Forms {
       await this.relay.account(tx, uid);
       const g = (await tx.get(this.ref('grants', id))).data() as FormGrant | undefined;
       ensure(g && g.ownerId === uid && await this.relay.validGrant(tx, g), 404, 'grant_not_found');
+      ensure(!g.capabilities, 409, 'use_v3_connection_management');
       tx.update(this.ref('grants', id), { formsApproved: approved, formsCancellationPending: !approved });
     });
     if (!approved) await this.cancelGrant(id);
@@ -56,7 +59,8 @@ export class Forms {
     ensure(this.retained(r.purgeAt), 404, 'request_not_found');
     if (!('secret' in auth)) g = (await tx.get(this.ref('grants', r.grantId))).data() as FormGrant;
     ensure(g!, 409, 'grant_unavailable');
-    const valid = !!g! && !!g!.formsApproved && await this.relay.validGrant(tx, g!);
+    if ('secret' in auth) ensure(!requiresSms(r.definition) || hasCapability(g!, 'sms'), 403, 'sms_approval_required');
+    const valid = !!g! && allowed(g!, r.definition) && await this.relay.validGrant(tx, g!);
     return { r, g: g!, device, valid, account };
   }
   event(tx: Transaction, r: FormRequest, g: FormGrant, type: RelayEvent['type'], extra: { deviceId?: string; fieldId?: string; observedAt?: number } = {}) {
@@ -88,6 +92,7 @@ export class Forms {
     const definition = formSchema.parse(raw);
     const output = await this.db.runTransaction(async tx => {
       const { grant: g, account } = await this.agent(tx, secret);
+      ensure(!requiresSms(definition) || hasCapability(g, 'sms'), 403, 'sms_approval_required');
       const id = hash(`v2:${g.id}:${definition.idempotencyKey}`), fingerprint = hash(canonical(definition));
       const old = (await tx.get(this.ref('formRequests', id))).data() as FormRequest | undefined;
       if (old) { ensure(this.retained(old.purgeAt), 410, 'request_retention_ended'); ensure(old.fingerprint === fingerprint, 409, 'idempotency_conflict'); await this.expire(tx, old, g, true); return formView(old); }
@@ -228,7 +233,7 @@ export class Forms {
       const e = (await tx.get(this.ref('requestEvents', j.eventId))).data() as RelayEvent | undefined;
       const d = j.deviceId ? (await tx.get(this.ref('devices', j.deviceId))).data() : null;
       const hook = g?.webhooks?.find(h => h.id === j.hookId);
-      if (!r || !e || !this.retained(j.purgeAt) || account?.deleting || !g?.formsApproved || !await this.relay.validGrant(tx, g) || (j.kind === 'push' && (r.status !== 'pending' || r.expiresAt <= this.now() || !d || d.deleted || d.paused || d.ownerId !== j.ownerId || (r.definition.steps && d.wizardVersion !== 1))) || (j.kind === 'webhook' && !hook)) {
+      if (!r || !e || !this.retained(j.purgeAt) || account?.deleting || !(g && allowed(g, r.definition)) || !await this.relay.validGrant(tx, g) || (j.kind === 'push' && (r.status !== 'pending' || r.expiresAt <= this.now() || !d || d.deleted || d.paused || d.ownerId !== j.ownerId || (r.definition.steps && d.wizardVersion !== 1))) || (j.kind === 'webhook' && !hook)) {
         tx.delete(this.ref('deliveryOutbox', id)); return null;
       }
       tx.update(this.ref('deliveryOutbox', id), { lease, nextAt: this.now() + MINUTE, attempts: j.attempts + 1 });
@@ -259,7 +264,7 @@ export class Forms {
     for (const doc of snap.docs) await this.db.runTransaction(async tx => {
       const r = (await tx.get(doc.ref)).data() as FormRequest;
       const g = (await tx.get(this.ref('grants', grantId))).data() as FormGrant;
-      if (r?.status === 'pending' && g && (!g.formsApproved || !await this.relay.validGrant(tx, g))) await this.end(tx, r, g, 'cancelled');
+      if (r?.status === 'pending' && g && (!allowed(g, r.definition) || !await this.relay.validGrant(tx, g))) await this.end(tx, r, g, 'cancelled');
     });
     await this.db.runTransaction(async tx => {
       const g = (await tx.get(this.ref('grants', grantId))).data() as FormGrant | undefined;
@@ -291,7 +296,7 @@ export class Forms {
       const r = (await tx.get(this.ref('formRequests', id))).data() as FormRequest | undefined;
       if (!r) return;
       const g = (await tx.get(this.ref('grants', r.grantId))).data() as FormGrant;
-      if (r.status === 'pending' && g) await this.expire(tx, r, g, !!g.formsApproved && await this.relay.validGrant(tx, g));
+      if (r.status === 'pending' && g) await this.expire(tx, r, g, allowed(g, r.definition) && await this.relay.validGrant(tx, g));
     }));
     await this.dispatch();
     for (const collection of ['formResults', 'formRequests', 'requestEvents', 'deliveryOutbox']) await this.relay.pages.purge(collection, this.now());

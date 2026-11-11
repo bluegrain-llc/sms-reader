@@ -1,0 +1,4 @@
+{
+  "name":"@sms-relay/client", "version":"0.1.0", "private":true, "type":"module",
+  "exports":"./index.mjs", "types":"./index.d.mts", "dependencies":{"@sms-relay/cli":"0.1.0"}
+}

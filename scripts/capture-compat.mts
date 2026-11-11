@@ -110,7 +110,7 @@ const envelopeValidation = [1e20, -1e20, 1.5, false].map(progressToken => {
   return { envelope: 'list', input, issues: result.error.issues };
 });
 save('tool-validation.json', [...toolValidation, ...envelopeValidation]);
-const server = app({ forms: {}, checkAgent: async () => {} } as unknown as Relay, { verifyOwner: async () => ({ uid: 'fixture', authTime: 0 }), verifyScheduler: async () => {}, deleteIdentity: async () => {} }).listen(0, '127.0.0.1');
+const server = app({ forms: {}, db: { runTransaction: async (fn: (tx: unknown) => unknown) => fn({}) }, agent: async () => ({ grant: {} }) } as unknown as Relay, { verifyOwner: async () => ({ uid: 'fixture', authTime: 0 }), verifyScheduler: async () => {}, deleteIdentity: async () => {} }).listen(0, '127.0.0.1');
 const client = new Client({ name: 'schema-export', version: '1' });
 try {
   await once(server, 'listening', { signal: AbortSignal.timeout(15_000) });

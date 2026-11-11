@@ -4,12 +4,15 @@ import { z, ZodError } from 'zod';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { mountAccountPages, WebConfig } from './account-pages.js';
+import { mountOnboarding } from './onboarding-http.js';
+import { mountOnboardingPages } from './onboarding-pages.js';
+import { mountOAuth } from './oauth-http.js';
 import { mountForms } from './forms-http.js';
 import { signingFingerprints } from './signing.js';
 import { formSchema } from './forms-model.js';
 import { Relay } from './relay.js';
 import { connectionSchema, userCodeSchema } from './connections.js';
-import { codeSchema, ensure, idSchema, RelayError, requestSchema } from './model.js';
+import { codeSchema, hasCapability, ensure, idSchema, RelayError, requestSchema } from './model.js';
 
 export interface Identity { uid: string; authTime: number }
 export interface HttpOptions {
@@ -39,13 +42,13 @@ export function app(relay: Relay, options: HttpOptions) {
   app.use((req, _res, next) => {
     const origin = req.get('origin');
     const accountOrigin = options.publicUrl ? new URL(options.publicUrl).origin : undefined;
-    const accountRoute = /^\/v1\/account(?:-deletion)?\/?$/i.test(req.path);
+    const accountRoute = /^\/v1\/account(?:-deletion)?\/?$/i.test(req.path) || /^\/v3(?:\/|$)/.test(req.path);
     ensure(!origin || (accountRoute && origin === accountOrigin) || (options.origins ?? []).includes(origin), 403, 'origin_not_allowed'); next();
   });
   app.use(express.json({ limit: '256kb', strict: true }));
   app.get(['/health', '/healthz'], (_req, res) => { res.json({ ok: true }); });
   app.use((req, _res, next) => {
-    if (req.get('authorization') || (req.method === 'POST' && /^\/v1\/connections\/?$/i.test(req.path))) options.assertServing?.();
+    if (req.get('authorization') || (req.method === 'POST' && /^\/v1\/connections\/?$/i.test(req.path)) || req.path.startsWith('/oauth/')) options.assertServing?.();
     next();
   });
   const owner = async (req: Request, allowDeleted = false) => {
@@ -59,6 +62,9 @@ export function app(relay: Relay, options: HttpOptions) {
     const secret = bearer(req), { grant } = await relay.db.runTransaction(tx => relay.agent(tx, secret));
     await relay.access.read(grant.ownerId, grant.id); return secret;
   };
+  mountOAuth(app, relay, options.publicUrl, owner);
+  mountOnboarding(app, relay.onboarding, owner, bearer);
+  mountOnboardingPages(app, options.firebaseWebConfig);
   mountAccountPages(app, options.firebaseWebConfig, options.privacyContact);
   app.get('/v1/account-deletion', async (req, res) => { res.json(await relay.deletions.status(bearer(req))); });
   const device = (req: Request) => idSchema.parse(req.params.deviceId);
@@ -164,8 +170,8 @@ export function app(relay: Relay, options: HttpOptions) {
       await relay.maintenance();
     }, relay.db); res.json({ ok: true });
   });
-  app.post('/mcp', async (req, res) => {
-    const secret = bearer(req); await relay.checkAgent(secret);
+  app.post(['/mcp', '/mcp/services/:serviceId'], async (req, res) => {
+    const secret = bearer(req); const { grant } = await relay.db.runTransaction(tx => relay.agent(tx, secret));
     // New stateless server per HTTP request; identity is never shared between clients.
     const server = new McpServer({ name: 'sms-code-relay', version: '0.6.0' });
     const readTools = new Set<string>();
@@ -176,6 +182,7 @@ export function app(relay: Relay, options: HttpOptions) {
       if (!(error instanceof RelayError)) telemetry.emit({ event: 'mcp_tool_failed', category: category(error) });
       return { isError: true, content: [{ type: 'text' as const, text: JSON.stringify({ error: error instanceof RelayError ? error.reason : 'internal_error' }) }] };
     });
+    if (!grant.capabilities || hasCapability(grant, 'sms')) {
     server.registerTool('request_sms_code', {
       description: 'Notify the owner’s registered phones about an upcoming SMS, queuing behind another caller if needed. Wait for ready before triggering SMS in a separate system. First approved response wins. Never triggers SMS.',
       inputSchema: requestSchema.shape,
@@ -186,11 +193,14 @@ export function app(relay: Relay, options: HttpOptions) {
     server.registerTool('cancel_sms_code_request', {
       description: 'Cancel this token’s request.', inputSchema: { requestId: idSchema },
     }, input => tool(() => relay.transition({ secret }, input.requestId, 'cancelled')));
+    }
+    if (!grant.capabilities || hasCapability(grant, 'forms')) {
     server.registerTool('create_request', { description: 'Create a form or multi-step wizard with optional conditional steps and one final submission. Requires owner approval for forms in Admin.', inputSchema: formSchema.shape }, input => tool(() => relay.forms.create(secret, input)));
     server.registerTool(readToolName('inspect_request'), { description: 'Inspect your request without marking it opened.', inputSchema: { requestId: idSchema } }, input => tool(() => relay.forms.get({ secret }, input.requestId)));
     server.registerTool('cancel_request', { description: 'Cancel your pending request.', inputSchema: { requestId: idSchema } }, input => tool(() => relay.forms.cancel(secret, input.requestId)));
     server.registerTool(readToolName('get_request_result'), { description: 'Retrieve accepted answers, retained for 24 hours.', inputSchema: { requestId: idSchema } }, input => tool(() => relay.forms.result(secret, input.requestId)));
     server.registerTool(readToolName('poll_request_events'), { description: 'Poll durable events for your connection. Answers are retrieved separately.', inputSchema: { cursor: z.string().max(128).optional() } }, input => tool(() => relay.forms.events(secret, input.cursor)));
+    }
     for (const message of Array.isArray(req.body) ? req.body : [req.body]) {
       if (message?.method === 'tools/call' && readTools.has(message?.params?.name)) await agentRead(req);
     }
@@ -198,7 +208,7 @@ export function app(relay: Relay, options: HttpOptions) {
     res.on('close', () => { void transport.close(); void server.close(); });
     await server.connect(transport); await transport.handleRequest(req, res, req.body);
   });
-  app.all('/mcp', (_req, res) => { res.status(405).json({ error: 'method_not_allowed' }); });
+  app.all(['/mcp', '/mcp/services/:serviceId'], (_req, res) => { res.status(405).json({ error: 'method_not_allowed' }); });
   app.use((_req, res) => { res.status(404).json({ error: 'not_found' }); });
   app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
     if (res.headersSent) return;

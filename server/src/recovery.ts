@@ -8,7 +8,7 @@ const collections = ['accounts', 'devices', 'grants'] as const;
 const keys = {
   accounts: ['deleting'],
   devices: ['id', 'ownerId', 'name', 'fcmToken', 'paused', 'deleted', 'wizardVersion', 'updatedAt'],
-  grants: ['id', 'ownerId', 'deviceId', 'callerName', 'callerId', 'revoked', 'expiresAt', 'createdAt', 'managerId', 'formsApproved', 'webhooks'],
+  grants: ['id', 'ownerId', 'deviceId', 'callerName', 'callerId', 'revoked', 'expiresAt', 'createdAt', 'managerId', 'formsApproved', 'webhooks', 'serviceId', 'connectionId', 'capabilities', 'deliveryAcknowledged', 'deliveryExpiresAt', 'deliveryKeyId'],
 } as const;
 const row = z.object({ collection: z.enum(collections), id: z.string().min(1).max(128), value: z.record(z.string(), z.unknown()) }).strict();
 export const snapshotSchema = z.object({ version: z.literal(1), project: z.string().min(1), startedAt: z.number().int(),
@@ -66,7 +66,7 @@ export function applyDenials(snapshot: Snapshot, raw: unknown[], now: number) {
     for (const item of rows) {
       if (item.collection === 'accounts' || item.value.ownerId !== intent.ownerId) continue;
       if (item.id === intent.target && item.collection === 'grants') {
-        if (intent.kind === 'grant.revoke') item.value.revoked = true;
+        if (intent.kind === 'grant.revoke' || intent.kind === 'grant.restrict') item.value.revoked = true;
         if (intent.kind === 'forms.deny') item.value.formsApproved = false;
       }
       if (item.id === intent.target && item.collection === 'devices') {
@@ -89,7 +89,7 @@ export function applyDenials(snapshot: Snapshot, raw: unknown[], now: number) {
   for (const item of clean) {
     if (item.collection === 'grants') {
       ensure(item.value.id === item.id && typeof item.value.expiresAt === 'number', 400, 'invalid_grant_metadata');
-      if (item.value.expiresAt <= now || item.value.managerId) item.value.revoked = true;
+      if (item.value.expiresAt <= now || item.value.managerId || item.value.serviceId) item.value.revoked = true;
       item.value.rate = { start: now, count: 0 }; item.value.eventSequence = 0;
     }
     if (item.collection === 'devices') {

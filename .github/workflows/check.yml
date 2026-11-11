@@ -29,6 +29,11 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install ./sdks/python
+      - run: npm run test:cli
       - run: npm run build
       - run: npm run test:unit
       - run: npm run test:cloud-harness
@@ -61,6 +66,10 @@ jobs:
           workspaces: server-rust
       - run: npx tsc --noEmit --target ES2023 --module NodeNext --moduleResolution NodeNext --esModuleInterop --strict --skipLibCheck --allowJs server/test/*.ts scripts/capture-compat.mts
       - run: node --import tsx scripts/capture-compat.mts
+      - run: node scripts/bundle-onboarding-qr.mjs
+      - run: git diff --exit-code -- server/public/onboarding-qr.js
+      - run: npm run contracts:onboarding
+      - run: git diff --exit-code -- contracts
       - run: git diff --exit-code -- server-rust/compat
       - run: npm run test:contract
       - uses: actions/upload-artifact@v4
@@ -218,7 +227,7 @@ jobs:
           emulator-boot-timeout: 300
           disable-animations: true
           working-directory: android
-          script: ./gradlew connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=com.bluegrain.smsrelay.ApprovalScreenTest,com.bluegrain.smsrelay.NavigationScreenTest,com.bluegrain.smsrelay.NotificationNavigationTest,com.bluegrain.smsrelay.ListenerStatusTest --console=plain
+          script: ./gradlew connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=com.bluegrain.smsrelay.ApprovalScreenTest,com.bluegrain.smsrelay.NavigationScreenTest,com.bluegrain.smsrelay.NotificationNavigationTest,com.bluegrain.smsrelay.ListenerStatusTest,com.bluegrain.smsrelay.OnboardingScreenTest --console=plain
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -230,7 +239,7 @@ jobs:
 
   deliver:
     name: Publish tested container
-    needs: [server-unit, server-integration, cloud-probe, container, rust, android-unit, android-integration]
+    needs: [server-unit, server-integration, cloud-probe, container, rust, android-unit, android-integration, onboarding-browser, sdk-transports]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -264,3 +273,54 @@ jobs:
           docker push "$RELAY_IMAGE:$COMMIT_SHA"
           docker push "$RELAY_IMAGE:latest"
           echo "Container: \`$RELAY_IMAGE:$COMMIT_SHA\`" >> "$GITHUB_STEP_SUMMARY"
+
+  onboarding-browser:
+    name: Focused browser onboarding
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:browser
+
+  sdk-transports:
+    name: SDK process transports
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.3'
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          coverage: none
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+      - run: python3 scripts/generate-sdk-transports.py
+      - run: git diff --exit-code -- sdks
+      - run: cd sdks/go && go test ./...
+      - run: cargo test --manifest-path sdks/rust/Cargo.toml --locked
+      - run: ruby sdks/ruby/test.rb
+      - run: php sdks/php/test.php
+      - run: |
+          mvn -q -f sdks/java/pom.xml package dependency:build-classpath -Dmdep.outputFile=/tmp/relay-sdk-classpath
+          java -cp "sdks/java/target/classes:sdks/java/target/test-classes:$(cat /tmp/relay-sdk-classpath)" llc.bluegrain.relay.Smoke "$PWD/scripts/sdk-broker-fixture.py"
+      - run: dotnet run --project sdks/test-dotnet/Smoke.csproj -- "$PWD/scripts/sdk-broker-fixture.py"

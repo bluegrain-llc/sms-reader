@@ -30,7 +30,7 @@ import org.json.JSONObject
 import java.io.IOException
 
 // Sensitive values live only in this ViewModel. No saved state, disk, analytics, or crash logger.
-data class GrantRow(val id: String, val name: String, val revoked: Boolean, val expiresAt: Long, val formsApproved: Boolean = false)
+data class GrantRow(val id: String, val name: String, val revoked: Boolean, val expiresAt: Long, val formsApproved: Boolean = false, val connectionId: String? = null, val capabilities: List<String>? = null)
 data class DeviceRow(val id: String, val name: String, val paused: Boolean, val current: Boolean)
 data class HistoryRow(val caller: String, val status: String, val reason: String?)
 data class RelayUiState(
@@ -134,7 +134,7 @@ class RelayViewModel @JvmOverloads constructor(application: Application, private
             val grants = repo.grants()
             val history = repo.history()
             mutable.update { s -> s.copy(grants = (0 until grants.length()).map { grants.getJSONObject(it).let { g ->
-                GrantRow(g.getString("grantId"), g.getString("callerName"), g.getBoolean("revoked"), g.getLong("expiresAt"), g.optBoolean("formsApproved")) } },
+                GrantRow(g.getString("grantId"), g.getString("callerName"), g.getBoolean("revoked"), g.getLong("expiresAt"), g.optBoolean("formsApproved"), g.nullString("connectionId"), g.optJSONArray("capabilities")?.let { a -> (0 until a.length()).map { a.getString(it) } }) } },
                 history = (0 until history.length()).map { history.getJSONObject(it).let { h -> HistoryRow(h.optString("callerName"), h.getString("status"), h.nullString("reason")) } }) }
         }
         // Discover missed requests for Inbox; only an explicit open starts SMS reception.

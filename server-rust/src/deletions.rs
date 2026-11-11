@@ -10,7 +10,7 @@ use std::{sync::Arc, time::Duration};
 use uuid::Uuid;
 
 const MAX_SAFE_INTEGER: i64 = 9_007_199_254_740_991;
-const OWNED_COLLECTIONS: [&str; 13] = [
+const OWNED_COLLECTIONS: [&str; 29] = [
     "devices",
     "grants",
     "managers",
@@ -24,6 +24,22 @@ const OWNED_COLLECTIONS: [&str; 13] = [
     "formResults",
     "requestEvents",
     "deliveryOutbox",
+    "services",
+    "serviceCredentials",
+    "serviceDeliveryKeys",
+    "registrationSessions",
+    "pairingSessions",
+    "serviceConnections",
+    "connectionBindings",
+    "credentialDeliveries",
+    "oauthSessions",
+    "oauthBindings",
+    "oauthCodes",
+    "oauthFamilies",
+    "oauthAccess",
+    "oauthRefresh",
+    "oauthCleanup",
+    "oauthGrantCleanup",
 ];
 
 fn initial_job(uid: &str, legacy_at: &Value, now: i64) -> Value {
@@ -242,6 +258,7 @@ impl Relay {
                                 )
                                 .await?;
                             for doc in &page {
+                                if collection == "services" {tx.set("serviceCleanup",text(doc,"__id"),json!({"serviceId":doc["__id"],"ownerId":job["ownerId"],"collectionIndex":0}))?;}
                                 tx.delete(collection, text(doc, "__id"))?;
                             }
                             tx.merge(

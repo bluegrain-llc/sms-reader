@@ -83,8 +83,9 @@ fun AdministrationScreen(
                                 Text(grant.name, style = MaterialTheme.typography.titleMedium)
                                 AccessStatus(grant.revoked, grant.expiresAt, state.now)
                                 if (!grant.revoked && grant.expiresAt > state.now) {
-                                    Text(if (grant.formsApproved) "SMS and interactive requests allowed" else "SMS requests only", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                    SwitchRow("Allow interactive requests", grant.formsApproved, !state.busy) { onApproveForms(grant.id, !grant.formsApproved) }
+                                    Text(grant.capabilities?.joinToString(" and ") { if (it == "forms") "Interactive requests" else "SMS requests" } ?: if (grant.formsApproved) "SMS and interactive requests allowed" else "SMS requests only", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    if (grant.connectionId != null) TextButton(onClick = { uriHandler.openUri(BuildConfig.RELAY_URL.trimEnd('/') + "/connections/${grant.connectionId}") }) { Text("Manage permissions") }
+                                    else SwitchRow("Allow interactive requests", grant.formsApproved, !state.busy) { onApproveForms(grant.id, !grant.formsApproved) }
                                 }
                                 if (!grant.revoked && grant.expiresAt > state.now) TextButton(onClick = { onRevoke(grant.id) }, enabled = !state.busy, modifier = Modifier.fillMaxWidth()) { Text("Disconnect") }
                             } } }
@@ -161,6 +162,6 @@ private fun ConnectionPanel(c: ConnectionReview, state: RelayUiState, onDecision
 }
 @Composable
 private fun AccessStatus(revoked: Boolean, expiresAt: Long, now: Long) {
-    Text(if (revoked) "Revoked" else if (expiresAt <= now) "Expired" else "Expires ${DateFormat.getDateInstance().format(Date(expiresAt))}",
+    Text(if (revoked) "Revoked" else if (expiresAt <= now) "Expired" else if (expiresAt == 8_640_000_000_000_000L) "Until disconnected" else "Expires ${DateFormat.getDateInstance().format(Date(expiresAt))}",
         style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
 }

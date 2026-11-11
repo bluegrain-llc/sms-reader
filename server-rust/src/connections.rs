@@ -54,7 +54,7 @@ impl Relay {
         ensure(valid_secret(&token), 401, "invalid_connection_token")?;
         let s = self.clone();
         self.store.tx(move|tx|{let(s,token)=(s.clone(),token.clone());Box::pin(async move{
- let id=hash(&token);let mut c=tx.get("connections",&id).await?;ensure(!c.is_null(),401,"invalid_connection_token")?;let g=if text(&c,"status")=="approved"{tx.get("grants",&id).await?}else{Value::Null};let valid=s.valid_grant(&g);
+ let id=hash(&token);let mut c=tx.get("connections",&id).await?;ensure(!c.is_null(),401,"invalid_connection_token")?;let g=if text(&c,"status")=="approved"{tx.get("grants",&id).await?}else{Value::Null};let valid=s.valid_grant(tx, &g).await?;
  if !text(&c,"ownerId").is_empty(){s.account(tx,text(&c,"ownerId")).await?;}
 if text(&c,"status")=="pending"&&num(&c,"expiresAt")<=s.now(){c["status"]=json!("expired");}ensure(num(&c,"pollAfter")<=s.now(),429,"slow_down")?;c["pollAfter"]=json!(s.now()+5000);tx.set("connections",&id,c.clone())?;
  Ok(json!({"status":if text(&c,"status")=="approved"&&!valid{json!("revoked")}else{c["status"].clone()},"expiresAt":c["expiresAt"],"grantExpiresAt":c["grantExpiresAt"],"interval":5}))})}).await
@@ -69,7 +69,7 @@ if text(&c,"status")=="pending"&&num(&c,"expiresAt")<=s.now(){c["status"]=json!(
         let s = self.clone();
         let output=self.store.tx(move|tx|{let(s,uid,code,decision)=(s.clone(),uid.clone(),code.clone(),decision.clone());Box::pin(async move{
  let a=s.account(tx,&uid).await?;let code_id=hash(&code);let link=tx.get("connectionCodes",&code_id).await?;let mut c=if link.is_null(){Value::Null}else{tx.get("connections",text(&link,"connectionId")).await?};
- let g=if text(&c,"status")=="approved"&&text(&c,"ownerId")==uid{tx.get("grants",text(&c,"id")).await?}else{Value::Null};let revoked=text(&c,"status")=="approved"&&!s.valid_grant(&g);
+ let g=if text(&c,"status")=="approved"&&text(&c,"ownerId")==uid{tx.get("grants",text(&c,"id")).await?}else{Value::Null};let revoked=text(&c,"status")=="approved"&&!s.valid_grant(tx, &g).await?;
  let rate=bump(&rate(&a,"connectionRate",s.now()),s.now(),30)?;tx.merge("accounts",&uid,json!({"connectionRate":rate}))?;
  if c.is_null()||(!text(&c,"ownerId").is_empty()&&text(&c,"ownerId")!=uid){return Ok(Value::Null);}
  if text(&c,"status")=="pending"&&num(&c,"expiresAt")<=s.now(){c["status"]=json!("expired");tx.set("connections",text(&c,"id"),c.clone())?;}

@@ -92,6 +92,8 @@ fn intent(mut action: Value, at: i64) -> Result<Value> {
         "device.pause",
         "device.delete",
         "webhook.delete",
+        "service.invalidate",
+        "grant.restrict",
     ]
     .contains(&text(&action, "kind"))
         && action.get("grantId").is_none_or(|value| {

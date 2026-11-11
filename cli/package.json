@@ -1,0 +1,25 @@
+{
+  "name": "@sms-relay/cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "relay": "relay.mjs",
+    "relay-mcp": "mcp.mjs",
+    "relay-broker": "broker.mjs"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "jose": "^6.1.3",
+    "proper-lockfile": "^4.1.2",
+    "qrcode": "^1.5.4"
+  },
+  "exports": {
+    "./client": "./client.mjs",
+    "./store": "./store.mjs",
+    "./service": "./service.mjs"
+  }
+}

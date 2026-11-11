@@ -44,7 +44,39 @@ impl ServerHandler for Mcp {
         _: Option<PaginatedRequestParams>,
         _: RequestContext<RoleServer>,
     ) -> std::result::Result<ListToolsResult, rmcp::ErrorData> {
-        Ok(ListToolsResult::with_all_items(tools()))
+        let relay = self.relay.clone();
+        let secret = self.secret.clone();
+        let g = self
+            .relay
+            .store
+            .tx(move |tx| {
+                let (r, k) = (relay.clone(), secret.clone());
+                Box::pin(async move { Ok(r.agent(tx, &k).await?.0) })
+            })
+            .await
+            .map_err(|_| rmcp::ErrorData::invalid_request("invalid_token", None))?;
+        Ok(ListToolsResult::with_all_items(
+            tools()
+                .into_iter()
+                .filter(|tool| {
+                    g.get("capabilities").is_none()
+                        || crate::onboarding::capability(
+                            &g,
+                            if [
+                                "request_sms_code",
+                                "get_sms_code_request",
+                                "cancel_sms_code_request",
+                            ]
+                            .contains(&tool.name.as_ref())
+                            {
+                                "sms"
+                            } else {
+                                "forms"
+                            },
+                        )
+                })
+                .collect(),
+        ))
     }
     async fn call_tool(
         &self,
@@ -288,10 +320,20 @@ async fn run_sdk(
         .unwrap();
     let mut value = serde_json::from_slice::<Value>(&bytes).ok()?;
     if list_tools && value["result"]["tools"].is_array() {
+        let allowed = value["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|t| t["name"].as_str().map(str::to_owned))
+            .collect::<Vec<_>>();
         static WIRE_TOOLS: OnceLock<Value> = OnceLock::new();
         value["result"]["tools"] = WIRE_TOOLS
             .get_or_init(|| serde_json::from_str(include_str!("../compat/tools.json")).unwrap())
             .clone();
+        value["result"]["tools"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|t| allowed.iter().any(|name| t["name"] == name.as_str()));
     }
     if value["id"] == "compat-negative-id" {
         value["id"] = original_id;

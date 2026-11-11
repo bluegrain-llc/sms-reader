@@ -6,21 +6,24 @@ import type { RecordSecurity } from './security-ledger.js';
 import { Deletions } from './deletions.js';
 import { Access } from './access.js';
 import { Forms } from './forms.js';
+import { Onboarding } from './onboarding.js';
+import { oauthGrant } from './oauth.js';
 import { Connections } from './connections.js';
 import { Firestore, Transaction } from 'firebase-admin/firestore';
-import { active, Account, bump, CodeRequest, codeSchema, deadline, Device, ensure, Grant, hash, HISTORY, MINUTE, newSecret, PhoneState, RequestInput, requestSchema, Status, view } from './model.js';
+import { active, hasCapability, Account, bump, CodeRequest, codeSchema, deadline, Device, ensure, Grant, hash, HISTORY, MINUTE, newSecret, PhoneState, RequestInput, requestSchema, Status, view } from './model.js';
 
 export type Notify = (token: string, requestId: string, ttl: number, kind?: 'form') => Promise<void>;
 type Context = { request: CodeRequest; account: Account; devices: Device[]; device?: Device; grant: Grant; valid: boolean };
 const phonePending = (): PhoneState => ({ status: 'pending_phone', reason: null, listeningDeadline: null, sent: false, lease: 0, attempts: 0, nextAt: 0 });
 export class Relay {
+  readonly onboarding: Onboarding;
   readonly connections: Connections;
   readonly forms: Forms;
   readonly pages: MaintenancePages;
   readonly deletions: Deletions;
   readonly access: Access;
   constructor(readonly db: Firestore, readonly notify: Notify, readonly now = Date.now, wake?: () => Promise<void>, readonly recordSecurity: RecordSecurity = async () => {}) {
-    this.pages = new MaintenancePages(db); this.connections = new Connections(this); this.forms = new Forms(this, wake);
+    this.onboarding = new Onboarding(this); this.pages = new MaintenancePages(db); this.connections = new Connections(this); this.forms = new Forms(this, wake);
     this.deletions = new Deletions(db, now, wake ?? (async () => {}), recordSecurity); this.access = new Access(db, now);
   }
   ref(collection: string, id: string) { return this.db.collection(collection).doc(id); }
@@ -35,16 +38,25 @@ export class Relay {
   async devices(tx: Transaction, uid: string) {
     return (await tx.get(this.db.collection('devices').where('ownerId', '==', uid))).docs.map(x => x.data() as Device).filter(d => !d.deleted && !d.paused);
   }
-  async validGrant(tx: Transaction, g?: Grant) {
-    if (!g || g.revoked || g.expiresAt <= this.now()) return false;
+  async validGrant(tx: Transaction, g?: Grant, capability?: 'forms' | 'sms') {
+    if (!g || g.revoked || g.expiresAt <= this.now() || (capability && !hasCapability(g, capability))) return false;
+    if (g.serviceId) {
+      const s = (await tx.get(this.ref('services', g.serviceId))).data();
+      if (!s?.active || s.deleted || (await tx.get(this.ref('accounts', s.ownerId))).data()?.deleting) return false;
+      if (!g.deliveryAcknowledged) {
+        const key = (await tx.get(this.ref('serviceDeliveryKeys', `${g.serviceId}_${g.deliveryKeyId}`))).data();
+        if (!key || key.retired || (g.deliveryExpiresAt ?? 0) <= this.now()) return false;
+      }
+    }
     // Retired manager-issued credentials cannot bypass direct owner approval.
     return !g.managerId;
   }
 
-  async agent(tx: Transaction, secret: string) {
-    ensure(/^smsr_[A-Za-z0-9_-]{43}$/.test(secret), 401, 'invalid_token');
-    const g = (await tx.get(this.ref('grants', hash(secret)))).data() as Grant | undefined;
+  async agent(tx: Transaction, secret: string, capability?: 'forms' | 'sms') {
+    ensure(/^(?:smsr|smsa)_[A-Za-z0-9_-]{43}$/.test(secret), 401, 'invalid_token');
+    const g = secret.startsWith('smsa_') ? await oauthGrant(this, tx, secret) : (await tx.get(this.ref('grants', hash(secret)))).data() as Grant | undefined;
     ensure(g && await this.validGrant(tx, g), 401, 'invalid_token');
+    ensure(!capability || hasCapability(g, capability), 403, `${capability}_approval_required`);
     return { grant: g, account: await this.account(tx, g.ownerId) };
   }
   async checkAgent(secret: string) { await this.db.runTransaction(tx => this.agent(tx, secret)); }
@@ -115,6 +127,7 @@ export class Relay {
     const s = await this.db.collection('grants').where('ownerId', '==', uid).get();
     return s.docs.map(s => { const g = s.data() as Grant;
       return { grantId: g.id, callerName: g.callerName, callerId: g.callerId ?? null,
+        ...(g.capabilities ? { connectionId: g.connectionId, serviceId: g.serviceId, capabilities: g.capabilities } : {}),
         formsApproved: !!(g as Grant & { formsApproved?: boolean }).formsApproved, revoked: g.revoked || !!g.managerId, expiresAt: g.expiresAt };
     });
   }
@@ -132,6 +145,7 @@ export class Relay {
       ensure(g && g.ownerId === uid, 404, 'grant_not_found');
       const r = a.activeRequestId ? (await tx.get(this.ref('requests', a.activeRequestId))).data() as CodeRequest | undefined : undefined;
       tx.update(this.ref('grants', id), { revoked: true, formsCancellationPending: true });
+      if(g.serviceId)tx.set(this.ref('oauthGrantCleanup',id),{grantId:id,ownerId:uid,serviceId:g.serviceId});
       if (r && r.grantId === id && active(r.status)) this.finish(tx, r, a, 'cancelled', 'token_revoked');
     });
     await this.advance(uid);
@@ -165,14 +179,14 @@ export class Relay {
           const r = (await tx.get(this.ref('requests', a.activeRequestId))).data() as CodeRequest | undefined;
           if (!r || !active(r.status)) { tx.set(this.ref('accounts', uid), { activeRequestId: null, hasWork: !!queue.length }, { merge: true }); return true; }
           const g = (await tx.get(this.ref('grants', r.grantId))).data() as Grant | undefined;
-          const valid = await this.validGrant(tx, g), devices = await this.devices(tx, uid);
+          const valid = await this.validGrant(tx, g, 'sms'), devices = await this.devices(tx, uid);
           this.expire(tx, r, a, valid, devices); return !active(r.status);
         }
         if (!queue.length) { if (a.hasWork) tx.set(this.ref('accounts', uid), { hasWork: false }, { merge: true }); return false; }
         const id = queue[0]!, rest = queue.slice(1);
         const r = (await tx.get(this.ref('requests', id))).data() as CodeRequest | undefined;
         const g = r ? (await tx.get(this.ref('grants', r.grantId))).data() as Grant | undefined : undefined;
-        const valid = await this.validGrant(tx, g), devices = await this.devices(tx, uid);
+        const valid = await this.validGrant(tx, g, 'sms'), devices = await this.devices(tx, uid);
         if (!r || !active(r.status)) { tx.set(this.ref('accounts', uid), { queueIds: rest, hasWork: !!rest.length }, { merge: true }); return true; }
         this.expire(tx, r, a, valid, devices);
         if (!active(r.status)) { tx.set(this.ref('accounts', uid), { queueIds: rest, hasWork: !!rest.length }, { merge: true }); return true; }
@@ -189,9 +203,9 @@ export class Relay {
   }
   async create(secret: string, raw: RequestInput) {
     const input = requestSchema.parse(raw);
-    const identity = await this.db.runTransaction(tx => this.agent(tx, secret)); await this.advance(identity.grant.ownerId);
+    const identity = await this.db.runTransaction(tx => this.agent(tx, secret, 'sms')); await this.advance(identity.grant.ownerId);
     return this.db.runTransaction(async tx => {
-      const { grant: g, account: a } = await this.agent(tx, secret);
+      const { grant: g, account: a } = await this.agent(tx, secret, 'sms');
       const id = hash(`${g.id}:${input.idempotencyKey}`), fingerprint = hash(JSON.stringify(input.title === undefined ? [input.purpose, input.senderPhone ?? null] : [input.purpose, input.senderPhone ?? null, input.title]));
       const old = (await tx.get(this.ref('requests', id))).data() as CodeRequest | undefined;
       const devices = await this.devices(tx, g.ownerId);
@@ -213,7 +227,7 @@ export class Relay {
   }
   async context(tx: Transaction, id: string, auth: { secret: string } | { uid: string; deviceId: string }): Promise<Context> {
     if ('secret' in auth) {
-      const { grant: g, account: a } = await this.agent(tx, auth.secret);
+      const { grant: g, account: a } = await this.agent(tx, auth.secret, 'sms');
       const r = (await tx.get(this.ref('requests', id))).data() as CodeRequest | undefined;
       ensure(r && r.grantId === g.id && r.ownerId === g.ownerId, 404, 'request_not_found');
       return { request: r, account: a, grant: g, valid: true, devices: await this.devices(tx, g.ownerId) };
@@ -222,7 +236,7 @@ export class Relay {
     const r = (await tx.get(this.ref('requests', id))).data() as CodeRequest | undefined;
     ensure(r && r.ownerId === auth.uid && this.ids(r).includes(d.id), 404, 'request_not_found');
     const g = (await tx.get(this.ref('grants', r.grantId))).data() as Grant | undefined;
-    const valid = await this.validGrant(tx, g); ensure(g && valid, 409, 'grant_unavailable');
+    const valid = await this.validGrant(tx, g, 'sms'); ensure(g && valid, 409, 'grant_unavailable');
     return { request: r, account: a, grant: g, valid, device: d, devices: await this.devices(tx, auth.uid) };
   }
   async get(secret: string, id: string) {
@@ -311,7 +325,7 @@ export class Relay {
         tx.update(this.ref('requests', id), { status: 'cancelled', reason: 'account_deleted', notificationSent: true });
         return [];
       }
-      const valid = await this.validGrant(tx, g), devices = await this.devices(tx, r.ownerId);
+      const valid = await this.validGrant(tx, g, 'sms'), devices = await this.devices(tx, r.ownerId);
       this.expire(tx, r, a ?? {}, valid, devices); if (!active(r.status)) return [];
       r.phones = this.phones(r); const plans: { deviceId: string; token: string; lease: number; attempts: number; ttl: number; createdAt: number }[] = [];
       for (const [deviceId, p] of Object.entries(r.phones)) {
@@ -343,6 +357,7 @@ export class Relay {
     r.nextNotificationAt = unsent.length ? Math.min(...unsent.map(p => Math.max(p.nextAt, p.lease))) : r.expiresAt;
   }
   async maintenance() {
+    await this.onboarding.cleanup();
     await this.pages.run('active-owners', this.db.collection('accounts').where('hasWork', '==', true), null, 250, async id => {
       if (!(await this.ref('accounts', id).get()).data()?.deleting) await this.advance(id);
     });

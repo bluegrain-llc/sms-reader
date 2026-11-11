@@ -71,3 +71,7 @@ await yourSeparateSystem.finishVerification(code);
 SMS User Consent requires an eligible 4–10 character alphanumeric code with at least one digit, excludes senders in Contacts, and cannot recover messages delivered before listening. See Google's [consent API](https://developers.google.com/identity/sms-retriever/user-consent/request) and [eligibility guidance](https://developers.google.com/identity/sms-retriever/choose-an-api).
 
 [Privacy disclosure](docs/PRIVACY.md) explains data handling and deletion. [Security notes](docs/SECURITY.md) describe the trust boundaries and operational assumptions. [Verification record](docs/VERIFICATION.md) distinguishes executed checks from remaining phone and cloud validation.
+
+## QR and service onboarding
+
+The additive v3 implementation supports named services, focused Android/browser registration and approval, reusable service links, temporary pairing, separate service/recipient credentials, explicit forms/SMS capabilities, and encrypted credential delivery. Start with `relay service register` after installing the CLI workspace. See [onboarding and rollout](docs/ONBOARDING.md), [SDKs](sdks/README.md), and [developer integrations](integrations/README.md). Named-resource OAuth supports hosted MCP connections; physical-device/live provider acceptance and SDK registry publication remain outstanding. Every connection uses the configured relay server.

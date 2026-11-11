@@ -25,6 +25,15 @@ where
     out.sort_by_key(|r| std::cmp::Reverse(num(r, "createdAt")));
     Ok(json!(out.into_iter().map(|r|json!({"requestId":r["requestId"],"callerName":r["callerName"],"title":r["title"],"status":r["status"],"expiresAt":r["expiresAt"],"createdAt":r["createdAt"]})).collect::<Vec<_>>()))
 }
+fn requires_sms(def: &Value) -> bool {
+    arr(def, "fields")
+        .iter()
+        .any(|f| text(f, "input") == "sms_code")
+}
+pub(crate) fn allowed(g: &Value, def: &Value) -> bool {
+    crate::onboarding::capability(g, "forms")
+        && (!requires_sms(def) || crate::onboarding::capability(g, "sms"))
+}
 pub struct FormContext {
     pub r: Value,
     pub g: Value,
@@ -36,7 +45,11 @@ pub struct FormContext {
 impl Relay {
     pub async fn form_agent(&self, tx: &Tx, secret: &str) -> Result<(Value, Value)> {
         let (g, a) = self.agent(tx, secret).await?;
-        ensure(flag(&g, "formsApproved"), 403, "forms_approval_required")?;
+        ensure(
+            crate::onboarding::capability(&g, "forms"),
+            403,
+            "forms_approval_required",
+        )?;
         Ok((g, a))
     }
     pub async fn approve_forms(&self, uid: String, id: String, approved: bool) -> Result<()> {
@@ -55,9 +68,14 @@ impl Relay {
                     s.account(tx, &uid).await?;
                     let g = tx.get("grants", &id).await?;
                     ensure(
-                        !g.is_null() && text(&g, "ownerId") == uid && s.valid_grant(&g),
+                        !g.is_null() && text(&g, "ownerId") == uid && s.valid_grant(tx, &g).await?,
                         404,
                         "grant_not_found",
+                    )?;
+                    ensure(
+                        g.get("capabilities").is_none(),
+                        409,
+                        "use_v3_connection_management",
                     )?;
                     tx.merge(
                         "grants",
@@ -104,7 +122,14 @@ impl Relay {
             g = tx.get("grants", text(&r, "grantId")).await?;
         }
         ensure(!g.is_null(), 409, "grant_unavailable")?;
-        let valid = flag(&g, "formsApproved") && self.valid_grant(&g);
+        if matches!(auth, Auth::Agent(_)) {
+            ensure(
+                !requires_sms(&r["definition"]) || crate::onboarding::capability(&g, "sms"),
+                403,
+                "sms_approval_required",
+            )?;
+        }
+        let valid = allowed(&g, &r["definition"]) && self.valid_grant(tx, &g).await?;
         Ok(FormContext { r, g, d, a, valid })
     }
     pub fn form_event(
@@ -200,7 +225,7 @@ impl Relay {
         let definition = definition(raw)?;
         let s = self.clone();
         let result=self.store.tx(move|tx|{let(s,secret,def)=(s.clone(),secret.clone(),definition.clone());Box::pin(async move{
- let(mut g,a)=s.form_agent(tx,&secret).await?;let id=hash(&crate::js_string::utf8(&format!("v2:{}:{}",text(&g,"id"),text(&def,"idempotencyKey"))));let fp=hash(&js_json(&def,true));let mut old=tx.get("formRequests",&id).await?;
+ let(mut g,a)=s.form_agent(tx,&secret).await?;ensure(!requires_sms(&def)||crate::onboarding::capability(&g,"sms"),403,"sms_approval_required")?;let id=hash(&crate::js_string::utf8(&format!("v2:{}:{}",text(&g,"id"),text(&def,"idempotencyKey"))));let fp=hash(&js_json(&def,true));let mut old=tx.get("formRequests",&id).await?;
  if !old.is_null(){ensure(num(&old,"purgeAt")>s.now(),410,"request_retention_ended")?;ensure(text(&old,"fingerprint")==fp,409,"idempotency_conflict")?;s.form_expire(tx,&mut old,&mut g,true).await?;return Ok(form_view(&old));}
  let ds=s.devices(tx,text(&g,"ownerId")).await?.into_iter().filter(|d|def.get("steps").is_none()||d["wizardVersion"]==1).collect::<Vec<_>>();let pending=tx.query(Query::new("formRequests").eq("ownerId",g["ownerId"].clone()).eq("status","pending").limit(101)).await?;
  ensure(!ds.is_empty(),409,if def.get("steps").is_some(){"wizard_devices_unavailable"}else{"devices_unavailable"})?;ensure(pending.len()<100,429,"inbox_full")?;let gr=bump(&rate(&g,"formRate",s.now()),s.now(),30)?;let ar=bump(&rate(&a,"formRate",s.now()),s.now(),100)?;
@@ -459,7 +484,7 @@ if text(r,"status")!="pending"{return Ok(form_view(r));}ensure(!flag(&c.d,"pause
                         let mut g = tx.get("grants", &gid).await?;
                         if text(&r, "status") == "pending"
                             && !g.is_null()
-                            && (!flag(&g, "formsApproved") || !s.valid_grant(&g))
+                            && (!allowed(&g, &r["definition"]) || !s.valid_grant(tx, &g).await?)
                         {
                             s.form_end(tx, &mut r, &mut g, "cancelled", s.now()).await?;
                         }

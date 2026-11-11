@@ -18,6 +18,55 @@ pub fn route_template(path: &str) -> &'static str {
         ["", "connect"] => "/connect",
         ["", "privacy"] => "/privacy",
         ["", "account", "delete"] => "/account/delete",
+        ["", "oauth", "consent", _] => "/oauth/consent/:id",
+        ["", ".well-known", "oauth-authorization-server"] => {
+            "/.well-known/oauth-authorization-server"
+        }
+        [
+            "",
+            ".well-known",
+            "oauth-protected-resource",
+            "mcp",
+            "services",
+            _,
+        ] => "/.well-known/oauth-protected-resource/mcp/services/:id",
+        ["", "oauth", "register"] => "/oauth/register",
+        ["", "oauth", "authorize"] => "/oauth/authorize",
+        ["", "oauth", "token"] => "/oauth/token",
+        ["", "oauth", "revoke"] => "/oauth/revoke",
+        ["", "v3", "oauth", "sessions", _] => "/v3/oauth/sessions/:id",
+        ["", "v3", "oauth", "sessions", _, "decision"] => "/v3/oauth/sessions/:id/decision",
+        ["", "v3", "oauth", "sessions", _, "response"] => "/v3/oauth/sessions/:id/response",
+        ["", "mcp", "services", _] => "/mcp/services/:serviceId",
+        ["", "owned-services"] => "/owned-services",
+        ["", "owned-services.js"] => "/owned-services.js",
+        ["", "onboarding-qr.js"] => "/onboarding-qr.js",
+        ["", "onboarding.js"] => "/onboarding.js",
+        ["", "register", _] => "/register/:id",
+        ["", "pair", _] => "/pair/:id",
+        ["", "services", _] => "/services/:id",
+        ["", "connections", _] => "/connections/:id",
+        ["", "v3", "registration-sessions"] => "/v3/registration-sessions",
+        ["", "v3", "registration-sessions", "current"] => "/v3/registration-sessions/current",
+        ["", "v3", "registration-sessions", _] => "/v3/registration-sessions/:id",
+        ["", "v3", "registration-sessions", _, "decision"] => {
+            "/v3/registration-sessions/:id/decision"
+        }
+        ["", "v3", "services"] => "/v3/services",
+        ["", "v3", "services", _] => "/v3/services/:id",
+        ["", "v3", "services", _, "connections"] => "/v3/services/:id/connections",
+        ["", "v3", "service"] => "/v3/service",
+        ["", "v3", "service", "pairing-sessions"] => "/v3/service/pairing-sessions",
+        ["", "v3", "service", "pairing-sessions", _] => "/v3/service/pairing-sessions/:id",
+        ["", "v3", "pairing-sessions", _] => "/v3/pairing-sessions/:id",
+        ["", "v3", "pairing-sessions", _, "decision"] => "/v3/pairing-sessions/:id/decision",
+        ["", "v3", "service", "deliveries"] => "/v3/service/deliveries",
+        ["", "v3", "service", "deliveries", _, "acknowledgement"] => {
+            "/v3/service/deliveries/:id/acknowledgement"
+        }
+        ["", "v3", "service", "connections", _] => "/v3/service/connections/:id",
+        ["", "v3", "connection"] => "/v3/connection",
+        ["", "v3", "connections", _] => "/v3/connections/:id",
         ["", "mcp"] => "/mcp",
         ["", "v1", "account"] => "/v1/account",
         ["", "v1", "account-deletion"] => "/v1/account-deletion",
@@ -111,6 +160,30 @@ pub fn entry(event: Value) -> Option<Value> {
                 record["category"] = json!(safe_category(text(&event, "category")));
             }
             record
+        }
+        "onboarding_outcome" => {
+            let phase = text(&event, "phase");
+            let outcome = text(&event, "outcome");
+            if !["registration", "approval", "delivery", "setup"].contains(&phase)
+                || ![
+                    "pending",
+                    "approved",
+                    "denied",
+                    "expired",
+                    "available",
+                    "acknowledged",
+                    "phone_setup_needed",
+                    "waiting_for_service",
+                    "setup_complete",
+                    "disconnected",
+                    "failed",
+                    "decided",
+                ]
+                .contains(&outcome)
+            {
+                return None;
+            }
+            json!({"event":name,"phase":phase,"outcome":outcome,"count":nonnegative(&event["count"]).min(100.0)})
         }
         "maintenance_completed" => {
             json!({"event":name,"duration_ms":nonnegative(&event["duration_ms"])})
@@ -279,6 +352,82 @@ impl Relay {
             .await;
         Ok(())
     }
+}
+
+pub fn onboarding_outcome(path: &str, method: &str, status: u16, value: &Value) -> Option<Value> {
+    let route = route_template(path);
+    let phase = if route.starts_with("/v3/registration-sessions") {
+        "registration"
+    } else if route.starts_with("/v3/pairing-sessions")
+        || route.starts_with("/v3/service/pairing-sessions")
+        || route.starts_with("/v3/oauth/sessions")
+        || route == "/v3/services/:id/connections"
+    {
+        "approval"
+    } else if route.starts_with("/v3/service/deliveries") {
+        "delivery"
+    } else if method == "GET"
+        && [
+            "/v3/connection",
+            "/v3/connections/:id",
+            "/v3/service/connections/:id",
+        ]
+        .contains(&route)
+    {
+        "setup"
+    } else {
+        return None;
+    };
+    let outcome = if status >= 400 {
+        if ["session_expired", "delivery_expired"].contains(&text(value, "error")) {
+            "expired"
+        } else {
+            "failed"
+        }
+    } else if phase == "delivery" {
+        if route.ends_with("/acknowledgement") {
+            "acknowledged"
+        } else {
+            "available"
+        }
+    } else if phase == "setup" {
+        text(value, "setup")
+    } else if !text(value, "status").is_empty() {
+        text(value, "status")
+    } else if value.get("redirect").is_some() {
+        "decided"
+    } else {
+        "pending"
+    };
+    let outcome = if [
+        "pending",
+        "approved",
+        "denied",
+        "expired",
+        "available",
+        "acknowledged",
+        "phone_setup_needed",
+        "waiting_for_service",
+        "setup_complete",
+        "disconnected",
+        "failed",
+        "decided",
+    ]
+    .contains(&outcome)
+    {
+        outcome
+    } else {
+        "failed"
+    };
+    let count = if phase == "delivery" && outcome == "available" {
+        value["deliveries"]
+            .as_array()
+            .map_or(0, |a| a.len())
+            .min(100)
+    } else {
+        1
+    };
+    Some(json!({"event":"onboarding_outcome","phase":phase,"outcome":outcome,"count":count}))
 }
 
 #[cfg(test)]

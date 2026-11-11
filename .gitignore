@@ -20,3 +20,9 @@ artifacts/
 .kotlin/
 
 server-rust/target/
+
+**/target/
+**/bin/
+**/obj/
+test-results/
+playwright-report/

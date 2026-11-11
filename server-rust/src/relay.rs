@@ -110,16 +110,53 @@ impl Relay {
             .filter(|d| !flag(d, "deleted") && !flag(d, "paused"))
             .collect())
     }
-    pub fn valid_grant(&self, g: &Value) -> bool {
+    pub fn valid_grant_local(&self, g: &Value) -> bool {
         !g.is_null()
             && !flag(g, "revoked")
             && num(g, "expiresAt") > self.now()
             && text(g, "managerId").is_empty()
     }
+    pub async fn valid_grant(&self, tx: &Tx, g: &Value) -> Result<bool> {
+        if !self.valid_grant_local(g) {
+            return Ok(false);
+        }
+        if !text(g, "serviceId").is_empty() {
+            let s = tx.get("services", text(g, "serviceId")).await?;
+            if !flag(&s, "active")
+                || flag(&s, "deleted")
+                || flag(&tx.get("accounts", text(&s, "ownerId")).await?, "deleting")
+            {
+                return Ok(false);
+            }
+            if !flag(g, "deliveryAcknowledged") {
+                let key = tx
+                    .get(
+                        "serviceDeliveryKeys",
+                        &format!("{}_{}", text(g, "serviceId"), text(g, "deliveryKeyId")),
+                    )
+                    .await?;
+                if key.is_null()
+                    || flag(&key, "retired")
+                    || num(g, "deliveryExpiresAt") <= self.now()
+                {
+                    return Ok(false);
+                }
+            }
+        }
+        Ok(true)
+    }
     pub async fn agent(&self, tx: &Tx, secret: &str) -> Result<(Value, Value)> {
-        ensure(valid_secret(secret), 401, "invalid_token")?;
-        let g = tx.get("grants", &hash(secret)).await?;
-        ensure(self.valid_grant(&g), 401, "invalid_token")?;
+        ensure(
+            valid_secret(secret) || secret.starts_with("smsa_"),
+            401,
+            "invalid_token",
+        )?;
+        let g = if secret.starts_with("smsa_") {
+            self.oauth_grant(tx, secret).await?
+        } else {
+            tx.get("grants", &hash(secret)).await?
+        };
+        ensure(self.valid_grant(tx, &g).await?, 401, "invalid_token")?;
         let a = self.account(tx, text(&g, "ownerId")).await?;
         Ok((g, a))
     }
@@ -274,7 +311,7 @@ impl Relay {
                 })
                 .await?;
         }
-        Ok(json!(self.store.query(Query::new("grants").eq("ownerId",uid)).await?.iter().map(|g|json!({"grantId":g["id"],"callerName":g["callerName"],"callerId":g["callerId"],"formsApproved":flag(g,"formsApproved"),"revoked":flag(g,"revoked")||!text(g,"managerId").is_empty(),"expiresAt":g["expiresAt"]})).collect::<Vec<_>>()))
+        Ok(json!(self.store.query(Query::new("grants").eq("ownerId",uid)).await?.iter().map(|g|{let mut v=json!({"grantId":g["id"],"callerName":g["callerName"],"callerId":g["callerId"],"formsApproved":flag(g,"formsApproved"),"revoked":flag(g,"revoked")||!text(g,"managerId").is_empty(),"expiresAt":g["expiresAt"]});if g.get("capabilities").is_some(){v["connectionId"]=g["connectionId"].clone();v["serviceId"]=g["serviceId"].clone();v["capabilities"]=g["capabilities"].clone();}v}).collect::<Vec<_>>()))
     }
     pub(crate) async fn validate_owner_grant(&self, uid: String, id: String) -> Result<()> {
         let relay = self.clone();
@@ -322,6 +359,13 @@ impl Relay {
                         &id,
                         json!({"revoked":true,"formsCancellationPending":true}),
                     )?;
+                    if !text(&g, "serviceId").is_empty() {
+                        tx.set(
+                            "oauthGrantCleanup",
+                            &id,
+                            json!({"grantId":id,"ownerId":uid,"serviceId":g["serviceId"]}),
+                        )?;
+                    }
                     if text(&r, "grantId") == id && active(text(&r, "status")) {
                         s.finish(tx, &mut r, &a, "cancelled", json!("token_revoked"))?;
                     }
@@ -469,7 +513,14 @@ impl Relay {
                             }
                             let g = tx.get("grants", text(&r, "grantId")).await?;
                             let ds = s.devices(tx, &uid).await?;
-                            s.expire(tx, &mut r, &a, s.valid_grant(&g), &ds)?;
+                            s.expire(
+                                tx,
+                                &mut r,
+                                &a,
+                                s.valid_grant(tx, &g).await?
+                                    && crate::onboarding::capability(&g, "sms"),
+                                &ds,
+                            )?;
                             return Ok(!active(text(&r, "status")));
                         }
                         if queue.is_empty() {
@@ -488,7 +539,14 @@ impl Relay {
                         };
                         let ds = s.devices(tx, &uid).await?;
                         if active(text(&r, "status")) {
-                            s.expire(tx, &mut r, &a, s.valid_grant(&g), &ds)?;
+                            s.expire(
+                                tx,
+                                &mut r,
+                                &a,
+                                s.valid_grant(tx, &g).await?
+                                    && crate::onboarding::capability(&g, "sms"),
+                                &ds,
+                            )?;
                         }
                         if !active(text(&r, "status")) {
                             tx.merge(
@@ -543,7 +601,7 @@ impl Relay {
         self.advance(&uid).await?;
         let s = self.clone();
         self.store.tx(move|tx|{let(s,secret,input)=(s.clone(),secret.clone(),input.clone());Box::pin(async move{
- let(g,a)=s.agent(tx,&secret).await?;let id=hash(&crate::js_string::utf8(&format!("{}:{}",text(&g,"id"),text(&input,"idempotencyKey"))));let fp=sms_fingerprint(&input);let mut old=tx.get("requests",&id).await?;let ds=s.devices(tx,text(&g,"ownerId")).await?;
+ let(g,a)=s.agent(tx,&secret).await?;ensure(crate::onboarding::capability(&g,"sms"),403,"sms_approval_required")?;let id=hash(&crate::js_string::utf8(&format!("{}:{}",text(&g,"id"),text(&input,"idempotencyKey"))));let fp=sms_fingerprint(&input);let mut old=tx.get("requests",&id).await?;let ds=s.devices(tx,text(&g,"ownerId")).await?;
  if !old.is_null(){ensure(text(&old,"fingerprint")==fp,409,"idempotency_conflict")?;s.expire(tx,&mut old,&a,true,&ds)?;return Ok(view(&old));}
  ensure(!ds.is_empty(),409,"devices_unavailable")?;let mut queue=arr(&a,"queueIds");ensure(queue.len()<20,429,"queue_full")?;
  let owner_rate=bump(&rate(&a,"rate",s.now()),s.now(),5)?;let grant_rate=bump(&g["rate"],s.now(),3)?;
@@ -557,6 +615,11 @@ impl Relay {
         match auth {
             Auth::Agent(secret) => {
                 let (g, a) = self.agent(tx, secret).await?;
+                ensure(
+                    crate::onboarding::capability(&g, "sms"),
+                    403,
+                    "sms_approval_required",
+                )?;
                 let r = tx.get("requests", id).await?;
                 ensure(
                     !r.is_null() && r["grantId"] == g["id"] && r["ownerId"] == g["ownerId"],
@@ -583,7 +646,8 @@ impl Relay {
                     "request_not_found",
                 )?;
                 let g = tx.get("grants", text(&r, "grantId")).await?;
-                let valid = self.valid_grant(&g);
+                let valid =
+                    self.valid_grant(tx, &g).await? && crate::onboarding::capability(&g, "sms");
                 ensure(valid, 409, "grant_unavailable")?;
                 let ds = self.devices(tx, uid).await?;
                 Ok(Context {

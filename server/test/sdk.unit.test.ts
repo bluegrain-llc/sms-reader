@@ -1,0 +1,43 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { CompactEncrypt, importJWK } from 'jose';
+import QRCode from 'qrcode';
+import { createRequire } from 'node:module';
+const jsQR = createRequire(import.meta.url)('jsqr') as (data: Uint8ClampedArray, width: number, height: number) => { data: string } | null;
+import { providerTools } from '../../integrations/providers.mjs';
+import { deliveryKey, credential } from '../../cli/client.mjs';
+import { ServiceSession } from '../../sdks/javascript/index.mjs';
+test('locally generated QR decodes to the public HTTPS link', async () => {
+  const link = 'https://relay.example/services/ed2e17c3-a365-4855-a7b8-e13b15a69412';
+  const qr = QRCode.create(link,{errorCorrectionLevel:'M'}), scale=8, width=(qr.modules.size+8)*scale;
+  const data = new Uint8ClampedArray(width*width*4).fill(255);
+  for(let y=0;y<qr.modules.size;y++)for(let x=0;x<qr.modules.size;x++)if(qr.modules.get(y,x))for(let dy=0;dy<scale;dy++)for(let dx=0;dx<scale;dx++){
+    const i=(((y+4)*scale+dy)*width+(x+4)*scale+dx)*4;data[i]=data[i+1]=data[i+2]=0;
+  }
+  assert.equal(jsQR(data,width,width)?.data,link);
+});
+test('JavaScript SDK saves pending credentials before starting registration', async () => {
+  let saved: any;
+  const storage={load:async()=>saved,save:async(state: any)=>{saved=structuredClone(state);}};
+  const service=await ServiceSession.create({baseUrl:'https://relay.example',name:'Agent',purpose:'Decisions'},storage,{fetch:async(_url:any,request:any)=>{
+    assert.ok(saved.serviceToken);assert.ok(saved.keys[0].privateKey.d);
+    assert.ok(!request.body.includes(saved.serviceToken));assert.ok(!request.body.includes(saved.keys[0].privateKey.d));
+    return Response.json({status:'pending',registrationPath:'/register/public-id'});
+  }});
+  const started=await service.startRegistration();assert.equal(started.link,'https://relay.example/register/public-id');assert.ok(!JSON.stringify(started).includes(saved.serviceToken));
+});
+test('Python SDK decrypts JOSE delivery fixtures and rejects changed identifiers', async () => {
+  const key=await deliveryKey(),payload={version:1,serviceId:'service',connectionId:'connection',deliveryId:'delivery',token:credential('smsr'),externalAccountRef:null};
+  const envelope=await new CompactEncrypt(Buffer.from(JSON.stringify(payload))).setProtectedHeader({alg:'ECDH-ES',enc:'A256GCM',kid:key.id,serviceId:payload.serviceId,connectionId:payload.connectionId,deliveryId:payload.deliveryId}).encrypt(await importJWK(key.publicKey,'ECDH-ES'));
+  const program=`import json,sys\nfrom request_relay import decrypt_delivery\nv=json.load(sys.stdin)\np=decrypt_delivery(v['delivery'],'service',v['key'])\nassert p['token']==v['token']\nv['delivery']['connectionId']='wrong'\ntry:\n decrypt_delivery(v['delivery'],'service',v['key'])\n raise AssertionError('changed identifier accepted')\nexcept ValueError:\n pass\n`;
+  const result=spawnSync('python3',['-c',program],{env:{...process.env,PYTHONPATH:new URL('../../sdks/python',import.meta.url).pathname},input:JSON.stringify({delivery:{envelope,keyId:key.id,connectionId:'connection',deliveryId:'delivery'},key,token:payload.token}),encoding:'utf8'});
+  assert.equal(result.status,0,result.stderr);assert.equal(result.stdout,'');
+});
+test('provider declarations expose only caller tools and never lifecycle authority', async () => {
+  const calls: unknown[]=[];
+  const t=providerTools([{name:'request_form',description:'Ask',inputSchema:{type:'object',properties:{title:{type:'string'}}}}],async(name: string,args: unknown)=>{calls.push([name,args]);return {status:'pending'};});
+  assert.ok(!JSON.stringify([t.openai,t.anthropic,t.google]).includes('token'));
+  await assert.rejects(t.execute('register_service',{}));assert.equal(calls.length,0);
+  assert.deepEqual(await t.execute('request_form',{title:'Review'}),{status:'pending'});assert.equal(calls.length,1);
+});

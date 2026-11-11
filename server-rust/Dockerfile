@@ -3,6 +3,7 @@ WORKDIR /app/server-rust
 COPY server-rust/Cargo.toml server-rust/Cargo.lock server-rust/rust-toolchain.toml ./
 COPY server-rust/src ./src
 COPY server-rust/compat ./compat
+COPY server/public /app/server/public
 RUN cargo build --release --locked --bin sms-code-relay
 
 FROM debian:bookworm-slim

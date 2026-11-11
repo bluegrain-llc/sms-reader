@@ -495,7 +495,9 @@ async fn run_feed(relay: Relay, grant: Value, feed: Arc<Feed>, cancel: watch::Re
                     .limit(100),
             )
             .await?;
-        monitor_feed(
+        let scoped = !text(&grant, "serviceId").is_empty();
+        let guard = service_guard(relay.clone(), grant.clone());
+        let monitor = monitor_feed(
             relay,
             grant,
             feed.clone(),
@@ -503,10 +505,77 @@ async fn run_feed(relay: Relay, grant: Value, feed: Arc<Feed>, cancel: watch::Re
             authorization,
             events,
             tokio::time::Instant::now() + Duration::from_secs(10),
-        )
-        .await
+        );
+        if scoped {
+            tokio::try_join!(monitor, guard).map(|_| ())
+        } else {
+            monitor.await
+        }
     };
     supervise_feed(feed.clone(), cancel, task).await;
+}
+async fn service_guard(relay: Relay, grant: Value) -> Result<()> {
+    let service = relay
+        .store
+        .get("services", text(&grant, "serviceId"))
+        .await?;
+    ensure(!service.is_null(), 503, "event_watch_unavailable")?;
+    let mut watches = vec![
+        relay
+            .store
+            .watch_document("services", text(&grant, "serviceId"))
+            .await?,
+        relay
+            .store
+            .watch_document("accounts", text(&service, "ownerId"))
+            .await?,
+    ];
+    if !flag(&grant, "deliveryAcknowledged") {
+        watches.push(
+            relay
+                .store
+                .watch_document(
+                    "serviceDeliveryKeys",
+                    &format!(
+                        "{}_{}",
+                        text(&grant, "serviceId"),
+                        text(&grant, "deliveryKeyId")
+                    ),
+                )
+                .await?,
+        );
+    }
+    loop {
+        for watch in &mut watches {
+            ensure(
+                !watch.updates.borrow_and_update().failed,
+                503,
+                "event_watch_unavailable",
+            )?;
+        }
+        let r = relay.clone();
+        let g = grant.clone();
+        relay
+            .store
+            .tx(move |tx| {
+                let (r, g) = (r.clone(), g.clone());
+                Box::pin(async move {
+                    let current = tx.get("grants", text(&g, "id")).await?;
+                    ensure(
+                        r.valid_grant(tx, &current).await?,
+                        503,
+                        "event_watch_unavailable",
+                    )
+                })
+            })
+            .await?;
+        let changes = watches
+            .iter_mut()
+            .map(|watch| Box::pin(watch.updates.changed()))
+            .collect::<Vec<_>>();
+        let (changed, _, _) = futures::future::select_all(changes).await;
+        changed.map_err(|_| Error::External)?;
+    }
 }
 async fn supervise_feed<F: std::future::Future<Output = Result<()>>>(
     feed: Arc<Feed>,
@@ -561,7 +630,7 @@ async fn monitor_feed(
                 .ok_or(Error::Api(503, "event_watch_unavailable"))?;
             ensure(
                 current["ownerId"] == grant["ownerId"]
-                    && relay.valid_grant(current)
+                    && relay.valid_grant_local(current)
                     && flag(current, "formsApproved"),
                 503,
                 "event_watch_unavailable",

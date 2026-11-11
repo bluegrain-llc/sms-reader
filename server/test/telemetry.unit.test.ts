@@ -66,3 +66,14 @@ test('successful maintenance retains completion even if read-only backlog sampli
   assert.equal(completed, true);
   assert.deepEqual(records.map(r => r.event), ['backlog_sampling_failed', 'maintenance_completed']);
 });
+
+test('onboarding outcome counts exclude payloads, private identities and credentials', async () => {
+  const { onboardingOutcome } = await import('../src/telemetry.js');
+  const privateValue = { status: 'approved', ownerId: 'private-owner', redirect: 'https://example.test?code=private-code' };
+  assert.deepEqual(onboardingOutcome('/v3/oauth/sessions/:id/decision','POST',200,privateValue),{event:'onboarding_outcome',phase:'approval',outcome:'approved',count:1});
+  assert.deepEqual(onboardingOutcome('/v3/connection','GET',200,{setup:'phone_setup_needed',email:'private-email'}),{event:'onboarding_outcome',phase:'setup',outcome:'phone_setup_needed',count:1});
+  assert.deepEqual(onboardingOutcome('/v3/pairing-sessions/:id','GET',410,{error:'session_expired'}),{event:'onboarding_outcome',phase:'approval',outcome:'expired',count:1});
+  const value=onboardingOutcome('/v3/service/deliveries','GET',200,{deliveries:[{envelope:'private-envelope'}]});
+  assert.equal(value?.count,1);assert.ok(!JSON.stringify(value).includes('private'));
+  assert.equal(onboardingOutcome('/mcp','POST',200,privateValue),undefined);
+});
