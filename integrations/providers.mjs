@@ -3,6 +3,16 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { PrivateStore } from '@sms-relay/cli/store';
 import { RelayClient } from '@sms-relay/cli/client';
+/** Private API configuration for application software; never register as a model tool or print it. */
+export function hostedProviderConfig(provider, {resource, accessToken}) {
+  let url;
+  try { url = new URL(resource); } catch { throw Error('invalid_mcp_resource'); }
+  if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash || !/^\/mcp\/services\/[A-Za-z0-9_-]{1,128}$/.test(url.pathname)) throw Error('invalid_mcp_resource');
+  if (typeof accessToken !== 'string' || !/^smsa_[A-Za-z0-9_-]{43}$/.test(accessToken)) throw Error('oauth_access_token_required');
+  if (provider === 'openai') return {type:'mcp',server_label:'relay',server_url:url.href,authorization:accessToken};
+  if (provider === 'anthropic') return {mcp_servers:[{type:'url',url:url.href,name:'relay',authorization_token:accessToken}],tools:[{type:'mcp_toolset',mcp_server_name:'relay'}],betas:['mcp-client-2025-11-20']};
+  throw Error('hosted_provider_not_supported');
+}
 export function providerTools(tools, call) {
   const allowed = new Set(tools.map(t => t.name));
   const execute = async (name, args) => {

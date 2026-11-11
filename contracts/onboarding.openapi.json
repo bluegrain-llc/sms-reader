@@ -4245,7 +4245,7 @@
         },
         "responses": {
           "200": {
-            "description": "MCP response containing only connection-authorized tools/results"
+            "description": "MCP response with authorized tools/results or an OAuth linking challenge"
           },
           "401": {
             "description": "WWW-Authenticate identifies protected-resource metadata"

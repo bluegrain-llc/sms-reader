@@ -182,24 +182,25 @@ export function app(relay: Relay, options: HttpOptions) {
       if (!(error instanceof RelayError)) telemetry.emit({ event: 'mcp_tool_failed', category: category(error) });
       return { isError: true, content: [{ type: 'text' as const, text: JSON.stringify({ error: error instanceof RelayError ? error.reason : 'internal_error' }) }] };
     });
+    const toolMeta = (cap: 'forms' | 'sms') => ({ 'com.bluegrain.smsrelay/capability': cap, ...(req.params.serviceId ? {securitySchemes:[{type:'oauth2',scopes:[cap]}]} : {}) });
     if (!grant.capabilities || hasCapability(grant, 'sms')) {
-    server.registerTool('request_sms_code', { _meta: { 'com.bluegrain.smsrelay/capability': 'sms' },
+    server.registerTool('request_sms_code', { _meta: toolMeta('sms'),
       description: 'Notify the owner’s registered phones about an upcoming SMS, queuing behind another caller if needed. Wait for ready before triggering SMS in a separate system. First approved response wins. Never triggers SMS.',
       inputSchema: requestSchema.shape,
     }, input => tool(() => relay.create(secret, input)));
-    server.registerTool(readToolName('get_sms_code_request'), { _meta: { 'com.bluegrain.smsrelay/capability': 'sms' },
+    server.registerTool(readToolName('get_sms_code_request'), { _meta: toolMeta('sms'),
       description: 'Poll status. Code is available only after owner approval, for two minutes.', inputSchema: { requestId: idSchema },
     }, input => tool(() => relay.get(secret, input.requestId)));
-    server.registerTool('cancel_sms_code_request', { _meta: { 'com.bluegrain.smsrelay/capability': 'sms' },
+    server.registerTool('cancel_sms_code_request', { _meta: toolMeta('sms'),
       description: 'Cancel this token’s request.', inputSchema: { requestId: idSchema },
     }, input => tool(() => relay.transition({ secret }, input.requestId, 'cancelled')));
     }
     if (!grant.capabilities || hasCapability(grant, 'forms')) {
-    server.registerTool('create_request', { _meta: { 'com.bluegrain.smsrelay/capability': 'forms' }, description: 'Create a form or multi-step wizard with optional conditional steps and one final submission. Requires owner approval for forms in Admin.', inputSchema: formSchema.shape }, input => tool(() => relay.forms.create(secret, input)));
-    server.registerTool(readToolName('inspect_request'), { _meta: { 'com.bluegrain.smsrelay/capability': 'forms' }, description: 'Inspect your request without marking it opened.', inputSchema: { requestId: idSchema } }, input => tool(() => relay.forms.get({ secret }, input.requestId)));
-    server.registerTool('cancel_request', { _meta: { 'com.bluegrain.smsrelay/capability': 'forms' }, description: 'Cancel your pending request.', inputSchema: { requestId: idSchema } }, input => tool(() => relay.forms.cancel(secret, input.requestId)));
-    server.registerTool(readToolName('get_request_result'), { _meta: { 'com.bluegrain.smsrelay/capability': 'forms' }, description: 'Retrieve accepted answers, retained for 24 hours.', inputSchema: { requestId: idSchema } }, input => tool(() => relay.forms.result(secret, input.requestId)));
-    server.registerTool(readToolName('poll_request_events'), { _meta: { 'com.bluegrain.smsrelay/capability': 'forms' }, description: 'Poll durable events for your connection. Answers are retrieved separately.', inputSchema: { cursor: z.string().max(128).optional() } }, input => tool(() => relay.forms.events(secret, input.cursor)));
+    server.registerTool('create_request', { _meta: toolMeta('forms'), description: 'Create a form or multi-step wizard with optional conditional steps and one final submission. Requires owner approval for forms in Admin.', inputSchema: formSchema.shape }, input => tool(() => relay.forms.create(secret, input)));
+    server.registerTool(readToolName('inspect_request'), { _meta: toolMeta('forms'), description: 'Inspect your request without marking it opened.', inputSchema: { requestId: idSchema } }, input => tool(() => relay.forms.get({ secret }, input.requestId)));
+    server.registerTool('cancel_request', { _meta: toolMeta('forms'), description: 'Cancel your pending request.', inputSchema: { requestId: idSchema } }, input => tool(() => relay.forms.cancel(secret, input.requestId)));
+    server.registerTool(readToolName('get_request_result'), { _meta: toolMeta('forms'), description: 'Retrieve accepted answers, retained for 24 hours.', inputSchema: { requestId: idSchema } }, input => tool(() => relay.forms.result(secret, input.requestId)));
+    server.registerTool(readToolName('poll_request_events'), { _meta: toolMeta('forms'), description: 'Poll durable events for your connection. Answers are retrieved separately.', inputSchema: { cursor: z.string().max(128).optional() } }, input => tool(() => relay.forms.events(secret, input.cursor)));
     }
     for (const message of Array.isArray(req.body) ? req.body : [req.body]) {
       if (message?.method === 'tools/call' && readTools.has(message?.params?.name)) await agentRead(req);

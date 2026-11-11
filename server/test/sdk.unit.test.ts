@@ -5,7 +5,7 @@ import { CompactEncrypt, importJWK } from 'jose';
 import QRCode from 'qrcode';
 import { createRequire } from 'node:module';
 const jsQR = createRequire(import.meta.url)('jsqr') as (data: Uint8ClampedArray, width: number, height: number) => { data: string } | null;
-import { providerTools, capabilityTools } from '../../integrations/providers.mjs';
+import { providerTools, capabilityTools, hostedProviderConfig } from '../../integrations/providers.mjs';
 import { deliveryKey, credential } from '../../cli/client.mjs';
 import { ServiceSession } from '../../sdks/javascript/index.mjs';
 test('locally generated QR decodes to the public HTTPS link', async () => {
@@ -26,6 +26,17 @@ test('JavaScript SDK saves pending credentials before starting registration', as
     return Response.json({status:'pending',registrationPath:'/register/public-id'});
   }});
   const started=await service.startRegistration();assert.equal(started.link,'https://relay.example/register/public-id');assert.ok(!JSON.stringify(started).includes(saved.serviceToken));
+  assert.deepEqual(Object.keys(service.state.connections),[]);
+});
+test('registered JavaScript and Python sessions do not depend on purged registration records', async () => {
+  const state={baseUrl:'https://relay.example',registered:true,serviceId:'service',servicePath:'/services/service',serviceToken:credential('smss'),keys:[],connections:{}};
+  const storage={load:async()=>state,save:async()=>{}};
+  const service=await ServiceSession.resume(storage,{fetch:async(url: string|URL|Request)=>{
+    assert.equal(String(url),'https://relay.example/v3/service/deliveries');return Response.json({deliveries:[],hasMore:false});
+  }});
+  assert.deepEqual(await service.waitForRegistration(),{serviceId:'service',link:'https://relay.example/services/service'});
+  const program=`from request_relay import ServiceSession\nclass Store:\n def load(self):return {'baseUrl':'https://relay.example','registered':True,'serviceId':'service','servicePath':'/services/service','serviceToken':'software-only','keys':[],'connections':{}}\n def save(self,state):pass\ns=ServiceSession.resume(Store())\ndef request(path,token,*args):\n assert path=='/v3/service/deliveries'\n return {'deliveries':[],'hasMore':False}\ns.client.request=request\nassert s.wait_for_registration()=={'serviceId':'service','link':'https://relay.example/services/service'}\n`;
+  const result=spawnSync('python3',['-c',program],{env:{...process.env,PYTHONPATH:new URL('../../sdks/python',import.meta.url).pathname},timeout:10000,encoding:'utf8'});assert.equal(result.status,0,result.stderr);
 });
 test('Python SDK decrypts JOSE delivery fixtures and rejects changed identifiers', async () => {
   const key=await deliveryKey(),payload={version:1,serviceId:'service',connectionId:'connection',deliveryId:'delivery',token:credential('smsr'),externalAccountRef:null};
@@ -40,6 +51,14 @@ test('provider declarations expose only caller tools and never lifecycle authori
   assert.ok(!JSON.stringify([t.openai,t.anthropic,t.google]).includes('token'));
   await assert.rejects(t.execute('register_service',{}));assert.equal(calls.length,0);
   assert.deepEqual(await t.execute('request_form',{title:'Review'}),{status:'pending'});assert.equal(calls.length,1);
+});
+test('hosted API configuration requires a named resource and OAuth access authority', () => {
+  const resource='https://relay.example/mcp/services/public-service',accessToken=credential('smsa');
+  for(const prefix of ['smsr','smss','smsreg'])assert.throws(()=>hostedProviderConfig('openai',{resource,accessToken:credential(prefix)}),/oauth_access_token_required/);
+  for(const invalid of ['https://relay.example/mcp',resource+'?token=private',resource+'#private','https://user:private@relay.example/mcp/services/public-service'])assert.throws(()=>hostedProviderConfig('openai',{resource:invalid,accessToken}),/invalid_mcp_resource/);
+  const config=hostedProviderConfig('anthropic',{resource,accessToken});assert.ok(config.mcp_servers);
+  assert.equal(config.mcp_servers[0]!.authorization_token,accessToken);assert.ok(!JSON.stringify(config.tools).includes(accessToken));
+  assert.throws(()=>hostedProviderConfig('google',{resource,accessToken}),/hosted_provider_not_supported/);
 });
 test('provider discovery fails closed for missing or unknown capability metadata', () => {
   const tool = (name: string, cap?: string) => ({name,...(cap ? {_meta:{'com.bluegrain.smsrelay/capability':cap}} : {})});

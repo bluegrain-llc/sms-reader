@@ -144,12 +144,12 @@ class ServiceSession:
         return {**s["registration"], "link": s["baseUrl"] + s["registration"]["registrationPath"]}
 
     def wait_for_registration(self):
-        if not self.state.get("registered"):
-            self.start_registration()
         s = self.state
-        result = self.client.poll(lambda: self.client.request("/v3/registration-sessions/current", s["registrationToken"]))
-        s.update(serviceId=result["serviceId"], servicePath=result["servicePath"], registered=True)
-        self.save()
+        if not s.get("registered"):
+            self.start_registration()
+            result = self.client.poll(lambda: self.client.request("/v3/registration-sessions/current", s["registrationToken"]))
+            s.update(serviceId=result["serviceId"], servicePath=result["servicePath"], registered=True)
+            self.save()
         self.consume_deliveries()
         return {"serviceId": s["serviceId"], "link": self.permanent_link()}
 

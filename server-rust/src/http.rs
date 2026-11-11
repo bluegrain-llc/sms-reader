@@ -747,37 +747,61 @@ async fn route(s: App, request: Request) -> Result<Response> {
         .and_then(|s| s.strip_prefix("Bearer "))
         .filter(|s| s.starts_with("smsa_"))
         .map(str::to_owned);
-    if let Some(id) = &oauth_resource {
-        ensure(
-            raw_oauth_path == format!("/mcp/services/{id}"),
-            401,
-            "invalid_token",
-        )?;
-        ensure(oauth_token.is_some(), 401, "authentication_required")?;
-    }
-    if let Some(token) = oauth_token {
-        let target = oauth_resource
-            .as_ref()
-            .ok_or(Error::Api(401, "invalid_token"))?;
-        let root = s
-            .options
-            .public_url
-            .as_deref()
-            .ok_or(Error::Api(503, "oauth_not_configured"))?
-            .trim_end_matches('/');
-        let expected = crate::oauth::resource(root, target);
-        let relay = r.clone();
-        r.store
-            .tx(move |tx| {
-                let (relay, token, expected) = (relay.clone(), token.clone(), expected.clone());
-                Box::pin(async move {
-                    let access = tx.get("oauthAccess", &hash(&token)).await?;
-                    ensure(access["resource"] == expected, 401, "invalid_token")?;
-                    relay.agent(tx, &token).await?;
-                    Ok(())
+    let authorization: Result<()> = async {
+        if let Some(id) = &oauth_resource {
+            ensure(
+                raw_oauth_path == format!("/mcp/services/{id}"),
+                401,
+                "invalid_token",
+            )?;
+            ensure(oauth_token.is_some(), 401, "authentication_required")?;
+        }
+        if let Some(token) = oauth_token {
+            let target = oauth_resource
+                .as_ref()
+                .ok_or(Error::Api(401, "invalid_token"))?;
+            let root = s
+                .options
+                .public_url
+                .as_deref()
+                .ok_or(Error::Api(503, "oauth_not_configured"))?
+                .trim_end_matches('/');
+            let expected = crate::oauth::resource(root, target);
+            let relay = r.clone();
+            r.store
+                .tx(move |tx| {
+                    let (relay, token, expected) = (relay.clone(), token.clone(), expected.clone());
+                    Box::pin(async move {
+                        let access = tx.get("oauthAccess", &hash(&token)).await?;
+                        ensure(access["resource"] == expected, 401, "invalid_token")?;
+                        relay.agent(tx, &token).await?;
+                        Ok(())
+                    })
                 })
-            })
-            .await?;
+                .await?;
+        }
+        Ok(())
+    }
+    .await;
+    if let Err(error) = authorization {
+        if matches!(error, Error::Api(401, _))
+            && method == "POST"
+            && let (Some(id), Some(base)) = (&oauth_resource, &s.options.public_url)
+            && let Ok(input) = serde_json::from_slice::<Value>(&bytes)
+            && input["jsonrpc"] == "2.0"
+            && input["method"] == "tools/call"
+            && (input["id"].is_string() || input["id"].is_number())
+        {
+            let challenge = format!(
+                "Bearer resource_metadata=\"{}/.well-known/oauth-protected-resource/mcp/services/{id}\", error=\"invalid_token\", error_description=\"Connect this service to authorize tools.\"",
+                base.trim_end_matches('/')
+            );
+            return Ok(json_response(
+                json!({"jsonrpc":"2.0","id":input["id"],"result":{"isError":true,"content":[{"type":"text","text":"Authorization required."}],"_meta":{"mcp/www_authenticate":[challenge]}}}),
+                200,
+            ));
+        }
+        return Err(error);
     }
     let output = match (method.as_str(), p) {
         ("GET", [".well-known", "oauth-authorization-server"]) => crate::oauth::metadata(

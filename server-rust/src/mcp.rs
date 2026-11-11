@@ -281,6 +281,7 @@ async fn run_sdk(
         return Some(error);
     }
     envelope = crate::mcp_input::normalized_envelope(&envelope);
+    let oauth = secret.starts_with("smsa_");
     let original_id = envelope["id"].clone();
     let list_tools = envelope["method"] == "tools/list";
     if original_id.as_i64().is_some_and(|n| n < 0) {
@@ -329,6 +330,12 @@ async fn run_sdk(
             .as_array_mut()
             .unwrap()
             .retain(|t| allowed.iter().any(|name| t["name"] == name.as_str()));
+        if oauth {
+            for tool in value["result"]["tools"].as_array_mut().unwrap() {
+                let cap = tool["_meta"]["com.bluegrain.smsrelay/capability"].clone();
+                tool["_meta"]["securitySchemes"] = json!([{"type":"oauth2","scopes":[cap]}]);
+            }
+        }
     }
     if value["id"] == "compat-negative-id" {
         value["id"] = original_id;

@@ -6,7 +6,13 @@ import { OAuth } from './oauth.js';
 import { telemetry, category } from './telemetry.js';
 
 export function mountOAuth(app: Express, relay: Relay, base: string | undefined, owner: (r: Request) => Promise<{ uid: string }>) {
-  if (!base) return;
+  if (!base) {
+    app.use((r, _s, next) => {
+      ensure(!/^Bearer smsa_/.test(r.get('authorization') ?? '') && !/^\/mcp\/services\//.test(r.path), 401, 'invalid_token');
+      next();
+    });
+    return;
+  }
   const o = new OAuth(relay, base);
   app.get('/.well-known/oauth-authorization-server', (_r, s) => { s.json(o.metadata()); });
   app.get('/.well-known/oauth-protected-resource/mcp/services/:id', async (r, s) => {
@@ -31,18 +37,27 @@ export function mountOAuth(app: Express, relay: Relay, base: string | undefined,
   app.use(async (r, s, next) => {
     const token = /^Bearer (smsa_[^\s]+)$/.exec(r.get('authorization') ?? '')?.[1];
     const resource = /^\/mcp\/services\/([A-Za-z0-9_-]{1,128})$/.exec(r.path);
-    if (resource) {
-      const challenge = `Bearer resource_metadata="${o.base}/.well-known/oauth-protected-resource/mcp/services/${resource[1]}"`;
-      s.set('WWW-Authenticate', challenge);
-      ensure(token, 401, 'authentication_required');
-    }
-    if (token) {
-      ensure(resource, 401, 'invalid_token');
-      await relay.db.runTransaction(async tx => {
-        const access = (await tx.get(relay.ref('oauthAccess', hash(token)))).data();
-        ensure(access?.resource === o.resource(resource[1]!), 401, 'invalid_token');
-        await relay.agent(tx, token);
-      });
+    const challenge = resource ? `Bearer resource_metadata="${o.base}/.well-known/oauth-protected-resource/mcp/services/${resource[1]}"` : null;
+    if (challenge) s.set('WWW-Authenticate', challenge);
+    try {
+      if (resource) ensure(token, 401, 'authentication_required');
+      if (token) {
+        ensure(resource, 401, 'invalid_token');
+        await relay.db.runTransaction(async tx => {
+          const access = (await tx.get(relay.ref('oauthAccess', hash(token)))).data();
+          ensure(access?.resource === o.resource(resource[1]!), 401, 'invalid_token');
+          await relay.agent(tx, token);
+        });
+      }
+    } catch (error) {
+      if (challenge && error instanceof RelayError && error.status === 401 && r.method === 'POST' &&
+        r.body?.jsonrpc === '2.0' && r.body.method === 'tools/call' &&
+        (typeof r.body.id === 'string' || (typeof r.body.id === 'number' && Number.isFinite(r.body.id)))) {
+        s.json({jsonrpc:'2.0',id:r.body.id,result:{isError:true,content:[{type:'text',text:'Authorization required.'}],
+          _meta:{'mcp/www_authenticate':[`${challenge}, error="invalid_token", error_description="Connect this service to authorize tools."`]}}});
+        return;
+      }
+      throw error;
     }
     next();
   });

@@ -18,7 +18,8 @@ import { RustRelay, rustApp } from './rust-adapter.js';
 import { hash, HISTORY, MINUTE } from '../src/model.js';
 import type { HttpOptions } from '../src/http.js';
 import type { Server } from 'node:http';
-import { capabilityTools } from '../../integrations/providers.mjs';
+import { capabilityTools, hostedProviderConfig } from '../../integrations/providers.mjs';
+import { OAuth } from '../src/oauth.js';
 
 if (!process.env.FIRESTORE_EMULATOR_HOST) throw Error('Onboarding contracts require the Firestore emulator');
 process.env.OAUTH_CODE_KEY = '64'.repeat(32); // Isolated contract key, never used for deployment.
@@ -165,6 +166,7 @@ for (const runtime of [0, 1]) {
       await client.connect(new StreamableHTTPClientTransport(new URL(bases[runtime]+'/mcp'),{requestInit:{headers:{Authorization:`Bearer ${payload.token}`}}}));
       const forms=(await client.listTools()).tools;
       assert.equal(forms.length,5); assert.ok(forms.every(t=>t._meta?.['com.bluegrain.smsrelay/capability']==='forms'));
+      assert.ok(forms.every(t=>t._meta?.securitySchemes===undefined));
       assert.equal(capabilityTools(forms,['forms']).length,5); assert.equal(capabilityTools(forms,['sms']).length,0);
       await call(runtime, `/v3/connections/${first.approved.connectionId}`,owner(recipient),{capabilities:['forms','sms'],expiresAt:null},'PATCH');
       const all=(await client.listTools()).tools; assert.equal(all.length,8);
@@ -194,11 +196,13 @@ for (const runtime of [0, 1]) {
 }
 
 async function broker(input: unknown) {
-  const child=spawn(process.execPath,[new URL('../../cli/broker.mjs',import.meta.url).pathname],{stdio:['pipe','pipe','pipe']});
-  let stdout='',stderr='';child.stdout.on('data',b=>stdout+=b);child.stderr.on('data',b=>stderr+=b);child.stdin.end(JSON.stringify(input));
-  const [code]=await once(child,'exit');assert.equal(code,0,stderr+stdout);return JSON.parse(stdout).value;
+  const child=spawn(process.execPath,[new URL('../../cli/broker.mjs',import.meta.url).pathname],{detached:true,stdio:['pipe','pipe','pipe']});
+  const stop=()=>{if(child.pid)try{process.kill(-child.pid,'SIGKILL');}catch{};},bound=setTimeout(stop,20000);
+  let stdout='',stderr='';child.stdout.on('data',b=>stdout+=b);child.stderr.on('data',b=>stderr+=b);child.stdin.on('error',()=>{});
+  try {child.stdin.end(JSON.stringify(input));const [code]=await once(child,'close');assert.equal(code,0,stderr+stdout);return JSON.parse(stdout).value;}
+  finally {clearTimeout(bound);stop();}
 }
-test('all SDK broker bindings share durable registration, approval and credential delivery',async()=>{
+test('all SDK broker bindings share durable registration, approval and credential delivery',{timeout:120000},async()=>{
   const directory=await mkdtemp(join(tmpdir(),'relay-sdk-contract-'));
   try {
     const common={directory,profile:'sdk-conformance',relayUrl:bases[0],allowHttpLoopback:true};
@@ -262,6 +266,80 @@ async function approvedOAuth(f: Awaited<ReturnType<typeof oauthFlow>>, runtime: 
 }
 async function oauthTools(runtime: number, f: Awaited<ReturnType<typeof oauthFlow>>, token: string, expected = 200) {
   return call(runtime, `/mcp/services/${f.s.session.serviceId}`, token, { jsonrpc: '2.0', id: 1, method: 'tools/list' }, 'POST', expected);
+}
+for (const runtime of [0,1]) test(`runtime ${runtime}: unconfigured revisions reject resource credentials on REST and legacy MCP`, {timeout:30000}, async () => {
+  const f=await oauthFlow(runtime),tokens=await formCall(runtime,'/oauth/token',await approvedOAuth(f,runtime));
+  const noOAuth={...options,publicUrl:undefined};
+  const server=runtime===0?app(relay,noOAuth).listen(0,'127.0.0.1'):rustApp(native as unknown as Relay,noOAuth).listen() as unknown as Server;
+  try {
+    if(!server.listening)await once(server,'listening',{signal:AbortSignal.timeout(10000)});
+    const base=`http://127.0.0.1:${(server.address() as {port:number}).port}`;
+    for(const path of ['/v2/requests/opaque-request/result','/mcp',`/mcp/services/${f.s.session.serviceId}`]){
+      const response=await fetch(base+path,{headers:{Authorization:`Bearer ${tokens.access_token}`},signal:AbortSignal.timeout(10000)});
+      assert.ok([401,503].includes(response.status),`${path}: ${response.status}`);await response.body?.cancel();
+    }
+  } finally {server.closeAllConnections();await new Promise<void>(resolve=>server.close(()=>resolve()));native.options=options;}
+});
+
+const providerProfiles: {name:string;provider:string;redirectUri:string;metadataId?:string;blocked?:string;source:string}[]=JSON.parse(readFileSync(new URL('../../contracts/provider-authorization.json',import.meta.url),'utf8'));
+for(const runtime of [0,1])for(const profile of providerProfiles){
+  const name=`provider authorization ${profile.name} runtime ${runtime}`;
+  if(profile.blocked){test.todo(name+': '+profile.blocked);continue;}
+  test(name,{timeout:60000},async()=>{
+    const providerRecipient='provider-'+randomUUID();
+    time+=11*MINUTE;const s=await register(runtime,false,['forms','sms']),resource=`https://relay.example/mcp/services/${s.session.serviceId}`;
+    const endpoint=`/mcp/services/${s.session.serviceId}`;
+    const challenge=await fetch(bases[runtime]+endpoint,{signal:AbortSignal.timeout(10000)});
+    assert.equal(challenge.status,401);assert.ok(challenge.headers.get('www-authenticate')?.includes(`/.well-known/oauth-protected-resource${endpoint}`));await challenge.body?.cancel();
+    const metadata=await (await fetch(bases[runtime]+`/.well-known/oauth-protected-resource${endpoint}`)).json();
+    assert.equal(metadata.resource,resource);assert.deepEqual(metadata.authorization_servers,['https://relay.example']);
+    const issuer=await (await fetch(bases[runtime]+'/.well-known/oauth-authorization-server')).json();
+    for(const field of ['authorization_endpoint','token_endpoint','registration_endpoint'])assert.ok(issuer[field].startsWith('https://relay.example/oauth/'));
+    assert.ok(issuer.response_types_supported.includes('code'));assert.ok(issuer.code_challenge_methods_supported.includes('S256'));assert.ok(issuer.grant_types_supported.includes('refresh_token'));
+    assert.ok(issuer.token_endpoint_auth_methods_supported.includes('none'));
+    if(profile.metadataId)assert.equal(issuer.client_id_metadata_document_supported,true);
+    const declaration={client_name:profile.name,redirect_uris:[profile.redirectUri],token_endpoint_auth_method:'none' as const};
+    // CIMD fixtures are validated through the real registration code, then consumed from its shared cache.
+    // Provider callbacks/documents are never navigated or fetched by this conformance harness.
+    const client=profile.metadataId?await new OAuth(relay,'https://relay.example').register({...declaration,client_id:profile.metadataId},'provider-fixture',profile.metadataId):await call(runtime,'/oauth/register','',declaration,'POST',201);
+    const verifier=randomBytes(32).toString('base64url'),state=randomUUID();
+    const params={response_type:'code',client_id:client.client_id,redirect_uri:profile.redirectUri,resource,scope:'forms sms',state,code_challenge_method:'S256',code_challenge:createHash('sha256').update(verifier).digest('base64url')};
+    const authorize=await fetch(bases[runtime]+'/oauth/authorize?'+new URLSearchParams(params),{redirect:'manual'});assert.equal(authorize.status,303);
+    const session=authorize.headers.get('location')!.split('/').at(-1)!;
+    const view=await call(runtime,`/v3/oauth/sessions/${session}`,owner(providerRecipient));assert.equal(view.clientName,profile.name);assert.equal(view.clientOrigin,new URL(profile.redirectUri).origin);
+    await call(1-runtime,`/v3/oauth/sessions/${session}/decision`,owner(providerRecipient),{decision:'approved',capabilities:['forms'],expiresInDays:null});
+    const response=await call(runtime,`/v3/oauth/sessions/${session}/response`,owner(providerRecipient),{}),redirect=new URL(response.redirect),target=new URL(profile.redirectUri);
+    assert.equal(redirect.origin+redirect.pathname,target.origin+target.pathname);assert.deepEqual(redirect.searchParams.getAll('state'),[state]);
+    const exchange={grant_type:'authorization_code',client_id:client.client_id,redirect_uri:profile.redirectUri,resource,code:redirect.searchParams.get('code')!,code_verifier:verifier};
+    await formCall(runtime,'/oauth/token',{...exchange,code_verifier:randomBytes(32).toString('base64url')},400);
+    const tokens=await formCall(1-runtime,'/oauth/token',exchange);assert.equal(tokens.scope,'forms');assert.equal(tokens.token_type,'Bearer');assert.ok(tokens.refresh_token);
+    const config=hostedProviderConfig(profile.provider,{resource,accessToken:tokens.access_token});
+    const softwareToken='authorization' in config?config.authorization:config.mcp_servers[0]!.authorization_token;
+    assert.ok(typeof softwareToken==='string');
+    const tools=await call(runtime,endpoint,softwareToken,{jsonrpc:'2.0',id:'provider-list',method:'tools/list'});
+    assert.equal(tools.result.tools.length,5);
+    for(const tool of tools.result.tools)assert.deepEqual(tool._meta.securitySchemes,[{type:'oauth2',scopes:['forms']}]);
+    await call(runtime,`/v1/devices/${randomUUID()}`,owner(providerRecipient),{name:'Synthetic provider phone',fcmToken:'synthetic',wizardVersion:1},'PUT');
+    const created=await call(runtime,endpoint,tokens.access_token,{jsonrpc:'2.0',id:'create',method:'tools/call',params:{name:'create_request',arguments:{title:'Review',body:'Provider fixture',fields:[{id:'decision',type:'text',label:'Decision'}],actions:[{id:'send',type:'submit',label:'Send'}],idempotencyKey:randomUUID()}}});
+    const requestId=created.result.structuredContent.requestId;assert.equal(typeof requestId,'string');
+    const inspected=await call(runtime,endpoint,tokens.access_token,{jsonrpc:'2.0',id:'inspect',method:'tools/call',params:{name:'inspect_request',arguments:{requestId}}});
+    assert.equal(inspected.result.structuredContent.requestId,requestId);
+    await call(runtime,endpoint,tokens.access_token,{jsonrpc:'2.0',id:'cancel',method:'tools/call',params:{name:'cancel_request',arguments:{requestId}}});
+    if(profile.provider==='openai'){
+      const result=await call(runtime,endpoint,'',{jsonrpc:'2.0',id:'linking',method:'tools/call',params:{name:'inspect_request',arguments:{requestId:'opaque-request'}}});
+      assert.equal(result.result.isError,true);assert.ok(result.result._meta['mcp/www_authenticate'][0].includes('error_description='));assert.ok(result.result._meta['mcp/www_authenticate'][0].includes('resource_metadata='));
+      time+=10*MINUTE+1;
+      const expired=await call(runtime,endpoint,tokens.access_token,{jsonrpc:'2.0',id:'expired',method:'tools/call',params:{name:'inspect_request',arguments:{requestId}}});
+      assert.equal(expired.result.isError,true);assert.ok(expired.result._meta['mcp/www_authenticate'][0].includes('error="invalid_token"'));
+    }
+    if(profile.name.includes('Messages')){
+      assert.ok(config.mcp_servers);
+      assert.equal(config.mcp_servers[0]!.authorization_token,tokens.access_token);assert.ok(!JSON.stringify(config.tools).includes(tokens.access_token));
+    }
+    const refreshed=await formCall(runtime,'/oauth/token',{grant_type:'refresh_token',client_id:client.client_id,refresh_token:tokens.refresh_token,resource});assert.notEqual(refreshed.refresh_token,tokens.refresh_token);
+    await formCall(1-runtime,'/oauth/revoke',{client_id:client.client_id,token:refreshed.refresh_token});
+    await call(runtime,endpoint,refreshed.access_token,{jsonrpc:'2.0',id:'revoked',method:'tools/list'},'POST',401);
+  });
 }
 for (const runtime of [0, 1]) {
   test(`runtime ${runtime}: hosted discovery, PKCE, resource binding and private scoped MCP access interoperate`, async () => {
