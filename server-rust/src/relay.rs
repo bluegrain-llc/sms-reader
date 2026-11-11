@@ -653,7 +653,7 @@ impl Relay {
     }
     pub fn aggregate(&self, tx: &mut Tx, r: &mut Value, a: &Value) -> Result<()> {
         let ps = phones(r);
-        let all = ps.as_object().unwrap().values().collect::<Vec<_>>();
+        let all = js_values(&ps);
         let live = all
             .iter()
             .filter(|p| active(text(p, "status")))
