@@ -103,10 +103,11 @@ class RelayViewModel @JvmOverloads constructor(application: Application, private
             refreshData()
         }
     }
-    fun register() = action {
+    fun register(resumePaused: Boolean = false) = action {
         check(RelayNotifications.enabled(app)) { "Notifications required" }
-        val device = repo.register()
-        mutable.update { it.copy(registered = true, paused = device.getBoolean("paused"), autoConnect = true) }
+        val paused = registerReceivingPhone(resumePaused,
+            register = { repo.register().getBoolean("paused") }, resume = { repo.pause(false) })
+        mutable.update { it.copy(registered = true, paused = paused, autoConnect = true) }
         refreshData()
     }
     fun refresh(silent: Boolean = false) = action(silent = silent) { if (app.configured) refreshData() }

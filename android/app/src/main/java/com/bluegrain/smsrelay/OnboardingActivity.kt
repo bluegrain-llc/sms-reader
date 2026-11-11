@@ -27,6 +27,7 @@ import java.util.UUID
 /** A separate task keeps link approval independent of Inbox drafts and Administration navigation. */
 class OnboardingActivity : AccountActivity() {
     override val administrationOnly = true
+    override val resumePausedPhoneOnRegistration = true
     private var destination by mutableStateOf<OnboardingLink?>(null)
     private var attempt by mutableStateOf(UUID.randomUUID().toString())
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -184,7 +185,7 @@ private fun OnboardingContent(target: OnboardingLink, attempt: String, account: 
                     TextButton(onClick = { decide(false) }, enabled = !busy) { Text(if (management) "Disconnect" else "Cancel") }
                 if (management && statusText.isNotBlank()) Text(statusText)
                 } else when (session?.optString("status")) {
-                    "approved" -> { if (oauth) Text("Return to the requesting app to finish connecting."); if (!registration || !session!!.isNull("connectionId")) TextButton(onClick = { onManage(session!!.getString("connectionId")) }) { Text("Manage permissions") }; Text(statusText.ifBlank { "Access granted. Waiting for service…" }); if (needsPhone) { Text("Sign in and allow notifications to receive requests on this phone."); Button(onClick = onRegister, enabled = !account.busy) { Text("Connect this phone") } } }
+                    "approved" -> { if (oauth) Text("Return to the requesting app to finish connecting."); if (!registration || !session!!.isNull("connectionId")) TextButton(onClick = { onManage(session!!.getString("connectionId")) }) { Text("Manage permissions") }; Text(statusText.ifBlank { "Access granted. Waiting for service…" }); if (needsPhone) { Text("Allow notifications to receive requests on this phone. Continuing also resumes it if paused."); Button(onClick = onRegister, enabled = !account.busy) { Text(if (account.registered && account.paused) "Resume this phone" else "Connect this phone") } } }
                     "denied" -> Text(if (management) "Disconnected." else "Cancelled. No new access was granted.")
                     "expired" -> { Text("This session expired. Request a fresh link and approve access again."); if (target.kind == "services") Button(onClick = onRestart) { Text("Start a new connection") } }
                 }

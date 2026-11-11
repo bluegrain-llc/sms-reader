@@ -153,4 +153,22 @@ class OnboardingScreenTest {
         compose.onNode(hasText("Connect") and hasClickAction()).assertIsEnabled()
     }
 
+    @Test fun pausedPhoneSetupRequiresAnExplicitResumeAction() {
+        var resumes = 0
+        compose.setContent {
+            RelayTheme {
+                OnboardingScreen(OnboardingLink("pair", "attempt"), "nonce",
+                    account.copy(registered = true, paused = true), request = { _, path, _ ->
+                        if (path.startsWith("/v3/connections/")) JSONObject().put("setup", "phone_setup_needed")
+                        else review("approved").put("connectionId", "connection")
+                    }, onSignIn = {}, onRegister = { resumes++ }, onClose = {}, onRestart = {}, onManage = {})
+            }
+        }
+        compose.waitForIdle()
+        compose.onNodeWithText("Access granted — connect a phone to receive requests").performScrollTo().assertIsDisplayed()
+        assertEquals(0, resumes)
+        compose.onNodeWithText("Resume this phone").performScrollTo().performClick()
+        assertEquals(1, resumes)
+    }
+
 }

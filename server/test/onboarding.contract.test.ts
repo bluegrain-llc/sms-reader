@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import { spawn } from 'node:child_process';
+import { createServer } from 'node:http';
 import { mkdtemp, rm, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -30,8 +31,9 @@ const secrets = (prefix: string) => `${prefix}_${randomBytes(32).toString('base6
 const relay = new Relay(db, async () => {}, () => time), native = new RustRelay(db, async () => {}, () => time);
 const options: HttpOptions = { verifyOwner: async t => { assert.ok(t.startsWith('owner:') || t.startsWith('owner64:')); return { uid: t.startsWith('owner64:') ? Buffer.from(t.slice(8),'base64url').toString('utf8') : t.slice(6), authTime: time / 1000 }; }, verifyScheduler: async () => {}, deleteIdentity: async () => {}, publicUrl: 'https://relay.example', firebaseWebConfig: { apiKey: 'public', authDomain: 'demo-sms-relay.firebaseapp.com', projectId: 'demo-sms-relay', appId: 'public' } };
 let servers: Server[] = [], bases: string[] = [];
+const contractFetch: typeof fetch = (input, init) => fetch(input, { ...init, signal: init?.signal ? AbortSignal.any([init.signal, AbortSignal.timeout(10000)]) : AbortSignal.timeout(10000) });
 async function call(runtime: number, path: string, token: string, body?: unknown, method = body === undefined ? 'GET' : 'POST', expected = 200) {
-  const response = await fetch(bases[runtime] + path, { method, headers: { Accept: "application/json, text/event-stream", Authorization: `Bearer ${token}`, ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) }, body: body === undefined ? undefined : JSON.stringify(body) });
+  const response = await contractFetch(bases[runtime] + path, { method, headers: { Accept: "application/json, text/event-stream", Authorization: `Bearer ${token}`, ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) }, body: body === undefined ? undefined : JSON.stringify(body) });
   const result = await response.json(); assert.equal(response.status, expected, JSON.stringify(result)); return result;
 }
 const owner = (uid: string) => /^[\x20-\x7e]+$/.test(uid) ? `owner:${uid}` : `owner64:${Buffer.from(uid).toString('base64url')}`;
@@ -62,9 +64,18 @@ async function consume(s: Awaited<ReturnType<typeof register>>, runtime = 0) {
 before(async () => {
   for (const c of ['accounts', 'devices', 'grants', 'services', 'serviceCredentials', 'serviceDeliveryKeys', 'registrationSessions', 'pairingSessions', 'serviceConnections', 'connectionBindings', 'credentialDeliveries', 'onboardingRates', 'oauthClients', 'oauthSessions', 'oauthCodes', 'oauthBindings', 'oauthFamilies', 'oauthAccess', 'oauthRefresh', 'oauthCleanup', 'oauthGrantCleanup']) await db.recursiveDelete(db.collection(c));
   servers = [app(relay, options).listen(0, '127.0.0.1'), rustApp(native as unknown as Relay, options).listen() as unknown as Server];
-  for (const server of servers) { if (!server.listening) await once(server, 'listening'); bases.push(`http://127.0.0.1:${(server.address() as { port: number }).port}`); }
+  for (const server of servers) { if (!server.listening) await once(server, 'listening', {signal:AbortSignal.timeout(10000)}); bases.push(`http://127.0.0.1:${(server.address() as { port: number }).port}`); }
 });
 after(async () => { for (const s of servers) { s.closeAllConnections(); await new Promise<void>(resolve => s.close(() => resolve())); } await deleteApp(firebase); });
+test('contract HTTP deadline aborts an unfinished response body', {timeout:15000}, async () => {
+  const stalled = createServer((_request, response) => { response.writeHead(200, {'Content-Type':'application/json'}); response.write('{'); });
+  stalled.listen(0, '127.0.0.1');
+  try {
+    await once(stalled, 'listening', {signal:AbortSignal.timeout(1000)});
+    const base = `http://127.0.0.1:${(stalled.address() as {port:number}).port}`;
+    await assert.rejects(async () => (await contractFetch(base)).json(), (error: Error) => ['AbortError','TimeoutError'].includes(error.name));
+  } finally { stalled.closeAllConnections(); await new Promise<void>(resolve => stalled.close(() => resolve())); }
+});
 for (const runtime of [0, 1]) {
   test(`runtime ${runtime}: approved registration recovers after session retention without new consent or duplicate service`, async () => {
     for (const self of [false, true]) {
@@ -163,7 +174,7 @@ for (const runtime of [0, 1]) {
     const first = await connect(s, runtime, ['forms']); const { payload } = await consume(s, runtime);
     const client = new Client({name:'scoped-test',version:'1'});
     try {
-      await client.connect(new StreamableHTTPClientTransport(new URL(bases[runtime]+'/mcp'),{requestInit:{headers:{Authorization:`Bearer ${payload.token}`}}}));
+      await client.connect(new StreamableHTTPClientTransport(new URL(bases[runtime]+'/mcp'),{fetch:contractFetch,requestInit:{headers:{Authorization:`Bearer ${payload.token}`}}}));
       const forms=(await client.listTools()).tools;
       assert.equal(forms.length,5); assert.ok(forms.every(t=>t._meta?.['com.bluegrain.smsrelay/capability']==='forms'));
       assert.ok(forms.every(t=>t._meta?.securitySchemes===undefined));
@@ -228,7 +239,7 @@ async function oauthFlow(runtime: number, confidential = false) {
   const params = { response_type: 'code', client_id: client.client_id, redirect_uri: callback,
     resource: `https://relay.example/mcp/services/${s.session.serviceId}`, scope: 'forms sms', state: 'opaque-state',
     code_challenge_method: 'S256', code_challenge: createHash('sha256').update(verifier).digest('base64url') };
-  const response = await fetch(bases[runtime] + '/oauth/authorize?' + new URLSearchParams(params), { redirect: 'manual' });
+  const response = await contractFetch(bases[runtime] + '/oauth/authorize?' + new URLSearchParams(params), { redirect: 'manual' });
   assert.equal(response.status, 303, await response.text());
   const location = response.headers.get('location')!;assert.ok(location.startsWith('/oauth/consent/'));
   const sessionId = location.split('/').at(-1)!;
@@ -242,12 +253,12 @@ for (const runtime of [0,1]) test(`runtime ${runtime}: OAuth rejects malformed r
   assert.equal(defaults.token_endpoint_auth_method,'none');
   const f = await oauthFlow(runtime);
   for (const resource of ['not-a-url','https://']) {
-    const response = await fetch(bases[runtime]+'/oauth/authorize?'+new URLSearchParams({...f.params,resource}), {redirect:'manual'});
+    const response = await contractFetch(bases[runtime]+'/oauth/authorize?'+new URLSearchParams({...f.params,resource}), {redirect:'manual'});
     assert.equal(response.status,400); assert.equal((await response.json()).error,'invalid_target');
   }
 });
 async function formCall(runtime: number, endpoint: string, fields: Record<string, string>, expected = 200) {
-  const response = await fetch(bases[runtime] + endpoint, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams(fields) });
+  const response = await contractFetch(bases[runtime] + endpoint, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams(fields) });
   const value = await response.json();assert.equal(response.status, expected, JSON.stringify(value));return value;
 }
 async function approvedOAuth(f: Awaited<ReturnType<typeof oauthFlow>>, runtime: number, recipientUid = recipient) {
@@ -275,7 +286,7 @@ for (const runtime of [0,1]) test(`runtime ${runtime}: unconfigured revisions re
     if(!server.listening)await once(server,'listening',{signal:AbortSignal.timeout(10000)});
     const base=`http://127.0.0.1:${(server.address() as {port:number}).port}`;
     for(const path of ['/v2/requests/opaque-request/result','/mcp',`/mcp/services/${f.s.session.serviceId}`]){
-      const response=await fetch(base+path,{headers:{Authorization:`Bearer ${tokens.access_token}`},signal:AbortSignal.timeout(10000)});
+      const response=await contractFetch(base+path,{headers:{Authorization:`Bearer ${tokens.access_token}`},signal:AbortSignal.timeout(10000)});
       assert.ok([401,503].includes(response.status),`${path}: ${response.status}`);await response.body?.cancel();
     }
   } finally {server.closeAllConnections();await new Promise<void>(resolve=>server.close(()=>resolve()));native.options=options;}
@@ -289,11 +300,11 @@ for(const runtime of [0,1])for(const profile of providerProfiles){
     const providerRecipient='provider-'+randomUUID();
     time+=11*MINUTE;const s=await register(runtime,false,['forms','sms']),resource=`https://relay.example/mcp/services/${s.session.serviceId}`;
     const endpoint=`/mcp/services/${s.session.serviceId}`;
-    const challenge=await fetch(bases[runtime]+endpoint,{signal:AbortSignal.timeout(10000)});
+    const challenge=await contractFetch(bases[runtime]+endpoint,{signal:AbortSignal.timeout(10000)});
     assert.equal(challenge.status,401);assert.ok(challenge.headers.get('www-authenticate')?.includes(`/.well-known/oauth-protected-resource${endpoint}`));await challenge.body?.cancel();
-    const metadata=await (await fetch(bases[runtime]+`/.well-known/oauth-protected-resource${endpoint}`)).json();
+    const metadata=await (await contractFetch(bases[runtime]+`/.well-known/oauth-protected-resource${endpoint}`)).json();
     assert.equal(metadata.resource,resource);assert.deepEqual(metadata.authorization_servers,['https://relay.example']);
-    const issuer=await (await fetch(bases[runtime]+'/.well-known/oauth-authorization-server')).json();
+    const issuer=await (await contractFetch(bases[runtime]+'/.well-known/oauth-authorization-server')).json();
     for(const field of ['authorization_endpoint','token_endpoint','registration_endpoint'])assert.ok(issuer[field].startsWith('https://relay.example/oauth/'));
     assert.ok(issuer.response_types_supported.includes('code'));assert.ok(issuer.code_challenge_methods_supported.includes('S256'));assert.ok(issuer.grant_types_supported.includes('refresh_token'));
     assert.ok(issuer.token_endpoint_auth_methods_supported.includes('none'));
@@ -304,7 +315,7 @@ for(const runtime of [0,1])for(const profile of providerProfiles){
     const client=profile.metadataId?await new OAuth(relay,'https://relay.example').register({...declaration,client_id:profile.metadataId},'provider-fixture',profile.metadataId):await call(runtime,'/oauth/register','',declaration,'POST',201);
     const verifier=randomBytes(32).toString('base64url'),state=randomUUID();
     const params={response_type:'code',client_id:client.client_id,redirect_uri:profile.redirectUri,resource,scope:'forms sms',state,code_challenge_method:'S256',code_challenge:createHash('sha256').update(verifier).digest('base64url')};
-    const authorize=await fetch(bases[runtime]+'/oauth/authorize?'+new URLSearchParams(params),{redirect:'manual'});assert.equal(authorize.status,303);
+    const authorize=await contractFetch(bases[runtime]+'/oauth/authorize?'+new URLSearchParams(params),{redirect:'manual'});assert.equal(authorize.status,303);
     const session=authorize.headers.get('location')!.split('/').at(-1)!;
     const view=await call(runtime,`/v3/oauth/sessions/${session}`,owner(providerRecipient));assert.equal(view.clientName,profile.name);assert.equal(view.clientOrigin,new URL(profile.redirectUri).origin);
     await call(1-runtime,`/v3/oauth/sessions/${session}/decision`,owner(providerRecipient),{decision:'approved',capabilities:['forms'],expiresInDays:null});
@@ -344,10 +355,10 @@ for(const runtime of [0,1])for(const profile of providerProfiles){
 for (const runtime of [0, 1]) {
   test(`runtime ${runtime}: hosted discovery, PKCE, resource binding and private scoped MCP access interoperate`, async () => {
     const f = await oauthFlow(runtime, true);
-    const discovery = await fetch(bases[runtime] + '/.well-known/oauth-authorization-server');assert.equal(discovery.status,200);
+    const discovery = await contractFetch(bases[runtime] + '/.well-known/oauth-authorization-server');assert.equal(discovery.status,200);
     assert.deepEqual((await discovery.json()).code_challenge_methods_supported,['S256']);
-    const metadata = await fetch(bases[1-runtime] + `/.well-known/oauth-protected-resource/mcp/services/${f.s.session.serviceId}`);assert.equal((await metadata.json()).resource,f.params.resource);
-    const challenge = await fetch(bases[runtime] + `/mcp/services/${f.s.session.serviceId}`,{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
+    const metadata = await contractFetch(bases[1-runtime] + `/.well-known/oauth-protected-resource/mcp/services/${f.s.session.serviceId}`);assert.equal((await metadata.json()).resource,f.params.resource);
+    const challenge = await contractFetch(bases[runtime] + `/mcp/services/${f.s.session.serviceId}`,{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
     assert.equal(challenge.status,401);assert.ok(challenge.headers.get('www-authenticate')?.includes('/.well-known/oauth-protected-resource/'));
     const review = await call(runtime, `/v3/oauth/sessions/${f.sessionId}`, owner(recipient));
     assert.equal(review.name,'Personal agent');assert.equal(review.clientName,'Hosted client');
@@ -401,7 +412,7 @@ for (const runtime of [0, 1]) {
   test(`runtime ${runtime}: invalid redirects and expired/cancelled hosted attempts grant no access`, async () => {
     await call(runtime,'/oauth/register','',{client_name:'Invalid',redirect_uris:['https://127.0.0.1/private']},'POST',400);
     const f=await oauthFlow(runtime);
-    const bad=await fetch(bases[runtime]+'/oauth/authorize?'+new URLSearchParams({...f.params,redirect_uri:'https://8.8.4.4/wrong'}),{redirect:'manual'});assert.equal(bad.status,400);assert.equal(bad.headers.get('location'),null);
+    const bad=await contractFetch(bases[runtime]+'/oauth/authorize?'+new URLSearchParams({...f.params,redirect_uri:'https://8.8.4.4/wrong'}),{redirect:'manual'});assert.equal(bad.status,400);assert.equal(bad.headers.get('location'),null);
     await call(1-runtime,`/v3/oauth/sessions/${f.sessionId}/decision`,owner(recipient),{decision:'denied',capabilities:['forms'],expiresInDays:null});
     const denied=await call(runtime,`/v3/oauth/sessions/${f.sessionId}/response`,owner(recipient),{});
     assert.equal(new URL(denied.redirect).searchParams.get('error'),'access_denied');assert.equal(new URL(denied.redirect).searchParams.get('code'),null);assert.deepEqual(new URL(denied.redirect).searchParams.getAll('state'),['opaque-state']);assert.deepEqual(new URL(denied.redirect).searchParams.getAll('error'),['access_denied']);
@@ -439,7 +450,7 @@ test('Unicode owner identities keep OAuth response codes and reusable grant bind
   const recipientUid='onboarding-\u{f0000}-😀',f=await oauthFlow(0);
   const issued=await approvedOAuth(f,0,recipientUid),first=await call(1,`/v3/oauth/sessions/${f.sessionId}`,owner(recipientUid));
   await formCall(1,'/oauth/token',issued);
-  const attempt=await fetch(bases[1]+'/oauth/authorize?'+new URLSearchParams(f.params),{redirect:'manual'});assert.equal(attempt.status,303);
+  const attempt=await contractFetch(bases[1]+'/oauth/authorize?'+new URLSearchParams(f.params),{redirect:'manual'});assert.equal(attempt.status,303);
   const next={...f,sessionId:attempt.headers.get('location')!.split('/').at(-1)!};
   await approvedOAuth(next,1,recipientUid);
   const second=await call(0,`/v3/oauth/sessions/${next.sessionId}`,owner(recipientUid));assert.equal(second.connectionId,first.connectionId);
