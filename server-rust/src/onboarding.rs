@@ -232,7 +232,7 @@ impl Relay {
         id: String,
         mut input: Value,
     ) -> Result<Value> {
-        // Validate at the boundary; defaults and normalized UTF-16 lengths match the TS input schemas.
+        // Validate at the boundary; defaults and decoded Unicode code-point lengths match the TS input schemas.
         match method.as_str() {
             "register" => {
                 strict(

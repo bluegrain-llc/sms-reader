@@ -65,3 +65,55 @@ test('private command storage hides failures and round trips through a durable h
   try {assert.equal(await store.load(),null);const state={token:credential('smss')};await store.save(state);assert.deepEqual(await store.load(),state);await writeFile(command,'#!/bin/sh\necho private-secret\nexit 1\n');await assert.rejects(store.load(),e=>e.message==='storage_hook_failed');}
   finally {await rm(directory,{recursive:true,force:true});}
 });
+
+test('CLI resumes shared pairing and credential transitions after interrupted persistence boundaries', async t => {
+  const {main} = await import('../relay.mjs');
+  const directory = await mkdtemp(join(tmpdir(), 'relay-cli-resume-'));
+  const store = new PrivateStore(directory), output = [];
+  t.mock.method(console, 'log', (...values) => output.push(values.join(' ')));
+  let failDelivery = false, rotatedToken, pairingKey;
+  t.mock.method(globalThis, 'fetch', async (url, request) => {
+    const path = new URL(url).pathname, saved = await store.read();
+    const body = request.body && JSON.parse(request.body);
+    if (path === '/v3/registration-sessions') {
+      assert.ok(saved.registrationToken); assert.ok(saved.keys[0].privateKey);
+      return Response.json({status:'pending',registrationPath:'/register/public-session'});
+    }
+    if (path === '/v3/registration-sessions/current') return Response.json({status:'approved',serviceId:'service',servicePath:'/services/service'});
+    if (path === '/v3/service/pairing-sessions') {
+      assert.equal(saved.pairingInput.idempotencyKey, body.idempotencyKey);
+      if (pairingKey) assert.equal(body.idempotencyKey, pairingKey);
+      pairingKey = body.idempotencyKey;
+      return Response.json({sessionId:'pairing',comparisonCode:'123456',connectionPath:'/connect/public-session'});
+    }
+    if (path === '/v3/service/pairing-sessions/pairing') return Response.json({status:'approved',connectionId:'connection'});
+    if (path === '/v3/service' && request.method === 'PATCH') {
+      assert.ok(saved.nextServiceToken);
+      if (!rotatedToken) {
+        rotatedToken = saved.nextServiceToken;
+        return Response.json({error:'interrupted_after_rotation'}, {status:400});
+      }
+      return Response.json({error:'invalid_token'}, {status:401});
+    }
+    assert.equal(path, '/v3/service/deliveries'); assert.equal(saved.registered, true);
+    if (rotatedToken) assert.equal(request.headers.Authorization, `Bearer ${rotatedToken}`);
+    if (failDelivery) return Response.json({error:'interrupted_before_delivery'}, {status:400});
+    return Response.json({deliveries:[],hasMore:false});
+  });
+  const run = (...args) => main([...args, '--store', directory, '--no-open']);
+  try {
+    await run('service', 'register', '--name', 'Agent', '--relay', 'https://relay.example');
+    failDelivery = true;
+    await assert.rejects(run('service', 'connect'), /interrupted_before_delivery/);
+    assert.equal((await store.read()).pairingInput.idempotencyKey, pairingKey);
+    failDelivery = false;
+    await run('resume'); assert.equal((await store.read()).pairingInput, null);
+    await assert.rejects(run('service', 'rotate-credential'), /interrupted_after_rotation/);
+    assert.equal((await store.read()).nextServiceToken, rotatedToken);
+    await run('resume');
+    const saved = await store.read();
+    assert.equal(saved.serviceToken, rotatedToken); assert.equal(saved.nextServiceToken, undefined);
+    assert.ok(output.some(line => line.includes('Connection connection')));
+    for (const secret of [saved.serviceToken, saved.registrationToken, JSON.stringify(saved.keys[0].privateKey)]) assert.ok(!output.join('\n').includes(secret));
+  } finally { await rm(directory, {recursive:true,force:true}); }
+});

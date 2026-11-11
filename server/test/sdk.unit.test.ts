@@ -42,7 +42,7 @@ test('Python SDK decrypts JOSE delivery fixtures and rejects changed identifiers
   const key=await deliveryKey(),payload={version:1,serviceId:'service',connectionId:'connection',deliveryId:'delivery',token:credential('smsr'),externalAccountRef:null};
   const envelope=await new CompactEncrypt(Buffer.from(JSON.stringify(payload))).setProtectedHeader({alg:'ECDH-ES',enc:'A256GCM',kid:key.id,serviceId:payload.serviceId,connectionId:payload.connectionId,deliveryId:payload.deliveryId}).encrypt(await importJWK(key.publicKey,'ECDH-ES'));
   const program=`import json,sys\nfrom request_relay import decrypt_delivery\nv=json.load(sys.stdin)\np=decrypt_delivery(v['delivery'],'service',v['key'])\nassert p['token']==v['token']\nv['delivery']['connectionId']='wrong'\ntry:\n decrypt_delivery(v['delivery'],'service',v['key'])\n raise AssertionError('changed identifier accepted')\nexcept ValueError:\n pass\n`;
-  const result=spawnSync('python3',['-c',program],{env:{...process.env,PYTHONPATH:new URL('../../sdks/python',import.meta.url).pathname},input:JSON.stringify({delivery:{envelope,keyId:key.id,connectionId:'connection',deliveryId:'delivery'},key,token:payload.token}),encoding:'utf8'});
+  const result=spawnSync('python3',['-c',program],{env:{...process.env,PYTHONPATH:new URL('../../sdks/python',import.meta.url).pathname},input:JSON.stringify({delivery:{envelope,keyId:key.id,connectionId:'connection',deliveryId:'delivery'},key,token:payload.token}),timeout:10000,encoding:'utf8'});
   assert.equal(result.status,0,result.stderr);assert.equal(result.stdout,'');
 });
 test('provider declarations expose only caller tools and never lifecycle authority', async () => {
