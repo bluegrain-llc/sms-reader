@@ -1,5 +1,28 @@
 # Verification record
 
+## Agent tickets and native iOS companion (2026-11-12)
+
+Implemented separate registration and recipient approvals, owner-provisioned portable tickets, private CLI/SDK import/export, browser and Android agent creation, and the iOS 17+ SwiftUI companion. Both backends support platform-specific device registration, bounded manual readiness, Google/Apple provider verification, generic APNs alerts through FCM and Apple domain associations.
+
+Executed locally with synthetic identities and data:
+
+| Check | Result |
+| --- | --- |
+| TypeScript production build and strict test-source type checking | Passed |
+| Server and CLI unit tests | **47 server, 10 CLI passed**, including Python/JavaScript ticket interoperability and interrupted storage |
+| Firestore/Auth/REST/MCP integration | **59 passed against each backend**, zero skipped |
+| Cross-runtime contracts | **93 passed**, including independent registration/pairing, provisioning conflicts/retries, rotation, account isolation, mixed Android/iOS submissions, repeated readiness, terminal manual deadlines and association routes |
+| Browser approval and ticket management | **12 passed**, including reload/retry and a failed private-storage write before provisioning |
+| Rust unit/model tests, formatting and Clippy | **58 passed**; formatting and Clippy with warnings denied passed |
+| Android unit tests, debug lint and instrumentation build | **41 unit tests passed**; lint and builds passed |
+| Selected Android instrumentation | **18 passed**, zero skipped, on an isolated API 36 emulator: onboarding, navigation and private ticket generation/storage, including interrupted AtomicFile replacement recovery |
+| Swift source and core models on Linux | All app/test Swift sources parsed with Swift 6.2.1; models typechecked; an executable probe passed routing, conditional wizard, date/choice validation, code validation and destination serialization checks |
+| Generated onboarding schemas and Rust compatibility pages | Regeneration reproduced the working-tree artifacts |
+
+The initial combined contract run had one HTTP timeout during racing cross-runtime approvals; all 93 contracts passed on a full rerun. An earlier integration run exposed an outdated test assumption about reusing an Android device during its platform listener window; the test now verifies rejection and uses another available device. The production listener-window guard and terminal iOS response parity have regression coverage.
+
+The Linux Swift checks do **not** establish an Xcode build or passing XCTest/simulator UI tests. The new macOS workflow is configured but was not executed here. Signed-device Universal Links, live Google/Apple authentication and linking/deletion, APNs, accessibility acceptance, distribution signing, privacy submissions and App Store review remain pending as documented in [iOS release gates](IOS.md). No backend deployment, signed mobile release, store submission or physical-device modification was performed for this change. The isolated Android emulator was shut down after verification.
+
 ## Repeatable cloud acceptance tooling
 
 The [staging acceptance runner and fault-drill procedure](CLOUD_ACCEPTANCE.md)

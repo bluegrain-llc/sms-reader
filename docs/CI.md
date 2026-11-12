@@ -15,6 +15,8 @@ The required jobs check:
 
 Each run retains Android test/lint reports, debug APKs and both tested relay container archives as private workflow artifacts. The Rust image is `relay-rust-container`, with `relay-rust-image.tar.gz` and its SHA-256 checksum; it carries the workflow commit revision label (`GITHUB_SHA`). On pull requests this is the temporary merge commit; deployment uses the successful `main`-push artifact and its matching commit. Failed backend integration runs also retain emulator logs. Debug APKs have no production configuration and show the setup screen.
 
+The separate [iOS companion workflow](../.github/workflows/ios.yml) runs on macOS 15. It generates the Xcode project with XcodeGen, resolves Firebase and Google Sign-In packages, then builds and runs unit and simulator UI tests without distribution signing. It retains the xcresult bundle. Tests cover public routing, ticket key binding, wizard validation, draft clearing, QR decoding and explicit manual submission using synthetic fixtures. Live provider authentication, APNs and signed-device Universal Links remain separate [iOS release gates](IOS.md).
+
 The `staging-callback-probe-container` artifact retains the tested callback image
 for seven days. It is separate from the production relay image and is deployed
 only in an explicitly selected staging project; see [cloud acceptance](CLOUD_ACCEPTANCE.md).

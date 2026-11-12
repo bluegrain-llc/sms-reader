@@ -26,3 +26,10 @@ server-rust/target/
 **/obj/
 test-results/
 playwright-report/
+
+# Generated native Apple project and private deployment configuration
+ios/*.xcodeproj/
+ios/RequestRelay/GoogleService-Info.plist
+ios/RequestRelay/Info.plist
+ios/RequestRelay/RequestRelay.entitlements
+*.xcresult/
