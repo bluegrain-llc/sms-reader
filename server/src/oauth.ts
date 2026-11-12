@@ -179,7 +179,9 @@ export class OAuth {
     return c;
   }
   async token(input: Record<string, string>) {
-    const access = secret('smsa'), refresh = secret('smsf'), familyId = randomUUID();
+    const refresh = input.grant_type === 'refresh_token' ? input.refresh_token ?? '' : secret('smsf');
+    // Derive the stable access credential from static client credentials, never a deployment key.
+    const access = `smsa_${createHmac('sha256', refresh).update(`relay-oauth-access-v1\n${input.client_secret ?? ''}`).digest('base64url')}`, familyId = randomUUID();
     const result = await this.relay.db.runTransaction(async tx => {
       const c = await this.client(tx, input);
       const codeFlow = input.grant_type === 'authorization_code';
@@ -196,27 +198,23 @@ export class OAuth {
         family = (await tx.get(this.ref('oauthFamilies', record.familyId))).data() as Family;
         ensure(family && !family.revoked && family.expiresAt > this.relay.now(), 400, 'invalid_grant');
       }
-      if (record.consumed) {
-        if (record.familyId) { tx.update(this.ref('oauthFamilies', record.familyId), { revoked: true }); tx.set(this.ref('oauthCleanup', record.familyId), {familyId:record.familyId,ownerId:record.ownerId,serviceId:record.serviceId,collectionIndex:0}); }
-        return { replay: true as const };
-      }
+      ensure(!record.consumed, 400, 'invalid_grant');
       ensure(record.expiresAt > this.relay.now(), 400, 'invalid_grant');
       const g = (await tx.get(this.ref('grants', family.grantId))).data() as Grant | undefined;
       ensure(g && await this.relay.validGrant(tx, g), 400, 'invalid_grant'); await this.relay.account(tx, g.ownerId);
       const selected = input.scope === undefined ? family.capabilities : capabilitiesSchema.parse(input.scope.split(' '));
       ensure(selected.every(cap => family.capabilities.includes(cap) && g.capabilities?.includes(cap)), 400, 'invalid_scope');
-      family.capabilities = selected; family.expiresAt = g.expiresAt;
-      const accessExpiry = Math.min(g.expiresAt, this.relay.now() + 10 * MINUTE);
-      tx.update(ref, { consumed: true, familyId: family.id });
-      tx.set(this.ref('oauthFamilies', family.id), { ...family, purgeAt: family.expiresAt === FOREVER ? null : new Date(family.expiresAt + HISTORY) });
-      tx.create(this.ref('oauthAccess', hash(access)), { ownerId: g.ownerId, serviceId: g.serviceId, grantId: g.id, clientId: c.id,
-        familyId: family.id, resource: family.resource, capabilities: selected, expiresAt: accessExpiry, purgeAt: new Date(accessExpiry) });
+      family.capabilities = selected; family.expiresAt = FOREVER;
+      if (codeFlow) tx.update(ref, { consumed: true, familyId: family.id });
+      tx.set(this.ref('oauthFamilies', family.id), { ...family, purgeAt: null });
+      tx.set(this.ref('oauthAccess', hash(access)), { ownerId: g.ownerId, serviceId: g.serviceId, grantId: g.id, clientId: c.id,
+        familyId: family.id, resource: family.resource, capabilities: selected, expiresAt: FOREVER, purgeAt: null });
       tx.update(this.ref('oauthClients', hash(c.id)), { purgeAt: null });
-      if (c.grant_types.includes('refresh_token')) tx.create(this.ref('oauthRefresh', hash(refresh)), { ownerId: g.ownerId, serviceId: g.serviceId, clientId: c.id, resource: family.resource,
-        familyId: family.id, expiresAt: family.expiresAt, consumed: false, purgeAt: family.expiresAt === FOREVER ? null : new Date(family.expiresAt + HISTORY) });
-      return { replay: false as const, access_token: access, token_type: 'Bearer', expires_in: Math.floor((accessExpiry - this.relay.now()) / 1000), ...(c.grant_types.includes('refresh_token') ? { refresh_token: refresh } : {}), scope: selected.join(' ') };
+      if (c.grant_types.includes('refresh_token')) tx.set(this.ref('oauthRefresh', hash(refresh)), { ownerId: g.ownerId, serviceId: g.serviceId, clientId: c.id, resource: family.resource,
+        familyId: family.id, expiresAt: FOREVER, consumed: false, purgeAt: null });
+      return { access_token: access, token_type: 'Bearer', ...(c.grant_types.includes('refresh_token') ? { refresh_token: refresh } : {}), scope: selected.join(' ') };
     });
-    ensure(!result.replay, 400, 'invalid_grant'); const { replay: _, ...response } = result; return response;
+    return result;
   }
   async revoke(input: Record<string, string>) {
     await this.relay.db.runTransaction(async tx => {

@@ -231,10 +231,10 @@ test('all SDK broker bindings share durable registration, approval and credentia
 });
 
 const callback = 'https://8.8.8.8/relay-callback?state=old&state=older&code=stale&error=stale&keep=opaque'; // Validation only; tests never navigate or send to this address.
-async function oauthFlow(runtime: number, confidential = false) {
+async function oauthFlow(runtime: number, confidential = false, refresh = true) {
   time += 11 * MINUTE;
   const s = await register(runtime, false, ['forms', 'sms']);
-  const client = await call(runtime, '/oauth/register', '', { client_name: 'Hosted client', redirect_uris: [callback], token_endpoint_auth_method: confidential ? 'client_secret_post' : 'none' }, 'POST', 201);
+  const client = await call(runtime, '/oauth/register', '', { client_name: 'Hosted client', redirect_uris: [callback], token_endpoint_auth_method: confidential ? 'client_secret_post' : 'none', grant_types: refresh ? ['authorization_code','refresh_token'] : ['authorization_code'] }, 'POST', 201);
   const verifier = randomBytes(32).toString('base64url');
   const params = { response_type: 'code', client_id: client.client_id, redirect_uri: callback,
     resource: `https://relay.example/mcp/services/${s.session.serviceId}`, scope: 'forms sms', state: 'opaque-state',
@@ -261,8 +261,8 @@ async function formCall(runtime: number, endpoint: string, fields: Record<string
   const response = await contractFetch(bases[runtime] + endpoint, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams(fields) });
   const value = await response.json();assert.equal(response.status, expected, JSON.stringify(value));return value;
 }
-async function approvedOAuth(f: Awaited<ReturnType<typeof oauthFlow>>, runtime: number, recipientUid = recipient) {
-  const fields = { decision: 'approved', capabilities: ['forms'], expiresInDays: null };
+async function approvedOAuth(f: Awaited<ReturnType<typeof oauthFlow>>, runtime: number, recipientUid = recipient, capabilities = ['forms']) {
+  const fields = { decision: 'approved', capabilities, expiresInDays: null };
   const result = await call(runtime, `/v3/oauth/sessions/${f.sessionId}/decision`, owner(recipientUid), fields);
   assert.equal(result.status,'approved');assert.ok(result.connectionId);
   const pending=(await db.collection('oauthSessions').doc(f.sessionId).get()).data()!;
@@ -292,10 +292,9 @@ for (const runtime of [0,1]) test(`runtime ${runtime}: unconfigured revisions re
   } finally {server.closeAllConnections();await new Promise<void>(resolve=>server.close(()=>resolve()));native.options=options;}
 });
 
-const providerProfiles: {name:string;provider:string;redirectUri:string;metadataId?:string;blocked?:string;source:string}[]=JSON.parse(readFileSync(new URL('../../contracts/provider-authorization.json',import.meta.url),'utf8'));
+const providerProfiles: {name:string;provider:string;redirectUri:string;metadataId?:string;source:string}[]=JSON.parse(readFileSync(new URL('../../contracts/provider-authorization.json',import.meta.url),'utf8'));
 for(const runtime of [0,1])for(const profile of providerProfiles){
   const name=`provider authorization ${profile.name} runtime ${runtime}`;
-  if(profile.blocked){test.todo(name+': '+profile.blocked);continue;}
   test(name,{timeout:60000},async()=>{
     const providerRecipient='provider-'+randomUUID();
     time+=11*MINUTE;const s=await register(runtime,false,['forms','sms']),resource=`https://relay.example/mcp/services/${s.session.serviceId}`;
@@ -324,7 +323,7 @@ for(const runtime of [0,1])for(const profile of providerProfiles){
     const exchange={grant_type:'authorization_code',client_id:client.client_id,redirect_uri:profile.redirectUri,resource,code:redirect.searchParams.get('code')!,code_verifier:verifier};
     await formCall(runtime,'/oauth/token',{...exchange,code_verifier:randomBytes(32).toString('base64url')},400);
     const tokens=await formCall(1-runtime,'/oauth/token',exchange);assert.equal(tokens.scope,'forms');assert.equal(tokens.token_type,'Bearer');assert.ok(tokens.refresh_token);
-    const config=hostedProviderConfig(profile.provider,{resource,accessToken:tokens.access_token});
+    const config=profile.provider==='google'?{authorization:tokens.access_token}:hostedProviderConfig(profile.provider,{resource,accessToken:tokens.access_token});
     const softwareToken='authorization' in config?config.authorization:config.mcp_servers[0]!.authorization_token;
     assert.ok(typeof softwareToken==='string');
     const tools=await call(runtime,endpoint,softwareToken,{jsonrpc:'2.0',id:'provider-list',method:'tools/list'});
@@ -340,14 +339,14 @@ for(const runtime of [0,1])for(const profile of providerProfiles){
       const result=await call(runtime,endpoint,'',{jsonrpc:'2.0',id:'linking',method:'tools/call',params:{name:'inspect_request',arguments:{requestId:'opaque-request'}}});
       assert.equal(result.result.isError,true);assert.ok(result.result._meta['mcp/www_authenticate'][0].includes('error_description='));assert.ok(result.result._meta['mcp/www_authenticate'][0].includes('resource_metadata='));
       time+=10*MINUTE+1;
-      const expired=await call(runtime,endpoint,tokens.access_token,{jsonrpc:'2.0',id:'expired',method:'tools/call',params:{name:'inspect_request',arguments:{requestId}}});
-      assert.equal(expired.result.isError,true);assert.ok(expired.result._meta['mcp/www_authenticate'][0].includes('error="invalid_token"'));
+      const durable=await call(runtime,endpoint,tokens.access_token,{jsonrpc:'2.0',id:'durable',method:'tools/call',params:{name:'inspect_request',arguments:{requestId}}});
+      assert.equal(durable.result.structuredContent.requestId,requestId);
     }
     if(profile.name.includes('Messages')){
-      assert.ok(config.mcp_servers);
+      assert.ok('mcp_servers' in config && config.mcp_servers);
       assert.equal(config.mcp_servers[0]!.authorization_token,tokens.access_token);assert.ok(!JSON.stringify(config.tools).includes(tokens.access_token));
     }
-    const refreshed=await formCall(runtime,'/oauth/token',{grant_type:'refresh_token',client_id:client.client_id,refresh_token:tokens.refresh_token,resource});assert.notEqual(refreshed.refresh_token,tokens.refresh_token);
+    const refreshed=await formCall(runtime,'/oauth/token',{grant_type:'refresh_token',client_id:client.client_id,refresh_token:tokens.refresh_token,resource});assert.equal(refreshed.refresh_token,tokens.refresh_token);assert.equal(refreshed.access_token,tokens.access_token);assert.equal(refreshed.expires_in,undefined);
     await formCall(1-runtime,'/oauth/revoke',{client_id:client.client_id,token:refreshed.refresh_token});
     await call(runtime,endpoint,refreshed.access_token,{jsonrpc:'2.0',id:'revoked',method:'tools/list'},'POST',401);
   });
@@ -368,7 +367,7 @@ for (const runtime of [0, 1]) {
     await formCall(runtime,'/oauth/token',{...exchange,resource:'https://relay.example/mcp'},400);
     await formCall(runtime,'/oauth/token',{...exchange,client_secret:'wrong'},401);
     const tokens = await formCall(runtime,'/oauth/token',exchange);
-    assert.equal(tokens.scope,'forms');assert.equal(tokens.expires_in,600);
+    assert.equal(tokens.scope,'forms');assert.equal(tokens.expires_in,undefined);
     assert.ok(!JSON.stringify(tokens).includes(recipient));
     const tools = await oauthTools(1-runtime,f,tokens.access_token);assert.equal(tools.result.tools.length,5);
     assert.ok(tools.result.tools.every((t: {name:string})=>!t.name.includes('sms')));
@@ -377,18 +376,48 @@ for (const runtime of [0, 1]) {
     await call(runtime,'/mcp/services/another',tokens.access_token,{jsonrpc:'2.0',id:1,method:'tools/list'},'POST',401);
     await oauthTools(runtime,f,f.s.credential,401);
     await call(runtime,`/v3/oauth/sessions/${f.sessionId}`,owner('different-recipient'),undefined,'GET',404);
-    await formCall(1-runtime,'/oauth/token',exchange,400); // Authorization code replay revokes its token family.
-    await oauthTools(runtime,f,tokens.access_token,401);
+    await formCall(1-runtime,'/oauth/token',exchange,400); // One-time authorization code replay cannot revoke a static connection.
+    await oauthTools(runtime,f,tokens.access_token);
   });
-  test(`runtime ${runtime}: refresh rotates, rejects expansion and replay invalidates the whole family`, async () => {
-    const f = await oauthFlow(runtime), exchange = await approvedOAuth(f,runtime), tokens = await formCall(1-runtime,'/oauth/token',exchange);
-    time += 10*MINUTE+1;await oauthTools(runtime,f,tokens.access_token,401);
-    const renewal = {grant_type:'refresh_token',refresh_token:tokens.refresh_token,client_id:f.client.client_id,resource:f.params.resource};
+  test(`runtime ${runtime}: static OAuth credentials survive time, retries and concurrent refresh until explicit revocation`, async () => {
+    const f = await oauthFlow(runtime,true), exchange = await approvedOAuth(f,runtime), tokens = await formCall(1-runtime,'/oauth/token',exchange);
+    assert.equal(tokens.expires_in,undefined);
+    time += 400*24*60*MINUTE;
+    await relay.onboarding.cleanup();await native.call('onboarding.cleanup',[]);
+    await oauthTools(runtime,f,tokens.access_token);
+    const renewal = {grant_type:'refresh_token',refresh_token:tokens.refresh_token,client_id:f.client.client_id,client_secret:f.client.client_secret,resource:f.params.resource};
+    await formCall(runtime,'/oauth/token',{...renewal,client_secret:'wrong'},401);
     await formCall(runtime,'/oauth/token',{...renewal,scope:'forms sms'},400);
-    const rotated = await formCall(runtime,'/oauth/token',renewal);assert.notEqual(rotated.refresh_token,tokens.refresh_token);
-    assert.equal((await oauthTools(1-runtime,f,rotated.access_token)).result.tools.length,5);
-    await formCall(1-runtime,'/oauth/token',renewal,400);
-    await oauthTools(runtime,f,rotated.access_token,401);
+    await formCall(runtime,'/oauth/token',{...renewal,resource:'https://relay.example/mcp/services/wrong'},400);
+    for(const refreshed of await Promise.all([0,1,0,1].map(r=>formCall(r,'/oauth/token',renewal))))assert.deepEqual(refreshed,tokens);
+    const records=await db.collection('oauthAccess').where('serviceId','==',f.s.session.serviceId).get();assert.equal(records.size,1);
+    const refreshRecords=await db.collection('oauthRefresh').where('serviceId','==',f.s.session.serviceId).get();assert.equal(refreshRecords.size,1);
+    for(const record of [...records.docs,...refreshRecords.docs]){
+      assert.equal(record.data().purgeAt,null);
+      assert.ok(!JSON.stringify(record.data()).includes(tokens.access_token));assert.ok(!JSON.stringify(record.data()).includes(tokens.refresh_token));
+    }
+    await oauthTools(1-runtime,f,tokens.access_token);
+    await formCall(1-runtime,'/oauth/revoke',{client_id:f.client.client_id,client_secret:f.client.client_secret,token:tokens.access_token});
+    await oauthTools(runtime,f,tokens.access_token,401);await formCall(runtime,'/oauth/token',renewal,400);
+  });
+  test(`runtime ${runtime}: static refresh narrows permissions without changing either credential`, async () => {
+    const f=await oauthFlow(runtime),exchange=await approvedOAuth(f,runtime,recipient,['forms','sms']),tokens=await formCall(runtime,'/oauth/token',exchange);
+    assert.equal((await oauthTools(runtime,f,tokens.access_token)).result.tools.length,8);
+    const renewal={grant_type:'refresh_token',refresh_token:tokens.refresh_token,client_id:f.client.client_id,resource:f.params.resource};
+    const updated=await formCall(1-runtime,'/oauth/token',{...renewal,scope:'forms'});
+    assert.equal(updated.access_token,tokens.access_token);assert.equal(updated.refresh_token,tokens.refresh_token);
+    assert.deepEqual(await formCall(runtime,'/oauth/token',renewal),updated);
+    assert.equal((await oauthTools(1-runtime,f,tokens.access_token)).result.tools.length,5);
+    await formCall(runtime,'/oauth/token',{...renewal,scope:'forms sms'},400);
+  });
+  test(`runtime ${runtime}: an access-only OAuth client needs no refresh to retain access`, async () => {
+    const f=await oauthFlow(runtime,false,false),exchange=await approvedOAuth(f,runtime),tokens=await formCall(1-runtime,'/oauth/token',exchange);
+    assert.equal(tokens.refresh_token,undefined);assert.equal(tokens.expires_in,undefined);
+    time+=400*24*60*MINUTE;
+    await relay.onboarding.cleanup();await native.call('onboarding.cleanup',[]);
+    await oauthTools(1-runtime,f,tokens.access_token);
+    await formCall(runtime,'/oauth/revoke',{client_id:f.client.client_id,token:tokens.access_token});
+    await oauthTools(1-runtime,f,tokens.access_token,401);
   });
   test(`runtime ${runtime}: hosted grants need no online service and disconnect/revocation are immediate`, async () => {
     const f=await oauthFlow(runtime),exchange=await approvedOAuth(f,runtime),tokens=await formCall(runtime,'/oauth/token',exchange);

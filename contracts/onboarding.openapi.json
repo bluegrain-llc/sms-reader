@@ -4134,14 +4134,14 @@
                 "additionalProperties": {
                   "type": "string"
                 },
-                "description": "Public clients send client_id. Confidential clients also send client_secret. Token exchange requires the exact resource and PKCE verifier; refresh requires the current rotating refresh token. Revocation accepts token."
+                "description": "Public clients send client_id. Confidential clients also send client_secret. Token exchange requires the exact resource and PKCE verifier; refresh accepts the same static refresh credential on every call. Revocation accepts token."
               }
             }
           }
         },
         "responses": {
           "200": {
-            "description": "Resource/client/connection-bound access token; rotating refresh token when registered."
+            "description": "Static resource/client/connection-bound access token without automatic expiry or expires_in; static refresh credential when registered. Repeated refresh returns the same credentials."
           },
           "400": {
             "description": "Invalid OAuth request or grant"
@@ -4165,7 +4165,7 @@
                 "additionalProperties": {
                   "type": "string"
                 },
-                "description": "Public clients send client_id. Confidential clients also send client_secret. Token exchange requires the exact resource and PKCE verifier; refresh requires the current rotating refresh token. Revocation accepts token."
+                "description": "Public clients send client_id. Confidential clients also send client_secret. Token exchange requires the exact resource and PKCE verifier; refresh accepts the same static refresh credential on every call. Revocation accepts token."
               }
             }
           }
