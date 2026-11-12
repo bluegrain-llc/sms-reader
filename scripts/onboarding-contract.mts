@@ -20,6 +20,8 @@ const methods: [string,string,string,string,string?][] = [
  ['get','/v3/registration-sessions/{id}','reviewRegistration','OwnerSession'],
  ['post','/v3/registration-sessions/{id}/decision','decideRegistration','OwnerSession','RegistrationDecision'],
  ['get','/v3/services','listServices','OwnerSession'],
+ ['post','/v3/services','provisionService','OwnerSession','ServiceRegistration'],
+ ['get','/v3/service','validateTicket','ServiceCredential'],
  ['get','/v3/services/{id}','getService','OwnerSession'],
  ['patch','/v3/services/{id}','manageService','OwnerSession','ServiceUpdate'],
  ['delete','/v3/services/{id}','deleteService','OwnerSession'],
@@ -51,7 +53,7 @@ const methods: [string,string,string,string,string?][] = [
 const schemaRef = (name: string) => ({ $ref: `#/components/schemas/${name}` });
 const paths: Record<string,Record<string,unknown>> = {};
 for (const [verb,path,name,auth,body] of methods) {
-  const parameters: unknown[] = path.includes('{id}') ? [{ name: 'id', in: 'path', required: true, schema: { type:'string', pattern:'^[a-zA-Z0-9_-]{1,128}$' } }] : [];
+  const parameters: unknown[] = [...path.matchAll(/\{([^}]+)\}/g)].map(match => ({ name: match[1], in: 'path', required: true, schema: { type:'string', pattern:'^[a-zA-Z0-9_-]{1,128}$' } }));
   if (name === 'pollEvents') parameters.push({ name:'cursor',in:'query',required:false,schema:{type:'string',maxLength:128} });
   (paths[path] ??= {})[verb] = { operationId: name, security:[{[auth]:[]}], parameters,
     ...(body ? { requestBody: { required:true,content:{'application/json':{schema:schemaRef(body)}} } } : {}),

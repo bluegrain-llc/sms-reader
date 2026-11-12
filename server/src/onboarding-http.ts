@@ -8,6 +8,8 @@ export function mountOnboarding(app: Express, o: Onboarding, owner: (r: Request)
   app.get('/v3/registration-sessions/:id', async (r, s) => { s.json(await o.registrationReview((await owner(r)).uid, id(r))); });
   app.post('/v3/registration-sessions/:id/decision', async (r, s) => { s.json(await o.registrationDecide((await owner(r)).uid, id(r), r.body)); });
   app.get('/v3/services', async (r, s) => { s.json(await o.listServices((await owner(r)).uid)); });
+  app.post('/v3/services', async (r, s) => { s.status(201).json(await o.provision((await owner(r)).uid, r.body)); });
+  app.get('/v3/service', async (r, s) => { s.json(await o.ticketService(bearer(r))); });
   app.get('/v3/services/:id', async (r, s) => { await owner(r); s.json(await o.publicService(id(r))); });
   app.patch('/v3/services/:id', async (r, s) => { s.json(await o.manageService((await owner(r)).uid, null, id(r), r.body)); });
   app.delete('/v3/services/:id', async (r, s) => { s.json(await o.manageService((await owner(r)).uid, null, id(r), { delete: true })); });

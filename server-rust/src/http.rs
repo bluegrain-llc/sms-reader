@@ -943,6 +943,13 @@ async fn route(s: App, request: Request) -> Result<Response> {
                     check_id(id)?,
                     false,
                 ),
+                ("POST", ["services"]) => (
+                    "provision",
+                    s.owner(&headers, false, false).await?.uid,
+                    String::new(),
+                    true,
+                ),
+                ("GET", ["service"]) => ("ticketService", bearer(&headers)?, String::new(), false),
                 ("GET", ["services"]) => (
                     "listServices",
                     s.owner(&headers, true, false).await?.uid,
