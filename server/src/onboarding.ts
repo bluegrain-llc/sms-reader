@@ -18,7 +18,7 @@ export const pairingSchema = z.object({ capabilities: capabilitiesSchema, expire
   externalAccountRef: z.string().regex(/^[A-Za-z0-9_-]{16,128}$/).optional(), idempotencyKey: z.string().min(16).max(128) }).strict();
 export const decisionSchema = z.object({ decision: z.enum(['approved', 'denied']), capabilities: capabilitiesSchema,
   expiresInDays: z.number().int().min(1).max(365).nullable() }).strict();
-export const registrationDecisionSchema = z.object({ decision: z.enum(['approved', 'denied']), selfAccess: z.boolean(),
+export const registrationDecisionSchema = z.object({ decision: z.enum(['approved', 'denied']), selfAccess: z.literal(false).optional(),
   capabilities: capabilitiesSchema, expiresInDays: z.number().int().min(1).max(365).nullable() }).strict();
 type Capability = 'forms' | 'sms';
 type PublicKey = z.infer<typeof publicKeySchema>;
@@ -62,7 +62,34 @@ export class Onboarding {
     ensure(s.credentialHash === credential, 401, 'invalid_service_credential'); return s;
   }
   serviceView(s: Service) { return { serviceId: s.id, name: s.name, purpose: s.purpose, capabilities: s.capabilities,
-    active: s.active && !s.deleted, nameIsOperatorSupplied: true, servicePath: `/services/${s.id}` }; }
+    active: s.active && !s.deleted, deliveryKeyId: s.deliveryKeyId, nameIsOperatorSupplied: true, servicePath: `/services/${s.id}` }; }
+  async ticketService(token: string) {
+    return this.db.runTransaction(async tx => this.serviceView(await this.service(tx, token)));
+  }
+  async provision(uid: string, raw: unknown) {
+    const input = serviceSchema.parse(raw); await validateKey(input.deliveryPublicKey);
+    return this.db.runTransaction(async tx => {
+      await this.relay.account(tx, uid);
+      const ref = this.ref('serviceCredentials', input.credentialHash), receipt = (await tx.get(ref)).data();
+      if (receipt) {
+        const s = (await tx.get(this.ref('services', receipt.serviceId))).data() as Service | undefined;
+        ensure(s && s.ownerId === uid && !s.deleted && s.credentialHash === input.credentialHash &&
+          s.name === input.name && s.purpose === input.purpose && s.deliveryKeyId === keyId(input.deliveryPublicKey) &&
+          JSON.stringify(sorted(s.capabilities)) === JSON.stringify(sorted(input.capabilities)), 409, 'idempotency_conflict');
+        return this.serviceView(s);
+      }
+      const owned = await tx.get(this.db.collection('services').where('ownerId', '==', uid).where('deleted', '==', false).limit(100));
+      ensure(owned.size < 100, 409, 'service_limit_reached');
+      const s: Service = { id: randomUUID(), ownerId: uid, name: input.name, purpose: input.purpose,
+        capabilities: input.capabilities, credentialHash: input.credentialHash, deliveryKeyId: keyId(input.deliveryPublicKey),
+        active: true, deleted: false, createdAt: this.now() };
+      tx.create(this.ref('services', s.id), s);
+      tx.create(ref, { serviceId: s.id, ownerId: uid });
+      tx.create(this.ref('serviceDeliveryKeys', `${s.id}_${s.deliveryKeyId}`), {
+        id: s.deliveryKeyId, serviceId: s.id, ownerId: uid, publicKey: input.deliveryPublicKey, retired: false } satisfies Key);
+      return this.serviceView(s);
+    });
+  }
   async publicService(id: string) {
     return this.db.runTransaction(async tx => this.serviceView(await this.activeService(tx, id)));
   }
@@ -152,21 +179,20 @@ export class Onboarding {
       if (r.status !== 'pending') return this.registrationView(r);
       ensure(r.expiresAt > this.now(), 410, 'session_expired'); this.select(r.capabilities, input.capabilities, null, input.expiresInDays);
       if (input.decision === 'approved') {
+        const credential = (await tx.get(this.ref('serviceCredentials', r.credentialHash))).data();
+        ensure(!credential, 409, 'credential_already_used');
         const owned = await tx.get(this.db.collection('services').where('ownerId', '==', uid).where('deleted', '==', false).limit(100));
         ensure(owned.size < 100, 409, 'service_limit_reached');
       }
       const s: Service = { id: r.serviceId, ownerId: uid, name: r.name, purpose: r.purpose, capabilities: r.capabilities,
         active: true, deleted: false, credentialHash: r.credentialHash, deliveryKeyId: keyId(r.deliveryPublicKey), createdAt: this.now() };
-      const grant = input.decision === 'approved' && input.selfAccess
-        ? await this.prepareGrant(tx, uid, s, r.deliveryPublicKey, input.capabilities, input.expiresInDays, null) : undefined;
       if (input.decision === 'approved') {
         tx.create(this.ref('services', s.id), s);
         tx.create(this.ref('serviceCredentials', s.credentialHash), { serviceId: s.id, ownerId: uid,
-          registrationId: r.id, registrationKeyId: s.deliveryKeyId, registrationConnectionId: grant?.connectionId ?? null });
+          registrationId: r.id, registrationKeyId: s.deliveryKeyId, registrationConnectionId: null });
         tx.create(this.ref('serviceDeliveryKeys', `${s.id}_${s.deliveryKeyId}`), { id: s.deliveryKeyId, serviceId: s.id, ownerId: uid, publicKey: r.deliveryPublicKey, retired: false } satisfies Key);
-        grant?.commit();
       }
-      r.status = input.decision; r.ownerId = uid; r.connectionId = grant?.connectionId ?? null;
+      r.status = input.decision; r.ownerId = uid; r.connectionId = null;
       tx.set(ref, r); return this.registrationView(r);
     });
   }
