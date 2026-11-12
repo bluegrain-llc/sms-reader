@@ -40,3 +40,9 @@ test('Admin reference accepts future owner iat/auth_time while enforcing signed-
   segments[1] = Buffer.from(JSON.stringify({ ...claims, sub: 'tampered-owner' })).toString('base64url');
   await assert.rejects(verifier.verifyJWT(segments.join('.')));
 });
+
+test('owner policy permits Google and Apple while preserving UID and rejecting other Firebase providers',async()=>{
+  const {ownerIdentity}=await import('../src/owner-identity.js');
+  for(const provider of ['google.com','apple.com']) assert.deepEqual(ownerIdentity({uid:'same-firebase-uid',auth_time:123,firebase:{sign_in_provider:provider}}),{uid:'same-firebase-uid',authTime:123});
+  for(const provider of ['password','anonymous','custom','phone','']) assert.throws(()=>ownerIdentity({uid:'same-firebase-uid',auth_time:123,firebase:{sign_in_provider:provider}}),/supported_sign_in_required/);
+});

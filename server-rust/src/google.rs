@@ -207,9 +207,10 @@ impl Google {
             "invalid_owner_session",
         )?;
         ensure(
-            claims["firebase"]["sign_in_provider"] == "google.com",
+            claims["firebase"]["sign_in_provider"] == "google.com"
+                || claims["firebase"]["sign_in_provider"] == "apple.com",
             401,
-            "google_sign_in_required",
+            "supported_sign_in_required",
         )?;
         Ok(uid)
     }
@@ -395,6 +396,26 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+    #[tokio::test]
+    async fn owner_provider_allowlist_accepts_apple_and_rejects_other_firebase_providers() {
+        let google = verifier().await;
+        for provider in [
+            "google.com",
+            "apple.com",
+            "password",
+            "anonymous",
+            "custom",
+            "phone",
+        ] {
+            let mut c = claims();
+            c["firebase"]["sign_in_provider"] = json!(provider);
+            let verified = google.jwt(&signed(&c, "test-key"), false).await.unwrap();
+            assert_eq!(
+                google.owner_claims(&verified).is_ok(),
+                provider == "google.com" || provider == "apple.com"
+            );
+        }
     }
     #[tokio::test]
     async fn signed_owner_tokens_match_admin_clock_boundaries_without_expiry_leeway() {

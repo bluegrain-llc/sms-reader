@@ -107,6 +107,7 @@ class RelayRepository(private val context: Context) {
         return JSONObject(call("POST", "/v1/devices/$deviceId/requests/$id/events", b))
     }
     suspend fun unregister(id: String = deviceId) { call("DELETE", "/v1/devices/$id"); if (id == deviceId) { reset(); autoConnect = false } }
+    fun signOut() { auth.signOut(); reset() }
     suspend fun deleteAccount() { call("DELETE", "/v1/account"); AgentTicket(context, ownerId).clearForDeletedAccount(); auth.signOut(); reset() }
     private fun reset() {
         val previousListenerDeadline = listenerUntil

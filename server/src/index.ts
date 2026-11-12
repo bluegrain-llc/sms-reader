@@ -3,6 +3,7 @@ import { getAuth } from 'firebase-admin/auth';
 import { getFirestore } from 'firebase-admin/firestore';
 import { getMessaging } from 'firebase-admin/messaging';
 import { OAuth2Client } from 'google-auth-library';
+import { ownerIdentity } from './owner-identity.js';
 import { app } from './http.js';
 import { taskWakeup } from './tasks.js';
 import { Relay } from './relay.js';
@@ -21,8 +22,7 @@ const server = app(relay, {
   assertServing: () => gate.assertServing(),
   verifyOwner: async token => {
     const identity = await auth.verifyIdToken(token, true);
-    ensure(identity.firebase.sign_in_provider === 'google.com', 401, 'google_sign_in_required');
-    return { uid: identity.uid, authTime: identity.auth_time };
+    return ownerIdentity(identity);
   },
   deleteIdentity: uid => auth.deleteUser(uid),
   verifyScheduler: async token => {

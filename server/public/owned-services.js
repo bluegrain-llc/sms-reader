@@ -1,6 +1,6 @@
 import { createTicket, declaration, retained, downloadTicket } from '/ticket-browser.js';
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/13.2.0/firebase-app.js';
-import { getAuth, signOut, GoogleAuthProvider, signInWithPopup, getRedirectResult, signInWithRedirect, onAuthStateChanged, setPersistence, browserLocalPersistence } from 'https://www.gstatic.com/firebasejs/13.2.0/firebase-auth.js';
+import { getAuth, signOut, GoogleAuthProvider, OAuthProvider, linkWithPopup, signInWithPopup, getRedirectResult, signInWithRedirect, onAuthStateChanged, setPersistence, browserLocalPersistence } from 'https://www.gstatic.com/firebasejs/13.2.0/firebase-auth.js';
 const $ = id => document.getElementById(id);
 let auth, busy = false, services = [], pendingTicket, ownerRevision=0, loadRevision=0;
 const owner = () => ({user:auth.currentUser,revision:ownerRevision});
@@ -40,7 +40,7 @@ async function render() {
 }
 async function load() {
   const scope=owner(), revision=++loadRevision;if(!scope.user)return;
-  $('signin').hidden=true;$('signout').hidden=false;$('identity').textContent=`Signed in as ${scope.user.email || 'your account'}`;
+  $('signin').hidden=true;$('signin-apple').hidden=true;$('signout').hidden=false;$('identity').textContent=`Signed in as ${scope.user.email || 'your account'}`;
   let storageUnavailable=false, ticket;
   try { ticket=await retained(scope.user.uid); } catch { storageUnavailable=true; }
   if(!currentOwner(scope)||revision!==loadRevision)return;
@@ -77,8 +77,14 @@ else {
   auth=getAuth(initializeApp(window.relayWebConfig));await setPersistence(auth,browserLocalPersistence);
   async function signIn(provider) { try { await signInWithPopup(auth, provider); } catch (e) { if (e.code === 'auth/popup-blocked') await signInWithRedirect(auth, provider); else throw e; } }
   $('signin').onclick=()=>run(()=>signIn(new GoogleAuthProvider()));
+  $('signin-apple').onclick=()=>run(()=>signIn(new OAuthProvider('apple.com')));
   await getRedirectResult(auth).catch(()=>status('Could not sign in. Try again.'));
-  onAuthStateChanged(auth,user=>{ownerRevision++;loadRevision++;pendingTicket=undefined;services=[];$('ticket-state').hidden=true;$('create-form').hidden=true;if(user)void load().catch(e=>{status(e.message);$('retry').hidden=false;});else{pendingTicket=undefined;services=[];$('list').hidden=true;$('detail').hidden=true;$('identity').textContent='';$('signin').hidden=false;$('signout').hidden=true;status('Sign in to manage the services you own.');}});
+  onAuthStateChanged(auth,user=>{ownerRevision++;loadRevision++;pendingTicket=undefined;services=[];$('ticket-state').hidden=true;$('create-form').hidden=true;if(user)void load().catch(e=>{status(e.message);$('retry').hidden=false;});else{pendingTicket=undefined;services=[];$('list').hidden=true;$('detail').hidden=true;$('identity').textContent='';$('signin').hidden=false;$('signin-apple').hidden=false;$('signout').hidden=true;status('Sign in to manage the services you own.');}});
 }
+
+for (const [id, provider] of [['link-google',new GoogleAuthProvider()],['link-apple',new OAuthProvider('apple.com')]]) $(id).onclick=()=>run(async()=>{
+  if(!auth.currentUser || !confirm('Link this provider to your current account? This requires your consent and preserves your relay account. Existing accounts are never merged by email.'))return;
+  const uid=auth.currentUser.uid;const result=await linkWithPopup(auth.currentUser,provider);if(result.user.uid!==uid)throw Error('Account changed.');status('Sign-in provider linked to your existing account.');
+});
 
 $('signout').onclick=()=>run(()=>signOut(auth));
