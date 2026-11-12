@@ -67,6 +67,12 @@ async fn run() -> Result<(), StartupFailure> {
             serving: Some(gate.clone()),
             auth: google,
             public_url: std::env::var("SERVICE_URL").ok(),
+            apple_app_ids: std::env::var("APPLE_APP_IDS")
+                .unwrap_or_default()
+                .split(',')
+                .filter(|v| !v.is_empty())
+                .map(str::to_owned)
+                .collect(),
             android_cert: std::env::var("ANDROID_SIGNING_SHA256").ok(),
             android_certs: json_option("ANDROID_SIGNING_SHA256S")?,
             firebase_web_config: json_option("FIREBASE_WEB_CONFIG")?,

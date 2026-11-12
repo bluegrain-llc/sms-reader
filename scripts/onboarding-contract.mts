@@ -4,14 +4,16 @@ import { z } from 'zod';
 import { FOREVER, capabilitiesSchema, publicKeySchema, serviceSchema, pairingSchema, decisionSchema, registrationDecisionSchema } from '../server/src/onboarding.js';
 import { authorizationSchema, clientSchema, oauthDecisionSchema } from '../server/src/oauth.js';
 import { formSchema } from '../server/src/forms-model.js';
-import { requestSchema } from '../server/src/model.js';
-const schemas = Object.fromEntries(Object.entries({ OAuthAuthorization: authorizationSchema, OAuthClient: clientSchema, OAuthDecision: oauthDecisionSchema, Capabilities: capabilitiesSchema, DeliveryPublicKey: publicKeySchema, ServiceRegistration: serviceSchema,
+import { requestSchema, deviceRegistrationSchema, smsEventSchema } from '../server/src/model.js';
+const schemas = Object.fromEntries(Object.entries({ DeviceRegistration: deviceRegistrationSchema, SmsDeviceEvent: smsEventSchema, OAuthAuthorization: authorizationSchema, OAuthClient: clientSchema, OAuthDecision: oauthDecisionSchema, Capabilities: capabilitiesSchema, DeliveryPublicKey: publicKeySchema, ServiceRegistration: serviceSchema,
   Pairing: pairingSchema, PairingDecision: decisionSchema, RegistrationDecision: registrationDecisionSchema, FormRequest: formSchema, SmsRequest: requestSchema }).map(([key,s]) => [key,z.toJSONSchema(s, { io: 'input' })]));
 (schemas.Capabilities as Record<string,unknown>).uniqueItems = true;
 for (const name of ['ServiceRegistration','Pairing','PairingDecision','RegistrationDecision','OAuthDecision']) {
   const schema = schemas[name] as unknown as { properties: { capabilities: Record<string,unknown> } }; schema.properties.capabilities.uniqueItems = true;
 }
 const methods: [string,string,string,string,string?][] = [
+ ['put','/v1/devices/{deviceId}','registerDevice','OwnerSession','DeviceRegistration'],
+ ['post','/v1/devices/{deviceId}/requests/{id}/events','respondToSms','OwnerSession','SmsDeviceEvent'],
  ['get','/v3/oauth/sessions/{id}','reviewHostedAuthorization','OwnerSession'],
  ['post','/v3/oauth/sessions/{id}/decision','decideHostedAuthorization','OwnerSession','OAuthDecision'],
  ['post','/v3/oauth/sessions/{id}/response','resumeHostedAuthorization','OwnerSession'],

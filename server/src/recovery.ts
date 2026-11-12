@@ -7,7 +7,7 @@ import { RecoveryObjects, securityIntentSchema, validateLedger } from './securit
 const collections = ['accounts', 'devices', 'grants'] as const;
 const keys = {
   accounts: ['deleting'],
-  devices: ['id', 'ownerId', 'name', 'fcmToken', 'paused', 'deleted', 'wizardVersion', 'updatedAt'],
+  devices: ['id', 'ownerId', 'name', 'fcmToken', 'paused', 'deleted', 'platform', 'wizardVersion', 'updatedAt'],
   grants: ['id', 'ownerId', 'deviceId', 'callerName', 'callerId', 'revoked', 'expiresAt', 'createdAt', 'managerId', 'formsApproved', 'webhooks', 'serviceId', 'connectionId', 'capabilities', 'deliveryAcknowledged', 'deliveryExpiresAt', 'deliveryKeyId'],
 } as const;
 const row = z.object({ collection: z.enum(collections), id: z.string().min(1).max(128), value: z.record(z.string(), z.unknown()) }).strict();

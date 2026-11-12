@@ -24,6 +24,7 @@ Environment variables:
 
 - `GCP_PROJECT_ID`, `GCP_REGION` (default `us-central1`), `GCP_SERVICE` (default `sms-code-relay`).
 - `GCP_WORKLOAD_IDENTITY_PROVIDER`, `GCP_RELEASE_SERVICE_ACCOUNT`.
+- `APPLE_APP_IDS`: optional comma-separated Apple team/bundle identifiers, for example `ABCDEFGHIJ.com.bluegrain.smsrelay`; configure before iOS Universal Link acceptance. See [Apple Universal Links](#apple-universal-links).
 - `ANDROID_SIGNING_SHA256S`: JSON array of public uppercase colon-separated app signing fingerprints, including pilot/Play identities currently supported.
 - `ANDROID_UPLOAD_SHA256`: public upload-key fingerprint used to verify the CI-signed APK/AAB. It may differ from Play's installed-app signer.
 - `RELAY_KEY_ALIAS`, `RELAY_URL`, `FIREBASE_APP_ID`, `FIREBASE_API_KEY`, `FIREBASE_SENDER_ID`, `GOOGLE_WEB_CLIENT_ID`.
@@ -33,6 +34,11 @@ Environment secrets: `RELAY_KEYSTORE_BASE64`, `RELAY_STORE_PASSWORD`, `RELAY_KEY
 The workflow checks that every required variable and secret is present before installing dependencies, authenticating to Google Cloud or writing signing material. It loads the preflight from the workflow revision, then checks out the tested candidate, so older candidates can still be deployed. Missing values are reported together by setting name; their contents are never printed. `GCP_REGION` and `GCP_SERVICE` retain their defaults. Presence does not prove that a credential is valid: the existing cloud, signing and deployment checks still apply.
 
 For a local configuration check, export the same required settings and run `python3 scripts/check-release-prerequisites.py`. Do not put secret values on the command line or commit them. A newly configured protected environment cannot deploy until these credentials and public settings have been supplied.
+## Apple Universal Links
+
+Set the production GitHub environment variable `APPLE_APP_IDS` to the Apple team and bundle identifiers of the companion apps that may open relay links. The release workflow forwards this value to both backend runtimes. Leaving it unset preserves any existing Cloud Run value; on an unconfigured service, the association contains no app identifiers.
+
+After deployment, check the canonical relay origin's `/.well-known/apple-app-site-association` response for the configured `applinks.details[].appID` values. Configure the companion app's Associated Domains entitlement for that origin and verify on a physical iOS device that a public pairing or registration link opens the intended app before accepting Universal Links for release.
 
 ## Release procedure
 
@@ -76,6 +82,6 @@ Set `TRAFFIC_MODE=live` only after the isolated staging and production-candidate
 
 For v3, deploy matching [onboarding indexes/TTL configuration](../firestore.indexes.json) and backend support before enabling new links in released Android/CLI clients. Both backend images include the same focused browser assets. Keep `SERVICE_URL`, Firebase web sign-in configuration, authorized origins, Android signing fingerprints and App Links consistent. Run the [remaining staging and physical gates](ONBOARDING.md#deployment-and-remaining-acceptance) before a release; the repository implementation does not establish cloud acceptance.
 
-Set the optional public `androidInstallUrl` field inside `FIREBASE_WEB_CONFIG` to the relay operator’s HTTPS Play/install page. Browser phone setup then offers an installation link as well as the Android App Link handoff. Keep authentication tokens out of that public URL.
+Set optional public `iosInstallUrl` and `androidInstallUrl` fields inside `FIREBASE_WEB_CONFIG` to the relay operator’s HTTPS Play/install page. Browser setup then offers platform installation links alongside HTTPS app handoff. After installation, reopen or rescan the public link; expired sessions require a fresh QR. Keep authentication tokens out of that public URL.
 
 For hosted MCP authorization, provision a dedicated Secret Manager secret containing a 64-character lowercase hexadecimal random key and expose its pinned version as `OAUTH_CODE_KEY`. Grant only the runtime identity access. Supply the same version to TypeScript/Rust candidates so an approval can cross revisions. The deployment script preserves existing secret references. Never put this value in `FIREBASE_WEB_CONFIG`, command output, model configuration, the deployment manifest, or source control. Missing configuration makes OAuth authorization fail closed with 503 while existing CLI/recipient request flows remain available. Deploy the additional OAuth TTL/index configuration before testing hosted clients.

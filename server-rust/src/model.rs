@@ -187,7 +187,7 @@ pub fn deadline(r: &Value) -> i64 {
     )
 }
 pub fn view(r: &Value) -> Value {
-    json!({"requestId":r["id"],"status":r["status"],"reason":r["reason"],"expiresAt":r["expiresAt"],"listeningDeadline":r["listeningDeadline"],"resultExpiresAt":r["resultExpiresAt"]})
+    json!({"requestId":r["id"],"status":r["status"],"reason":r["reason"],"expiresAt":r["expiresAt"],"listeningDeadline":r["listeningDeadline"],"manualEntryDeadline":r.get("manualEntryDeadline").cloned().unwrap_or(Value::Null),"resultExpiresAt":r["resultExpiresAt"]})
 }
 pub fn sms_input(v: &Value) -> Result<Value> {
     strict(v, &["purpose", "title", "senderPhone", "idempotencyKey"])?;
