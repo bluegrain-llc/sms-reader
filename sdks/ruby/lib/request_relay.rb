@@ -13,6 +13,8 @@ module RequestRelay
    raise(result['error']||'relay operation failed') unless result['ok'] && status.success?
    result['value']
   end
+  def import_ticket(input: {},connection_id: nil);invoke("importTicket",input:input,connection_id:connection_id);end
+  def export_ticket(input: {},connection_id: nil);invoke("exportTicket",input:input,connection_id:connection_id);end
   def start_registration(input: {},connection_id: nil);invoke("startRegistration",input:input,connection_id:connection_id);end
   def poll_registration(input: {},connection_id: nil);invoke("pollRegistration",input:input,connection_id:connection_id);end
   def wait_for_registration(input: {},connection_id: nil);invoke("waitForRegistration",input:input,connection_id:connection_id);end

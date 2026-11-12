@@ -76,7 +76,6 @@ private fun OnboardingContent(target: OnboardingLink, attempt: String, account: 
     var retry by remember { mutableIntStateOf(0) }
     var statusText by remember { mutableStateOf("") }
     var needsPhone by remember { mutableStateOf(false) }
-    var self by rememberSaveable(target, attempt) { mutableStateOf(false) }
     var forms by rememberSaveable(target, attempt) { mutableStateOf(true) }
     var sms by rememberSaveable(target, attempt) { mutableStateOf(true) }
     var duration by rememberSaveable(target, attempt) { mutableStateOf<Int?>(null) }
@@ -133,13 +132,13 @@ private fun OnboardingContent(target: OnboardingLink, attempt: String, account: 
     fun decide(approved: Boolean) {
         if (busy || session == null) return
         val chosen = caps.filter { (it == "forms" && forms) || (it == "sms" && sms) }
-        if (approved && (!registration || self) && chosen.isEmpty()) { error = "Select at least one permission."; return }
+        if (approved && (!registration) && chosen.isEmpty()) { error = "Select at least one permission."; return }
         scope.launch {
             busy = true; error = null
             try {
                 val body = JSONObject().put("decision", if (approved) "approved" else "denied")
                     .put("capabilities", JSONArray(chosen.ifEmpty { caps })).put("expiresInDays", duration ?: JSONObject.NULL)
-                if (registration) body.put("selfAccess", approved && self)
+                if (registration) body.put("selfAccess", false)
                 if (management) {
                     if (approved) {
                         val updated = request("PATCH", "/v3/connections/${target.id}", JSONObject().put("capabilities", JSONArray(chosen)).put("expiresAt", duration?.let { System.currentTimeMillis() + it * 86_400_000L } ?: JSONObject.NULL))
@@ -157,7 +156,7 @@ private fun OnboardingContent(target: OnboardingLink, attempt: String, account: 
     Surface(Modifier.fillMaxSize()) {
         Column(Modifier.fillMaxSize().safeDrawingPadding().verticalScroll(rememberScrollState()).padding(24.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
             TextButton(onClick = onClose) { Text("Close") }
-            Text(if (registration) "Register service" else if (management) "Manage connection" else "Connect to service", style = MaterialTheme.typography.labelLarge)
+            Text(if (registration) "Register agent" else if (management) "Manage connection" else "Connect to agent", style = MaterialTheme.typography.labelLarge)
             Text(session?.optString("name") ?: "Review access", style = MaterialTheme.typography.headlineLarge)
             session?.optString("purpose")?.let { Text(it) }
             if (!account.configured) Text("Configure this relay before signing in.")
@@ -168,8 +167,8 @@ private fun OnboardingContent(target: OnboardingLink, attempt: String, account: 
                 if (oauth && session != null) Text("Requested by ${session.optString("clientName")} (${session.optString("clientOrigin")}). These app details are supplied by the app operator.")
                 session?.nullString("comparisonCode")?.let { Text("Compare code $it", style = MaterialTheme.typography.titleLarge) }
                 if (pending) {
-                    if (registration) { Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).toggleable(self, enabled = !busy, role = Role.Switch, onValueChange = { self = it })) { Switch(checked = self, onCheckedChange = null, enabled = !busy); Spacer(Modifier.width(12.dp)); Text("Also allow this service to send requests to me") } }
-                    if (!registration || self) {
+                    if (registration) Text("Registration gives this agent no account access. Connect separately to share responses.")
+                    if (!registration) {
                         Text("Allow requests for", style = MaterialTheme.typography.titleMedium)
                         if ("forms" in caps) Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).toggleable(forms, enabled = !busy, role = Role.Checkbox, onValueChange = { forms = it })) { Checkbox(checked = forms, onCheckedChange = null, enabled = !busy); Text("Information and decisions through forms", Modifier.padding(top = 12.dp)) }
                         if ("sms" in caps) Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).toggleable(sms, enabled = !busy, role = Role.Checkbox, onValueChange = { sms = it })) { Checkbox(checked = sms, onCheckedChange = null, enabled = !busy); Text("Upcoming SMS codes, shared with your approval", Modifier.padding(top = 12.dp)) }
@@ -181,7 +180,7 @@ private fun OnboardingContent(target: OnboardingLink, attempt: String, account: 
                         }
                         Text("Every response still needs your approval.")
                     }
-                    Button(onClick = { decide(true) }, enabled = !busy, modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp)) { Text(if (registration) "Register service" else if (management) "Save permissions" else "Connect") }
+                    Button(onClick = { decide(true) }, enabled = !busy, modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp)) { Text(if (registration) "Register agent" else if (management) "Save permissions" else "Connect") }
                     TextButton(onClick = { decide(false) }, enabled = !busy) { Text(if (management) "Disconnect" else "Cancel") }
                 if (management && statusText.isNotBlank()) Text(statusText)
                 } else when (session?.optString("status")) {

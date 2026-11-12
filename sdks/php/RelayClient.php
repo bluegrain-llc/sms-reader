@@ -8,6 +8,8 @@ final class RelayClient {
   if(!is_resource($process))throw new \RuntimeException('relay broker unavailable');
   try {fwrite($pipes[0],json_encode(['operation'=>$operation,'input'=>(object)$input,'connectionId'=>$connectionId,'profile'=>$this->profile,'directory'=>$this->directory,'relayUrl'=>$this->relayUrl,'storageCommand'=>$this->storageCommand],JSON_THROW_ON_ERROR));fclose($pipes[0]);$output=stream_get_contents($pipes[1]);fclose($pipes[1]);$result=json_decode($output,true,512,JSON_THROW_ON_ERROR);if(!$result['ok'])throw new \RuntimeException($result['error']);return $result['value'];}finally{proc_close($process);}
  }
+ public function importTicket(array $input=[],?string $connectionId=null):mixed{return $this->invoke("importTicket",$input,$connectionId);}
+ public function exportTicket(array $input=[],?string $connectionId=null):mixed{return $this->invoke("exportTicket",$input,$connectionId);}
  public function startRegistration(array $input=[],?string $connectionId=null):mixed{return $this->invoke("startRegistration",$input,$connectionId);}
  public function pollRegistration(array $input=[],?string $connectionId=null):mixed{return $this->invoke("pollRegistration",$input,$connectionId);}
  public function waitForRegistration(array $input=[],?string $connectionId=null):mixed{return $this->invoke("waitForRegistration",$input,$connectionId);}

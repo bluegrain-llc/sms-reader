@@ -40,34 +40,22 @@ class OnboardingScreenTest {
                 review("approved")
             }
         }
-        compose.onNodeWithText("Also allow this service to send requests to me").assertIsOff()
+        compose.onNodeWithText("Also allow this service to send requests to me").assertDoesNotExist()
         compose.onNodeWithText("Information and decisions through forms").assertDoesNotExist()
         assertTrue(decisions.isEmpty())
-        compose.onNode(hasText("Register service") and hasClickAction()).performScrollTo().performClick()
+        compose.onNode(hasText("Register agent") and hasClickAction()).performScrollTo().performClick()
         compose.onNodeWithText("Service registered. Return to the CLI to finish setup. A receiving phone is not required.").assertIsDisplayed()
         assertEquals(1, decisions.size)
         assertFalse(decisions.single().getBoolean("selfAccess"))
     }
 
-    @Test fun ownerAccessAndSelectedCapabilitiesAreApprovedAtomically() {
+    @Test fun registrationCannotIncludeAccountAccess() {
         val decisions = mutableListOf<JSONObject>()
-        screen("register") { method, _, body ->
-            if (method == "GET") review() else {
-                decisions.add(JSONObject(body.toString()))
-                review("approved")
-            }
-        }
-        compose.onNodeWithText("Also allow this service to send requests to me").performClick().assertIsOn()
-        compose.onNodeWithText("Upcoming SMS codes, shared with your approval").assertIsOn().performClick().assertIsOff()
-        compose.onNodeWithText("Until disconnected").assertIsSelected()
-        compose.onNodeWithText("7 days").performScrollTo().performClick().assertIsSelected()
-        assertTrue(decisions.isEmpty())
-        compose.onNode(hasText("Register service") and hasClickAction()).performScrollTo().performClick()
-        compose.waitForIdle()
-        assertEquals(1, decisions.size)
-        assertTrue(decisions.single().getBoolean("selfAccess"))
-        assertEquals("[\"forms\"]", decisions.single().getJSONArray("capabilities").toString())
-        assertEquals(7, decisions.single().getInt("expiresInDays"))
+        screen("register") { method, _, body -> if (method == "GET") review() else { decisions.add(JSONObject(body.toString())); review("approved") } }
+        compose.onNodeWithText("Also allow this service to send requests to me").assertDoesNotExist()
+        compose.onNodeWithText("Information and decisions through forms").assertDoesNotExist()
+        compose.onNode(hasText("Register agent") and hasClickAction()).performScrollTo().performClick()
+        compose.waitForIdle(); assertEquals(1, decisions.size); assertFalse(decisions.single().getBoolean("selfAccess"))
     }
 
     @Test fun retryPreservesPermissionSelectionAndBusyDecisionCannotDoubleSubmit() {

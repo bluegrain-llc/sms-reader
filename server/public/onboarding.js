@@ -1,5 +1,5 @@
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/13.2.0/firebase-app.js';
-import { getAuth, GoogleAuthProvider, signInWithPopup, getRedirectResult, signInWithRedirect, onAuthStateChanged, setPersistence, browserLocalPersistence } from 'https://www.gstatic.com/firebasejs/13.2.0/firebase-auth.js';
+import { getAuth, signOut, GoogleAuthProvider, signInWithPopup, getRedirectResult, signInWithRedirect, onAuthStateChanged, setPersistence, browserLocalPersistence } from 'https://www.gstatic.com/firebasejs/13.2.0/firebase-auth.js';
 const $ = id => document.getElementById(id);
 const parts = location.pathname.split('/').filter(Boolean);
 const kind = parts[0], oauth = kind === 'oauth' && parts[1] === 'consent';
@@ -19,11 +19,11 @@ function fail(error) {
   status(expired ? 'This session expired. Start again and review access again.' : error.code === 'service_unavailable' ? 'This service is unavailable.' : 'Could not complete this step. Try again to check the current state.');
   $('retry').hidden = expired; $('restart').hidden = kind !== 'services' || !expired;
 }
-function lock(value) { busy = value; for (const id of ['confirm', 'cancel', 'self', 'forms', 'sms', 'duration', 'retry', 'restart', 'continue-to-app', 'check-phone']) $(id).disabled = value; }
+function lock(value) { busy = value; for (const id of ['confirm', 'cancel', 'signout', 'signin', 'self', 'forms', 'sms', 'duration', 'retry', 'restart', 'continue-to-app', 'check-phone']) $(id).disabled = value; }
 async function run(fn) { if (busy) return; lock(true); $('retry').hidden = true; try { await fn(); } catch (e) { retry = fn; fail(e); } finally { lock(false); } }
 const days = () => $('duration').value === '' ? null : Number($('duration').value);
 const selection = () => ['forms', 'sms'].filter(c => $(c).checked && (session.availableCapabilities || session.capabilities).includes(c));
-function permissions() { $('permissions').hidden = registration && !$('self').checked; }
+function permissions() { $('permissions').hidden = registration; }
 async function completed() {
   $('review').hidden = true;
   if (kind === 'services') { localStorage.removeItem(`relay-onboarding:${auth.currentUser.uid}:${destination}`); $('restart').hidden = false; }
@@ -51,7 +51,7 @@ async function completed() {
 async function load() {
   clearTimeout(monitor);
   if (!auth.currentUser) return;
-  $('signin').hidden = true; $('identity').textContent = `Signed in as ${auth.currentUser.email || 'your Google account'}`;
+  $('signin').hidden = true;$('signout').hidden=false; $('identity').textContent = `Signed in as ${auth.currentUser.email || 'your account'}`;
   if (management) {
     session = await api(`/v3/connections/${encodeURIComponent(destination)}`);
     session = { ...session, sessionId: destination, status: session.revoked ? 'denied' : 'pending', expiresInDays: session.expiresAt === null ? null : Math.max(1, Math.ceil((session.expiresAt - Date.now()) / 86400000)) };
@@ -64,7 +64,7 @@ async function load() {
     if (!attempt) { attempt = crypto.randomUUID(); localStorage.setItem(key, attempt); }
     session = await api(`/v3/services/${encodeURIComponent(destination)}/connections`, { capabilities: service.capabilities, expiresInDays: null, idempotencyKey: attempt });
   } else session = await api(`/v3/${registration ? 'registration' : 'pairing'}-sessions/${encodeURIComponent(destination)}`);
-  $('title').textContent = registration ? `Register ${session.name}` : management ? `Manage ${session.name}` : `Connect to ${session.name}`;
+  $('title').textContent = registration ? `Register agent · ${session.name}` : management ? `Manage ${session.name}` : `Connect to agent · ${session.name}`;
   $('purpose').textContent = session.purpose; $('operator').hidden = false;
   $('client').hidden = !oauth;
   $('handoff').hidden = !oauth;
@@ -75,9 +75,9 @@ async function load() {
     await qr.toCanvas($('handoff-qr'), publicLink, { width: 256, errorCorrectionLevel: 'M' });
   }
   if (oauth) $('client').textContent = `Requested by ${session.clientName} (${session.clientOrigin}). These app details are supplied by the app operator.`;
-  $('open-app').href = `intent://${location.host}${location.pathname}#Intent;scheme=https;package=com.bluegrain.smsrelay;end`;
+  $('open-app').href = location.origin + location.pathname;
   if (session.status !== 'pending') { await completed(); return; }
-  $('review').hidden = false; $('self-label').hidden = !registration; $('confirm').textContent = registration ? 'Register service' : management ? 'Save permissions' : 'Connect'; $('cancel').textContent = management ? 'Disconnect' : 'Cancel';
+  $('review').hidden = false; $('self-label').hidden = true; $('confirm').textContent = registration ? 'Register agent' : management ? 'Save permissions' : 'Connect'; $('cancel').textContent = management ? 'Disconnect' : 'Cancel';
   for (const cap of ['forms', 'sms']) { $(cap).checked = session.capabilities.includes(cap); $(cap).disabled = !(session.availableCapabilities || session.capabilities).includes(cap); $(cap).parentElement.hidden = !(session.availableCapabilities || session.capabilities).includes(cap); }
   for (const option of [...$('duration').options]) option.hidden = !management && session.expiresInDays != null && (option.value === '' || Number(option.value) > session.expiresInDays);
   if (session.expiresInDays != null && ![...$('duration').options].some(o => Number(o.value) === session.expiresInDays && o.value !== '')) $('duration').add(new Option(`${session.expiresInDays} days`, String(session.expiresInDays)));
@@ -92,7 +92,7 @@ async function load() {
     };
     monitor = setTimeout(() => check().catch(() => { retry = load; fail({}); }), 5000);
   }
-  permissions(); status(registration ? 'Registering alone gives the service no access to your answers.' : 'Review the permissions. Every response still needs your approval.');
+  permissions(); status(registration ? 'Registration gives this agent no account access. Connect separately to share responses.' : 'Review the permissions. Every response still needs your approval.');
 }
 let returning = false;
 async function returnToClient() {
@@ -105,7 +105,7 @@ $('continue-to-app').onclick = () => run(returnToClient);
 $('self').onchange = permissions;
 $('confirm').onclick = () => run(async () => {
   const capabilities = selection();
-  if ((!registration || $('self').checked) && !capabilities.length) { status('Select at least one permission.'); return; }
+  if (!registration && !capabilities.length) { status('Select at least one permission.'); return; }
   if (management) {
     await api(`/v3/connections/${destination}`, { capabilities, expiresAt: days() === null ? null : Date.now() + days() * 86400000 }, 'PATCH'); status('Permissions saved.'); return;
   }
@@ -113,7 +113,7 @@ $('confirm').onclick = () => run(async () => {
     const result = await api(`/v3/oauth/sessions/${destination}/decision`, { decision: 'approved', capabilities, expiresInDays: days() });
     clearTimeout(monitor); session = { ...session, ...result }; await completed(); return;
   }
-  session = await api(`/v3/${registration ? 'registration' : 'pairing'}-sessions/${session.sessionId}/decision`, { decision: 'approved', ...(registration ? { selfAccess: $('self').checked } : {}), capabilities: capabilities.length ? capabilities : session.capabilities, expiresInDays: days() });
+  session = await api(`/v3/${registration ? 'registration' : 'pairing'}-sessions/${session.sessionId}/decision`, { decision: 'approved', ...(registration ? { selfAccess: false } : {}), capabilities: capabilities.length ? capabilities : session.capabilities, expiresInDays: days() });
   await completed();
 });
 $('cancel').onclick = () => run(async () => { if (oauth) { const result = await api(`/v3/oauth/sessions/${destination}/decision`, { decision: 'denied', capabilities: session.capabilities, expiresInDays: null }); clearTimeout(monitor); session = {...session,...result}; await returnToClient(); return; } if (management) { await api(`/v3/connections/${destination}`, undefined, 'DELETE'); $('review').hidden = true; status('Disconnected.'); return; } session = await api(`/v3/${registration ? 'registration' : 'pairing'}-sessions/${session.sessionId}/decision`, { decision: 'denied', ...(registration ? { selfAccess: false } : {}), capabilities: session.capabilities, expiresInDays: session.expiresInDays ?? null }); await completed(); });
@@ -125,10 +125,14 @@ try {
   if (install.protocol === 'https:' && !install.username && !install.password && !install.hash) { $('install').href = install.href; $('install').hidden = false; }
 } catch { /* The relay operator may distribute a private pilot installation separately. */ }
 
+try { const install = new URL(window.relayWebConfig?.iosInstallUrl); if (install.protocol === 'https:' && !install.username && !install.password && !install.hash) { $('install-ios').href=install.href; $('install-ios').hidden=false; } } catch {}
 if (!window.relayWebConfig) status('Web sign-in is not configured on this relay. Ask its operator to configure onboarding.');
 else {
   auth = getAuth(initializeApp(window.relayWebConfig)); await setPersistence(auth, browserLocalPersistence);
-  $('signin').onclick = () => run(async () => { try { await signInWithPopup(auth, new GoogleAuthProvider()); } catch (e) { if (e.code === 'auth/popup-blocked') await signInWithRedirect(auth, new GoogleAuthProvider()); else throw e; } });
+  async function signIn(provider) { try { await signInWithPopup(auth, provider); } catch (e) { if (e.code === 'auth/popup-blocked') await signInWithRedirect(auth, provider); else throw e; } }
+  $('signin').onclick=()=>run(()=>signIn(new GoogleAuthProvider()));
   await getRedirectResult(auth).catch(fail);
-  onAuthStateChanged(auth, user => { if (user) { if (!busy) void run(load); else void load().catch(fail); } else { clearTimeout(monitor); $('identity').textContent = ''; $('review').hidden = true; $('phone').hidden = true; $('manage').hidden = true; $('handoff').hidden = true; $('signin').hidden = false; status('Sign in to review this link. Opening it grants no access.'); } });
+  onAuthStateChanged(auth, user => { if (user) { if (!busy) void run(load); else void load().catch(fail); } else { clearTimeout(monitor); $('identity').textContent = ''; $('review').hidden = true; $('phone').hidden = true; $('manage').hidden = true; $('handoff').hidden = true; $('signin').hidden = false;$('signout').hidden=true; status('Sign in to review this link. Opening it grants no access.'); } });
 }
+
+$('signout').onclick=()=>run(()=>signOut(auth));

@@ -601,6 +601,16 @@ for (const runtime of [0,1]) {
     const service=await call(runtime,'/v3/services',owner(operator),input,'POST',201);
     assert.equal((await call(1-runtime,'/v3/services',owner(operator),input,'POST',201)).serviceId,service.serviceId);
     assert.equal((await call(1-runtime,'/v3/service',credential)).deliveryKeyId,service.deliveryKeyId);
+    const {ServiceSession}=await import('../../cli/service.mjs');
+    let saved:any=null;
+    const storage={load:async()=>saved,save:async(value:any)=>{saved=structuredClone(value);}};
+    const ticket={version:1,relayOrigin:bases[runtime],agent:{name:input.name,purpose:input.purpose,capabilities:input.capabilities},serviceCredential:credential,
+      deliveryKeys:[{id:service.deliveryKeyId,publicKey,privateKey:await exportJWK(key.privateKey)}]};
+    const imported=await ServiceSession.importTicket(ticket,storage,{allowHttpLoopback:true});
+    assert.equal(saved.registered,true);assert.equal(saved.serviceId,service.serviceId);assert.deepEqual(saved.connections,{});
+    assert.deepEqual(await imported.exportTicket(),ticket);
+    await assert.rejects(ServiceSession.importTicket(ticket,storage,{allowHttpLoopback:true}),/occupied/);
+
     assert.deepEqual((await call(runtime,'/v3/service/deliveries',credential)).deliveries,[]);
     await call(runtime,'/v1/requests',credential,{purpose:'No access',idempotencyKey:randomUUID()},'POST',401);
     await call(runtime,'/v3/services',owner('different-owner'),input,'POST',409);

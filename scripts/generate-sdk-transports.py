@@ -2,7 +2,7 @@
 from pathlib import Path
 import subprocess
 root=Path(__file__).resolve().parent.parent
-operations=['startRegistration','pollRegistration','waitForRegistration','restartRegistration','startPairing','pollPairing','waitForPairing','restartPairing','permanentLink','consumeDeliveries','listConnections','rotateCredential','rotateKey','resume','status','requestForm','getForm','formResult','cancelForm','requestSms','getSms','cancelSms','events','registerWebhook','webhooks','deleteWebhook']
+operations=['importTicket','exportTicket','startRegistration','pollRegistration','waitForRegistration','restartRegistration','startPairing','pollPairing','waitForPairing','restartPairing','permanentLink','consumeDeliveries','listConnections','rotateCredential','rotateKey','resume','status','requestForm','getForm','formResult','cancelForm','requestSms','getSms','cancelSms','events','registerWebhook','webhooks','deleteWebhook']
 
 def snake(s):
     return ''.join('_'+c.lower() if c.isupper() else c for c in s)

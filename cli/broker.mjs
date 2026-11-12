@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 /** SDK process transport. Lifecycle credentials never cross stdout or process arguments. */
-import { PrivateStore } from './store.mjs';
+import { PrivateStore, exportPrivateFile } from './store.mjs';
 import { CommandStore } from './command-store.mjs';
 import { ServiceSession } from './service.mjs';
+import { readFile } from 'node:fs/promises';
 import { credential } from './client.mjs';
 const abort = new AbortController();
 for (const signal of ['SIGINT','SIGTERM']) process.once(signal,()=>abort.abort());
@@ -17,11 +18,16 @@ try {
   const timeout=Math.min(700000,Math.max(1000,Number(request.timeoutMs)||(operation?.startsWith('waitFor')?700000:120000)));
   const options={signal:AbortSignal.any([abort.signal,AbortSignal.timeout(timeout)]),allowHttpLoopback:request.allowHttpLoopback===true};
   let state=await store.read(), service;
-  if(operation==='startRegistration'&&!state)service=await ServiceSession.create({baseUrl:request.relayUrl,...input},store,options);
+  if(operation==='importTicket') {
+    if(state)throw Error('profile_occupied');
+    service=await ServiceSession.importTicket(JSON.parse(await readFile(input.file,'utf8')),store,options);
+  } else if(operation==='startRegistration'&&!state)service=await ServiceSession.create({baseUrl:request.relayUrl,...input},store,options);
   else {if(!state)throw Error('registration_required');service=await ServiceSession.resume(store,options);}
   const methods=new Set(['startRegistration','waitForRegistration','startPairing','waitForPairing','restartPairing','permanentLink','consumeDeliveries','rotateCredential','rotateKey']);
   let value;
-  if(methods.has(operation))value=await service[operation](operation==='rotateKey'?input.retireKeyId:input);
+  if(operation==='importTicket')value={serviceId:service.state.serviceId,status:'registered'};
+  else if(operation==='exportTicket'){await exportPrivateFile(input.file,await service.exportTicket());value={status:'ticket_exported'};}
+  else if(methods.has(operation))value=await service[operation](operation==='rotateKey'?input.retireKeyId:input);
   else if(operation==='pollRegistration') {
     value=await service.client.request('/v3/registration-sessions/current',service.state.registrationToken);
     if(value.status==='approved'){service.state.serviceId=value.serviceId;service.state.servicePath=value.servicePath;service.state.registered=true;await service.save();await service.consumeDeliveries();}

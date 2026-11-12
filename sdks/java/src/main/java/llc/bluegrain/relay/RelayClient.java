@@ -14,6 +14,8 @@ public final class RelayClient {
   Process process=new ProcessBuilder(broker==null?"relay-broker":broker).redirectError(ProcessBuilder.Redirect.DISCARD).start();
   try {try(var stream=process.getOutputStream()){json.writeValue(stream,payload);}JsonNode result=json.readTree(process.getInputStream());process.waitFor();if(result==null||!result.path("ok").asBoolean())throw new IllegalStateException(result==null?"relay broker unavailable":result.path("error").asText("relay operation failed"));return result.get("value");}finally{process.destroy();}
  }
+ public JsonNode importTicket(Object input,String connectionId)throws Exception{return invoke("importTicket",input,connectionId);}
+ public JsonNode exportTicket(Object input,String connectionId)throws Exception{return invoke("exportTicket",input,connectionId);}
  public JsonNode startRegistration(Object input,String connectionId)throws Exception{return invoke("startRegistration",input,connectionId);}
  public JsonNode pollRegistration(Object input,String connectionId)throws Exception{return invoke("pollRegistration",input,connectionId);}
  public JsonNode waitForRegistration(Object input,String connectionId)throws Exception{return invoke("waitForRegistration",input,connectionId);}

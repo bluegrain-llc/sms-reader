@@ -1,3 +1,4 @@
+import { verifyTicket } from './ticket.mjs';
 import { randomUUID } from 'node:crypto';
 import { credential, deliveryKey, hash, RelayClient } from './client.mjs';
 export { RelayClient };
@@ -5,9 +6,26 @@ export { RelayClient };
 export class ServiceSession {
   constructor(state, storage, options) { this.state = state; this.storage = storage; this.client = new RelayClient(state.baseUrl, options); }
   static async create({ baseUrl, name, purpose, capabilities = ['forms'] }, storage, options) {
+    if (await storage.load()) throw Error('This profile is occupied. Choose a different profile.');
     const client = new RelayClient(baseUrl, options);
-    const state = { version:1, baseUrl:client.baseUrl, name, purpose, capabilities, serviceToken:credential('smss'),registrationToken:credential('smsreg'),keys:[await deliveryKey()],connections:{} };
+    const state = { version:1, baseUrl:client.baseUrl, name:name.trim(), purpose:purpose.trim(), capabilities, serviceToken:credential('smss'),registrationToken:credential('smsreg'),keys:[await deliveryKey()],connections:{} };
     await storage.save(state); return new ServiceSession(state, storage, options);
+  }
+  static async importTicket(ticket, storage, options) {
+    if (await storage.load()) throw Error('This profile is occupied. Choose a different profile.');
+    const {client, service} = await verifyTicket(ticket, options);
+    const state = {version:1,baseUrl:client.baseUrl,...ticket.agent,serviceToken:ticket.serviceCredential,
+      keys:structuredClone(ticket.deliveryKeys),connections:{},registered:true,serviceId:service.serviceId,servicePath:service.servicePath};
+    await storage.save(state);
+    return new ServiceSession(state, storage, options);
+  }
+  async exportTicket() {
+    const s = this.state;
+    if (!s.registered || s.nextServiceToken || s.nextKey) throw Error('Complete registration or pending rotation before exporting.');
+    const ticket = {version:1,relayOrigin:s.baseUrl,agent:{name:s.name,purpose:s.purpose,capabilities:s.capabilities},
+      serviceCredential:s.serviceToken,deliveryKeys:s.keys};
+    await verifyTicket(ticket, {fetch:this.client.fetch,signal:this.client.signal,allowHttpLoopback:this.client.baseUrl.startsWith('http:')});
+    return structuredClone(ticket);
   }
   static async resume(storage, options) { const state = await storage.load(); if (!state) throw Error('No saved service session.'); return new ServiceSession(state, storage, options); }
   save = () => this.storage.save(this.state);
@@ -27,6 +45,7 @@ export class ServiceSession {
   }
   async startPairing({capabilities=this.state.capabilities,expiresInDays=null,externalAccountRef}={}) {
     const s=this.state;
+    if (!s.registered) throw Error('Complete and save registration before pairing.');
     if (!s.pairingInput) {s.pairingInput={capabilities,expiresInDays,idempotencyKey:randomUUID(),...(externalAccountRef?{externalAccountRef}:{})};await this.save();}
     s.pairing=await this.client.request('/v3/service/pairing-sessions',s.serviceToken,s.pairingInput);await this.save();return {...s.pairing,link:new URL(s.pairing.connectionPath,s.baseUrl).href};
   }
