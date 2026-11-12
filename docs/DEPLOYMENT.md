@@ -24,12 +24,18 @@ Environment variables:
 
 - `GCP_PROJECT_ID`, `GCP_REGION` (default `us-central1`), `GCP_SERVICE` (default `sms-code-relay`).
 - `GCP_WORKLOAD_IDENTITY_PROVIDER`, `GCP_RELEASE_SERVICE_ACCOUNT`.
-- `APPLE_APP_IDS`: optional comma-separated Apple team/bundle identifiers, for example `ABCDEFGHIJ.com.bluegrain.smsrelay`; configure before iOS Universal Link acceptance. See [iOS setup and release gates](IOS.md).
+- `APPLE_APP_IDS`: optional comma-separated Apple team/bundle identifiers, for example `ABCDEFGHIJ.com.bluegrain.smsrelay`; configure before iOS Universal Link acceptance. See [Apple Universal Links](#apple-universal-links).
 - `ANDROID_SIGNING_SHA256S`: JSON array of public uppercase colon-separated app signing fingerprints, including pilot/Play identities currently supported.
 - `ANDROID_UPLOAD_SHA256`: public upload-key fingerprint used to verify the CI-signed APK/AAB. It may differ from Play's installed-app signer.
 - `RELAY_KEY_ALIAS`, `RELAY_URL`, `FIREBASE_APP_ID`, `FIREBASE_API_KEY`, `FIREBASE_SENDER_ID`, `GOOGLE_WEB_CLIENT_ID`.
 
 Environment secrets: `RELAY_KEYSTORE_BASE64`, `RELAY_STORE_PASSWORD`, `RELAY_KEY_PASSWORD`, and `RELAY_SMOKE_TOKEN`. The smoke token belongs to a dedicated paired caller. Smoke only lists tools and checks an absent request; it never creates a request or triggers SMS. Signing material is written to a private temporary file and removed on success or failure.
+
+## Apple Universal Links
+
+Set the production GitHub environment variable `APPLE_APP_IDS` to the Apple team and bundle identifiers of the companion apps that may open relay links. The release workflow forwards this value to both backend runtimes. Leaving it unset preserves any existing Cloud Run value; on an unconfigured service, the association contains no app identifiers.
+
+After deployment, check the canonical relay origin's `/.well-known/apple-app-site-association` response for the configured `applinks.details[].appID` values. Configure the companion app's Associated Domains entitlement for that origin and verify on a physical iOS device that a public pairing or registration link opens the intended app before accepting Universal Links for release.
 
 ## Release procedure
 

@@ -675,7 +675,7 @@ for (const runtime of [0,1]) {
     assert.equal((await db.collection('results').doc(expiring.requestId).get()).exists,false);
   });
   test(`runtime ${runtime}: Apple association serves only configured app identifiers and public routes`,async()=>{
-    const response=await fetch(bases[runtime]+'/.well-known/apple-app-site-association');assert.equal(response.status,200);
+    const response=await contractFetch(bases[runtime]+'/.well-known/apple-app-site-association');assert.equal(response.status,200);
     assert.ok(response.headers.get('content-type')?.includes('application/json'));
     assert.deepEqual(await response.json(),{applinks:{details:[{appID:'ABCDEFGHIJ.com.bluegrain.smsrelay',paths:['/register/*','/pair/*','/services/*','/connections/*','/oauth/consent/*','/connect','/owned-services']}]}});
   });

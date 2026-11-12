@@ -4797,7 +4797,7 @@
       },
       "SmsDeviceEvent": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "oneOf": [
+        "anyOf": [
           {
             "type": "object",
             "properties": {
@@ -4813,14 +4813,30 @@
               "mode": {
                 "default": "listener",
                 "type": "string",
-                "enum": [
-                  "listener",
-                  "manual"
-                ]
+                "const": "listener"
               }
             },
             "required": [
-              "status"
+              "status",
+              "listenerStartedAt"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "status": {
+                "type": "string",
+                "const": "ready"
+              },
+              "mode": {
+                "type": "string",
+                "const": "manual"
+              }
+            },
+            "required": [
+              "status",
+              "mode"
             ],
             "additionalProperties": false
           },

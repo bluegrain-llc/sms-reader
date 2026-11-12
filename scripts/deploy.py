@@ -42,6 +42,11 @@ def config(env):
     if c['BACKEND'] not in ('typescript', 'rust') or c['TRAFFIC_MODE'] not in ('stage', 'live'):
         raise ValueError('Invalid backend or traffic mode')
     c['MANIFEST'] = env.get('DEPLOYMENT_MANIFEST_PATH', 'artifacts/deployment.json')
+    apple_app_ids = env.get('APPLE_APP_IDS', '')
+    if apple_app_ids:
+        if not all(re.fullmatch(r'[A-Z0-9]{10}\.[A-Za-z0-9.-]+', app_id) for app_id in apple_app_ids.split(',')):
+            raise ValueError('Invalid Apple app identifiers')
+        c['APPLE_APP_IDS'] = apple_app_ids
     c['HOLD'] = int(env.get('PROMOTION_HOLD_SECONDS', '60'))
     if c['HOLD'] < 60:
         raise ValueError('Promotion observation window must be at least 60 seconds')
@@ -98,6 +103,8 @@ def deploy(c):
         runtime = {'GOOGLE_CLOUD_PROJECT': project, 'SERVICE_URL': url, 'SCHEDULER_EMAIL': scheduler,
                    'DELIVERY_QUEUE': queue, 'ANDROID_SIGNING_SHA256S': json.dumps(c['CERTS']),
                    'SECURITY_LEDGER_BUCKET': c['SECURITY_LEDGER_BUCKET']}
+        if 'APPLE_APP_IDS' in c:
+            runtime['APPLE_APP_IDS'] = c['APPLE_APP_IDS']
         # Preserve unrelated runtime settings, including secrets and approved origins.
         # update-env-vars supports custom separators; values here cannot contain this sentinel.
         values = '^|^' + '|'.join(f'{k}={v}' for k, v in runtime.items())

@@ -30,6 +30,7 @@ jobs:
       REGION: ${{ vars.GCP_REGION || 'us-central1' }}
       SERVICE: ${{ vars.GCP_SERVICE || 'sms-code-relay' }}
       ANDROID_SIGNING_SHA256S: ${{ vars.ANDROID_SIGNING_SHA256S }}
+      APPLE_APP_IDS: ${{ vars.APPLE_APP_IDS }}
       RELAY_SMOKE_TOKEN: ${{ secrets.RELAY_SMOKE_TOKEN }}
     steps:
       - name: Pin successful main CI run
