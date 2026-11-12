@@ -84,7 +84,7 @@ export class Relay {
     } else if (r.status === 'completed' && (r.resultExpiresAt ?? 0) <= this.now()) this.finish(tx, r, a, 'expired', 'result_expired');
     return r;
   }
-  async register(uid: string, id: string, name: string, fcmToken: string, wizardVersion?: 1) {
+  async register(uid: string, id: string, name: string, fcmToken: string, wizardVersion?: 1, platform: 'android' | 'ios' = 'android') {
     return this.db.runTransaction(async tx => {
       await this.account(tx, uid);
       const old = (await tx.get(this.ref('devices', id))).data() as Device | undefined;
@@ -95,7 +95,8 @@ export class Relay {
         id, ownerId: uid, name, fcmToken, paused: false, deleted: false, activeRequestId: null,
         rate: { start: this.now(), count: 0 }, updatedAt: this.now(),
       };
-      d.wizardVersion = wizardVersion ?? null;
+      ensure(!old || (old.platform ?? 'android') === platform, 409, 'device_platform_conflict');
+      d.platform = platform; d.wizardVersion = wizardVersion ?? null;
       tx.set(this.ref('devices', id), d);
       return { deviceId: id, name, paused: d.paused, activeRequestId: null };
     });
@@ -117,7 +118,7 @@ export class Relay {
     const id = account.data()?.activeRequestId as string | undefined;
     const r = id ? (await this.ref('requests', id).get()).data() as CodeRequest | undefined : undefined;
     return snap.docs.map(s => s.data() as Device).filter(d => !d.deleted).map(d => ({
-      deviceId: d.id, name: d.name, paused: d.paused, wizardVersion: d.wizardVersion ?? null,
+      deviceId: d.id, name: d.name, paused: d.paused, platform: d.platform ?? 'android', wizardVersion: d.wizardVersion ?? null,
       activeRequestId: r && active(r.status) && !d.paused && this.ids(r).includes(d.id) && active(this.phones(r)[d.id]?.status ?? 'failed') ? r.id : null,
     }));
   }
@@ -250,6 +251,7 @@ export class Relay {
   phoneView(r: CodeRequest, d: Device) {
     const p = this.phones(r)[d.id];
     return { ...view(r), ...(active(r.status) && r.status !== 'queued' && p ? { status: p.status, reason: p.reason, listeningDeadline: p.listeningDeadline } : {}),
+      manualEntryDeadline: p?.manualEntryDeadline ?? null, ...(d.platform === 'ios' ? { listeningDeadline: null } : {}),
       ...(r.completedByDeviceId && r.completedByDeviceId !== d.id ? { reason: 'handled_on_another_device' } : {}),
       callerName: r.callerName, title: r.title ?? 'Verification code', purpose: r.purpose, senderPhone: r.senderPhone };
   }
@@ -268,10 +270,12 @@ export class Relay {
     r.status = live.some(p => p.status === 'awaiting_consent') ? 'awaiting_consent' : live.some(p => p.status === 'ready') ? 'ready' : 'pending_phone';
     const deadlines = live.flatMap(p => p.listeningDeadline ? [p.listeningDeadline] : []);
     r.listeningDeadline = deadlines.length ? Math.max(...deadlines) : null;
+    const manual = live.flatMap(p => p.manualEntryDeadline ? [p.manualEntryDeadline] : []);
+    r.manualEntryDeadline = manual.length ? Math.max(...manual) : null;
     tx.set(this.ref('requests', r.id), r); this.audit(tx, r, r.status);
   }
   async transition(auth: { secret: string } | { uid: string; deviceId: string }, id: string,
-    target: Status, reason: string | null = null, code?: string, listenerStartedAt?: number, source: 'android_consent' | 'manual' = 'android_consent') {
+    target: Status, reason: string | null = null, code?: string, listenerStartedAt?: number, source: 'android_consent' | 'manual' = 'android_consent', mode: 'listener' | 'manual' = 'listener') {
     const output = await this.db.runTransaction(async tx => {
       const c = await this.context(tx, id, auth), r = c.request;
       const result = (await tx.get(this.ref('results', id))).data(); this.expire(tx, r, c.account, c.valid, c.devices);
@@ -284,14 +288,22 @@ export class Relay {
       }
       const d = c.device!; ensure(!d.paused && r.status !== 'queued', 409, 'request_not_ready');
       r.phones = this.phones(r); const p = r.phones[d.id]!;
-      if (p.status === target) return this.phoneView(r, d);
-      if (!active(p.status)) return this.phoneView(r, d);
+      if (d.platform === 'ios') {
+        ensure(target !== 'awaiting_consent' && (target !== 'ready' || mode === 'manual') &&
+          (target !== 'completed' || source === 'manual') && target !== 'failed', 400, 'ios_manual_entry_required');
+      } else ensure(mode !== 'manual', 400, 'manual_readiness_requires_ios');
+      if (p.status === target || !active(p.status)) return this.phoneView(r, d);
       if (target === 'ready') {
         ensure(p.status === 'pending_phone', 409, 'invalid_transition');
-        ensure((d.formListenerUntil ?? 0) <= this.now(), 409, 'sms_listener_busy');
-        const start = listenerStartedAt ?? this.now(); ensure(start <= this.now() + 5_000 && start > this.now() - MINUTE, 409, 'listener_start_stale');
-        p.listeningDeadline = Math.min(r.expiresAt, start + 5 * MINUTE, this.now() + 5 * MINUTE);
-        tx.update(this.ref('devices', d.id), { listenerUntil: p.listeningDeadline });
+        if (mode === 'manual') {
+          p.manualEntryDeadline = Math.min(r.expiresAt, this.now() + 5 * MINUTE);
+          p.listeningDeadline = p.manualEntryDeadline;
+        } else {
+          ensure((d.formListenerUntil ?? 0) <= this.now() && (d.listenerUntil ?? 0) <= this.now(), 409, 'sms_listener_busy');
+          const start = listenerStartedAt ?? this.now(); ensure(start <= this.now() + 5_000 && start > this.now() - MINUTE, 409, 'listener_start_stale');
+          p.listeningDeadline = Math.min(r.expiresAt, start + 5 * MINUTE, this.now() + 5 * MINUTE);
+          tx.update(this.ref('devices', d.id), { listenerUntil: p.listeningDeadline });
+        }
       } else if (target === 'awaiting_consent') ensure(p.status === 'ready' && (p.listeningDeadline ?? 0) > this.now(), 409, 'invalid_transition');
       else if (target === 'completed') {
         ensure((p.status === 'awaiting_consent' || (source === 'manual' && p.status === 'ready')) && (p.listeningDeadline ?? 0) > this.now(), 409, 'invalid_transition'); codeSchema.parse(code);

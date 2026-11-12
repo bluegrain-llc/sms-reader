@@ -12,7 +12,7 @@ import { signingFingerprints } from './signing.js';
 import { formSchema } from './forms-model.js';
 import { Relay } from './relay.js';
 import { connectionSchema, userCodeSchema } from './connections.js';
-import { codeSchema, hasCapability, ensure, idSchema, RelayError, requestSchema } from './model.js';
+import { deviceRegistrationSchema, smsEventSchema, codeSchema, hasCapability, ensure, idSchema, RelayError, requestSchema } from './model.js';
 
 export interface Identity { uid: string; authTime: number }
 export interface HttpOptions {
@@ -22,6 +22,7 @@ export interface HttpOptions {
   deleteIdentity: (uid: string) => Promise<void>;
   origins?: string[];
   publicUrl?: string;
+  appleAppIds?: string[];
   androidCertSha256?: string;
   androidCertSha256s?: string[];
   trustProxyHops?: number;
@@ -74,8 +75,8 @@ export function app(relay: Relay, options: HttpOptions) {
   app.get('/v1/devices', async (req, res) => { res.json(await relay.listDevices((await owner(req)).uid)); });
   app.put('/v1/devices/:deviceId', async (req, res) => {
     const { uid } = await owner(req);
-    const b = body(req, z.object({ name: z.string().trim().min(1).max(80), fcmToken: z.string().min(1).max(4096), wizardVersion: z.literal(1).optional() }).strict());
-    res.json(await relay.register(uid, device(req), b.name, b.fcmToken, b.wizardVersion));
+    const b = body(req, deviceRegistrationSchema);
+    res.json(await relay.register(uid, device(req), b.name, b.fcmToken, b.wizardVersion, b.platform));
   });
   app.patch('/v1/devices/:deviceId', async (req, res) => {
     const { uid } = await owner(req); const b = body(req, z.object({ paused: z.boolean() }).strict());
@@ -83,6 +84,10 @@ export function app(relay: Relay, options: HttpOptions) {
   });
   app.delete('/v1/devices/:deviceId', async (req, res) => {
     await relay.changeDevice((await owner(req)).uid, device(req), true, true); res.json({ ok: true });
+  });
+  app.get('/.well-known/apple-app-site-association', (_req, res) => {
+    res.json({ applinks: { details: (options.appleAppIds ?? []).filter(id => /^[A-Z0-9]{10}\.[A-Za-z0-9.-]+$/.test(id)).map(appID => ({appID,
+      paths: ['/register/*','/pair/*','/services/*','/connections/*','/oauth/consent/*','/connect','/owned-services']})) } });
   });
   app.get('/.well-known/assetlinks.json', (_req, res) => {
     const fingerprints = signingFingerprints(options.androidCertSha256, options.androidCertSha256s);
@@ -142,16 +147,9 @@ export function app(relay: Relay, options: HttpOptions) {
   });
   app.post('/v1/devices/:deviceId/requests/:requestId/events', async (req, res) => {
     const { uid } = await owner(req);
-    const b = body(req, z.discriminatedUnion('status', [
-      z.object({ status: z.literal('ready'), listenerStartedAt: z.number().int().positive() }).strict(),
-      z.object({ status: z.literal('awaiting_consent') }).strict(),
-      z.object({ status: z.literal('completed'), code: codeSchema, source: z.enum(['android_consent', 'manual']).optional() }).strict(),
-      z.object({ status: z.literal('denied') }).strict(),
-      z.object({ status: z.literal('cancelled') }).strict(),
-      z.object({ status: z.literal('failed'), reason: z.enum(['play_services_unavailable', 'listener_failed', 'process_restarted', 'code_extraction_failed', 'consent_unavailable', 'notifications_disabled', 'listener_timeout']) }).strict(),
-    ]));
+    const b = body(req, smsEventSchema);
     res.json(await relay.transition({ uid, deviceId: device(req) }, request(req), b.status,
-      'reason' in b ? b.reason : null, 'code' in b ? b.code : undefined, 'listenerStartedAt' in b ? b.listenerStartedAt : undefined, 'source' in b ? b.source : undefined));
+      'reason' in b ? b.reason : null, 'code' in b ? b.code : undefined, 'listenerStartedAt' in b ? b.listenerStartedAt : undefined, 'source' in b ? b.source : undefined, 'mode' in b ? b.mode : undefined));
   });
   app.post('/v1/requests', async (req, res) => { res.status(201).json(await relay.create(bearer(req), requestSchema.parse(req.body))); });
   app.get('/v1/requests/:requestId', async (req, res) => { res.json(await relay.get(await agentRead(req), request(req))); });

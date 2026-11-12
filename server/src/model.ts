@@ -14,12 +14,23 @@ export const requestSchema = z.object({
   senderPhone: z.string().regex(/^\+[1-9][0-9]{5,14}$/).optional(),
   idempotencyKey: z.string().min(8).max(128),
 }).strict();
+export const deviceRegistrationSchema = z.object({ name: z.string().trim().min(1).max(80), fcmToken: z.string().min(1).max(4096),
+  wizardVersion: z.literal(1).optional(), platform: z.enum(['android','ios']).default('android') }).strict();
+export const smsEventSchema = z.discriminatedUnion('status', [
+  z.object({ status: z.literal('ready'), listenerStartedAt: z.number().int().positive().optional(), mode: z.enum(['listener','manual']).default('listener') }).strict()
+    .refine(b => b.mode === 'manual' ? b.listenerStartedAt === undefined : b.listenerStartedAt !== undefined),
+  z.object({ status: z.literal('awaiting_consent') }).strict(),
+  z.object({ status: z.literal('completed'), code: codeSchema, source: z.enum(['android_consent','manual']).optional() }).strict(),
+  z.object({ status: z.literal('denied') }).strict(), z.object({ status: z.literal('cancelled') }).strict(),
+  z.object({ status: z.literal('failed'), reason: z.enum(['play_services_unavailable','listener_failed','process_restarted','code_extraction_failed','consent_unavailable','notifications_disabled','listener_timeout']) }).strict(),
+]);
 export type RequestInput = z.infer<typeof requestSchema>;
 export interface Rate { start: number; count: number }
 export interface Device {
   id: string; ownerId: string; name: string; fcmToken: string;
   paused: boolean; deleted: boolean; activeRequestId: string | null;
   rate: Rate; updatedAt: number;
+  platform?: 'android' | 'ios';
   listenerUntil?: number; formListenerUntil?: number; wizardVersion?: 1 | null;
 }
 export interface Grant {
@@ -35,12 +46,14 @@ export function hasCapability(g: Grant & { formsApproved?: boolean }, capability
 export interface Account { formListenerRequestId?: string; formListenerUntil?: number; deleting?: boolean; activeRequestId?: string | null; queueIds?: string[]; hasWork?: boolean; formRate?: Rate; rate?: Rate; connectionRate?: Rate }
 export interface PhoneState {
   status: Status; reason: string | null; listeningDeadline: number | null;
+  manualEntryDeadline?: number;
   sent: boolean; lease: number; attempts: number; nextAt: number;
 }
 export interface CodeRequest {
   id: string; ownerId: string; deviceId: string; grantId: string; callerName: string;
   purpose: string; title?: string; submissionSource?: 'android_consent' | 'manual'; senderPhone: string | null; fingerprint: string;
   status: Status; reason: string | null; createdAt: number; expiresAt: number;
+  manualEntryDeadline?: number | null;
   listeningDeadline: number | null; resultExpiresAt: number | null;
   notificationSent: boolean; notificationLease: number; notificationAttempts: number;
   nextNotificationAt: number; purgeAt: Date;
@@ -64,5 +77,5 @@ export function deadline(r: CodeRequest): number {
 }
 export function view(r: CodeRequest) {
   return { requestId: r.id, status: r.status, reason: r.reason, expiresAt: r.expiresAt,
-    listeningDeadline: r.listeningDeadline, resultExpiresAt: r.resultExpiresAt };
+    listeningDeadline: r.listeningDeadline, manualEntryDeadline: r.manualEntryDeadline ?? null, resultExpiresAt: r.resultExpiresAt };
 }

@@ -135,6 +135,7 @@ export class Forms {
       const devices = data.type === 'input.ready' ? await this.relay.devices(tx, uid) : [];
       await this.expire(tx, r, g, valid);
       if (data.type === 'input.ready') {
+        ensure(device!.platform !== 'ios', 400, 'ios_manual_entry_required');
         if (r.status !== 'pending') return formView(r);
         ensure(!device!.paused, 409, 'device_paused');
         const field = r.definition.fields.find(f => f.id === data.fieldId);
