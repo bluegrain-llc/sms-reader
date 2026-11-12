@@ -19,6 +19,7 @@ import kotlinx.coroutines.launch
 
 abstract class AccountActivity : ComponentActivity() {
     protected open val administrationOnly = false
+    protected open val resumePausedPhoneOnRegistration = false
     protected val vm: RelayViewModel by viewModels {
         object : ViewModelProvider.Factory {
             @Suppress("UNCHECKED_CAST")
@@ -27,11 +28,11 @@ abstract class AccountActivity : ComponentActivity() {
         }
     }
     private val notifications = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-        if (granted) vm.register() else vm.error("Enable notifications in Android settings before registering this phone.")
+        if (granted) vm.register(resumePausedPhoneOnRegistration) else vm.error("Enable notifications in Android settings before registering this phone.")
     }
     protected fun register() {
         if (Build.VERSION.SDK_INT >= 33 && !RelayNotifications.enabled(this)) notifications.launch(Manifest.permission.POST_NOTIFICATIONS)
-        else if (RelayNotifications.enabled(this)) vm.register()
+        else if (RelayNotifications.enabled(this)) vm.register(resumePausedPhoneOnRegistration)
         else vm.error("Enable the code request notification channel in Android settings.")
     }
     protected fun deleteAccountWithReauthentication() { authenticate(deleteAfter = true) }

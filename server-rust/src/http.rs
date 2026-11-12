@@ -145,7 +145,7 @@ async fn common(State(s): State<App>, mut request: Request, next: Next) -> Respo
     let account_route = matches!(
         path.strip_suffix('/').unwrap_or(&path),
         "/v1/account" | "/v1/account-deletion"
-    );
+    ) || path.starts_with("/v3/");
     let account_origin = s
         .options
         .public_url
@@ -253,7 +253,16 @@ fn measured_response(
 }
 async fn handle(State(s): State<App>, request: Request) -> Response {
     let logger = s.relay.delivery.clone();
-    match route(s, request).await {
+    let (observed_path, observed_method) = (
+        request.uri().path().to_owned(),
+        request.method().as_str().to_owned(),
+    );
+    let challenge = request.uri().path().strip_prefix("/mcp/services/").and_then(|id| {
+        crate::model::id(id).ok()?;
+        let base = s.options.public_url.as_ref()?;
+        Some(format!("Bearer resource_metadata=\"{}/.well-known/oauth-protected-resource/mcp/services/{id}\"", base.trim_end_matches('/')))
+    });
+    let mut response = match route(s, request).await {
         Ok(r) => r,
         Err(e) => {
             if !matches!(e, Error::Api(_, _)) {
@@ -261,9 +270,67 @@ async fn handle(State(s): State<App>, request: Request) -> Response {
                     .emit("request_failed", crate::telemetry::category(&e))
                     .await;
             }
-            e.into_response()
+            let status = if let Error::Api(status, _) = &e {
+                *status
+            } else {
+                500
+            };
+            let reason = if let Error::Api(_, reason) = &e {
+                *reason
+            } else {
+                "internal_error"
+            };
+            if let Some(event) = crate::telemetry::onboarding_outcome(
+                &observed_path,
+                &observed_method,
+                status,
+                &json!({"error":reason}),
+            ) {
+                logger.record(event).await;
+            }
+            if observed_path.starts_with("/oauth/") {
+                let standard = [
+                    "invalid_client",
+                    "invalid_grant",
+                    "invalid_scope",
+                    "unauthorized_client",
+                    "unsupported_grant_type",
+                    "invalid_target",
+                    "invalid_client_metadata",
+                ];
+                let error = if status >= 500 {
+                    "server_error"
+                } else if status == 429 {
+                    "temporarily_unavailable"
+                } else if standard.contains(&reason) {
+                    reason
+                } else if reason == "capability_not_requested" {
+                    "invalid_scope"
+                } else if observed_path == "/oauth/register" {
+                    "invalid_client_metadata"
+                } else {
+                    "invalid_request"
+                };
+                let mut response = json_response(json!({"error":error}), status);
+                if status == 429 {
+                    response
+                        .headers_mut()
+                        .insert("Retry-After", "60".parse().unwrap());
+                }
+                response
+            } else {
+                e.into_response()
+            }
         }
+    };
+    if matches!(response.status().as_u16(), 401 | 403)
+        && let Some(challenge) = challenge
+    {
+        response
+            .headers_mut()
+            .insert("WWW-Authenticate", challenge.parse().unwrap());
     }
+    response
 }
 pub(crate) fn json_response(v: Value, status: u16) -> Response {
     (
@@ -535,6 +602,7 @@ fn validate_event(v: &Value) -> Result<()> {
 async fn route(s: App, request: Request) -> Result<Response> {
     let method = request.method().clone();
     let raw_path = request.uri().path();
+    let raw_oauth_path = raw_path.to_owned();
     let path = raw_path.strip_suffix('/').unwrap_or(raw_path).to_owned();
     let query = url::form_urlencoded::parse(request.uri().query().unwrap_or("").as_bytes())
         .into_owned()
@@ -553,7 +621,15 @@ async fn route(s: App, request: Request) -> Result<Response> {
             .trim()
             .eq_ignore_ascii_case("application/json")
     });
-    let bytes = if is_json {
+    let is_form = path.starts_with("/oauth/")
+        && header(&headers, "content-type").is_some_and(|s| {
+            s.split(';')
+                .next()
+                .unwrap_or("")
+                .trim()
+                .eq_ignore_ascii_case("application/x-www-form-urlencoded")
+        });
+    let bytes = if is_json || is_form {
         json_body(body, &headers).await?
     } else {
         Vec::new()
@@ -563,6 +639,20 @@ async fn route(s: App, request: Request) -> Result<Response> {
         input = crate::js_string::parse(&bytes).map_err(|_| Error::Api(400, "invalid_input"))?;
         js_numbers(&mut input);
         ensure(input.is_object() || input.is_array(), 400, "invalid_input")?;
+    }
+    if is_form {
+        ensure(bytes.len() <= 16384, 413, "payload_too_large")?;
+        input = json!({});
+        let mut count = 0;
+        for (k, v) in url::form_urlencoded::parse(&bytes) {
+            count += 1;
+            ensure(
+                count <= 12 && input.get(k.as_ref()).is_none() && v.len() <= 4096,
+                400,
+                "invalid_input",
+            )?;
+            input[k.as_ref()] = json!(v);
+        }
     }
     let parts_of_path = path
         .strip_prefix('/')
@@ -589,7 +679,8 @@ async fn route(s: App, request: Request) -> Result<Response> {
         && (headers
             .get("authorization")
             .is_some_and(|value| !value.as_bytes().is_empty())
-            || (method == axum::http::Method::POST && matches!(p, ["v1", "connections"])))
+            || (method == axum::http::Method::POST && matches!(p, ["v1", "connections"]))
+            || path.starts_with("/oauth/"))
         && let Some(gate) = &s.options.serving
     {
         gate.assert_serving().await?;
@@ -648,7 +739,303 @@ async fn route(s: App, request: Request) -> Result<Response> {
         id(&v)?;
         Ok(v)
     };
+    let oauth_resource = match p {
+        ["mcp", "services", id] => Some(check_id(id)?),
+        _ => None,
+    };
+    let oauth_token = header(&headers, "authorization")
+        .and_then(|s| s.strip_prefix("Bearer "))
+        .filter(|s| s.starts_with("smsa_"))
+        .map(str::to_owned);
+    let authorization: Result<()> = async {
+        if let Some(id) = &oauth_resource {
+            ensure(
+                raw_oauth_path == format!("/mcp/services/{id}"),
+                401,
+                "invalid_token",
+            )?;
+            ensure(oauth_token.is_some(), 401, "authentication_required")?;
+        }
+        if let Some(token) = oauth_token {
+            let target = oauth_resource
+                .as_ref()
+                .ok_or(Error::Api(401, "invalid_token"))?;
+            let root = s
+                .options
+                .public_url
+                .as_deref()
+                .ok_or(Error::Api(503, "oauth_not_configured"))?
+                .trim_end_matches('/');
+            let expected = crate::oauth::resource(root, target);
+            let relay = r.clone();
+            r.store
+                .tx(move |tx| {
+                    let (relay, token, expected) = (relay.clone(), token.clone(), expected.clone());
+                    Box::pin(async move {
+                        let access = tx.get("oauthAccess", &hash(&token)).await?;
+                        ensure(access["resource"] == expected, 401, "invalid_token")?;
+                        relay.agent(tx, &token).await?;
+                        Ok(())
+                    })
+                })
+                .await?;
+        }
+        Ok(())
+    }
+    .await;
+    if let Err(error) = authorization {
+        if matches!(error, Error::Api(401, _))
+            && method == "POST"
+            && let (Some(id), Some(base)) = (&oauth_resource, &s.options.public_url)
+            && let Ok(input) = serde_json::from_slice::<Value>(&bytes)
+            && input["jsonrpc"] == "2.0"
+            && input["method"] == "tools/call"
+            && (input["id"].is_string() || input["id"].is_number())
+        {
+            let challenge = format!(
+                "Bearer resource_metadata=\"{}/.well-known/oauth-protected-resource/mcp/services/{id}\", error=\"invalid_token\", error_description=\"Connect this service to authorize tools.\"",
+                base.trim_end_matches('/')
+            );
+            return Ok(json_response(
+                json!({"jsonrpc":"2.0","id":input["id"],"result":{"isError":true,"content":[{"type":"text","text":"Authorization required."}],"_meta":{"mcp/www_authenticate":[challenge]}}}),
+                200,
+            ));
+        }
+        return Err(error);
+    }
     let output = match (method.as_str(), p) {
+        ("GET", [".well-known", "oauth-authorization-server"]) => crate::oauth::metadata(
+            s.options
+                .public_url
+                .as_deref()
+                .ok_or(Error::Api(503, "oauth_not_configured"))?,
+        )?,
+        (
+            "GET",
+            [
+                ".well-known",
+                "oauth-protected-resource",
+                "mcp",
+                "services",
+                id,
+            ],
+        ) => {
+            let id = check_id(id)?;
+            let service = r
+                .onboarding(
+                    "publicService".into(),
+                    String::new(),
+                    id.clone(),
+                    Value::Null,
+                )
+                .await?;
+            let root = s
+                .options
+                .public_url
+                .as_deref()
+                .ok_or(Error::Api(503, "oauth_not_configured"))?
+                .trim_end_matches('/');
+            json!({"resource":crate::oauth::resource(root,&id),"authorization_servers":[root],"bearer_methods_supported":["header"],"scopes_supported":service["capabilities"]})
+        }
+        ("POST", ["oauth", "register"]) => {
+            status = 201;
+            r.oauth_register(input, peer.clone(), None).await?
+        }
+        ("GET", ["oauth", "authorize"]) => {
+            let mut params = json!({});
+            for (k, v) in &query {
+                ensure(params.get(k).is_none(), 400, "invalid_input")?;
+                params[k] = json!(v);
+            }
+            let location = r
+                .oauth_start(
+                    params,
+                    peer.clone(),
+                    s.options
+                        .public_url
+                        .as_deref()
+                        .ok_or(Error::Api(503, "oauth_not_configured"))?,
+                )
+                .await?;
+            return Ok((StatusCode::SEE_OTHER, [("Location", location)]).into_response());
+        }
+        ("POST", ["oauth", "token" | "revoke"]) => {
+            ensure(
+                input.is_object()
+                    && input
+                        .as_object()
+                        .unwrap()
+                        .values()
+                        .all(|v| v.as_str().is_some_and(|s| s.len() <= 4096)),
+                400,
+                "invalid_input",
+            )?;
+            if p[1] == "token" {
+                r.oauth_token(input).await?
+            } else {
+                r.oauth_revoke(input).await?
+            }
+        }
+        ("GET", ["oauth", "consent", id]) => {
+            check_id(id)?;
+            return Ok(crate::onboarding_pages::page(&s.options));
+        }
+        (verb, ["v3", "oauth", "sessions", id, rest @ ..]) => {
+            let action = match (verb, rest) {
+                ("GET", []) => "review",
+                ("POST", ["decision"]) => "decide",
+                ("POST", ["response"]) => "response",
+                _ => return Err(Error::Api(404, "not_found")),
+            };
+            r.oauth_session(
+                action.into(),
+                s.owner(&headers, verb == "GET", false).await?.uid,
+                check_id(id)?,
+                input,
+            )
+            .await?
+        }
+        ("GET", ["owned-services"]) => {
+            return Ok(crate::onboarding_pages::owned_services(&s.options));
+        }
+        ("GET", ["owned-services.js"]) => {
+            return Ok((
+                [("Content-Type", "application/javascript")],
+                include_str!("../../server/public/owned-services.js"),
+            )
+                .into_response());
+        }
+        ("GET", ["onboarding-qr.js"]) => {
+            return Ok((
+                [("Content-Type", "application/javascript")],
+                include_str!("../../server/public/onboarding-qr.js"),
+            )
+                .into_response());
+        }
+        ("GET", ["onboarding.js"]) => {
+            return Ok((
+                [("Content-Type", "application/javascript")],
+                include_str!("../../server/public/onboarding.js"),
+            )
+                .into_response());
+        }
+        ("GET", ["register" | "pair" | "services" | "connections", public_id]) => {
+            check_id(public_id)?;
+            return Ok(crate::onboarding_pages::page(&s.options));
+        }
+        (verb, ["v3", rest @ ..]) => {
+            let (op, credential, target, created) = match (verb, rest) {
+                ("POST", ["registration-sessions"]) => {
+                    ("register", bearer(&headers)?, peer.clone(), true)
+                }
+                ("GET", ["registration-sessions", "current"]) => {
+                    ("registrationPoll", bearer(&headers)?, String::new(), false)
+                }
+                ("GET", ["registration-sessions", id]) => (
+                    "registrationReview",
+                    s.owner(&headers, true, false).await?.uid,
+                    check_id(id)?,
+                    false,
+                ),
+                ("POST", ["registration-sessions", id, "decision"]) => (
+                    "registrationDecide",
+                    s.owner(&headers, false, false).await?.uid,
+                    check_id(id)?,
+                    false,
+                ),
+                ("GET", ["services"]) => (
+                    "listServices",
+                    s.owner(&headers, true, false).await?.uid,
+                    String::new(),
+                    false,
+                ),
+                ("GET", ["services", id]) => (
+                    "publicService",
+                    s.owner(&headers, true, false).await?.uid,
+                    check_id(id)?,
+                    false,
+                ),
+                ("PATCH", ["services", id]) => (
+                    "manageService",
+                    s.owner(&headers, false, false).await?.uid,
+                    check_id(id)?,
+                    false,
+                ),
+                ("DELETE", ["services", id]) => {
+                    input = json!({"delete":true});
+                    (
+                        "manageService",
+                        s.owner(&headers, false, false).await?.uid,
+                        check_id(id)?,
+                        false,
+                    )
+                }
+                ("POST", ["services", id, "connections"]) => (
+                    "permanent",
+                    s.owner(&headers, false, false).await?.uid,
+                    check_id(id)?,
+                    true,
+                ),
+                ("PATCH", ["service"]) => ("rotate", bearer(&headers)?, String::new(), false),
+                ("POST", ["service", "pairing-sessions"]) => {
+                    ("pairing", bearer(&headers)?, String::new(), true)
+                }
+                ("GET", ["service", "pairing-sessions", id]) => {
+                    ("pairingPoll", bearer(&headers)?, check_id(id)?, false)
+                }
+                ("GET", ["pairing-sessions", id]) => (
+                    "pairingReview",
+                    s.owner(&headers, true, false).await?.uid,
+                    check_id(id)?,
+                    false,
+                ),
+                ("POST", ["pairing-sessions", id, "decision"]) => (
+                    "pairingDecide",
+                    s.owner(&headers, false, false).await?.uid,
+                    check_id(id)?,
+                    false,
+                ),
+                ("GET", ["service", "deliveries"]) => {
+                    ("deliveries", bearer(&headers)?, String::new(), false)
+                }
+                ("POST", ["service", "deliveries", id, "acknowledgement"]) => {
+                    ("acknowledge", bearer(&headers)?, check_id(id)?, false)
+                }
+                ("GET", ["connection"]) => {
+                    ("connectionStatus", bearer(&headers)?, String::new(), false)
+                }
+                ("GET", ["service", "connections", id]) => (
+                    "serviceConnectionStatus",
+                    bearer(&headers)?,
+                    check_id(id)?,
+                    false,
+                ),
+                ("GET", ["connections", id]) => (
+                    "ownerConnectionStatus",
+                    s.owner(&headers, true, false).await?.uid,
+                    check_id(id)?,
+                    false,
+                ),
+                ("PATCH", ["connections", id]) => (
+                    "manageConnection",
+                    s.owner(&headers, false, false).await?.uid,
+                    check_id(id)?,
+                    false,
+                ),
+                ("DELETE", ["connections", id]) => (
+                    "disconnect",
+                    s.owner(&headers, false, false).await?.uid,
+                    check_id(id)?,
+                    false,
+                ),
+                _ => return Err(Error::Api(404, "not_found")),
+            };
+            if created {
+                status = 201;
+            }
+            r.onboarding(op.into(), credential, target, input.clone())
+                .await?
+        }
         ("GET", ["health" | "healthz"]) => json!({"ok":true}),
         ("GET", ["privacy"] | ["account", "delete"]) => {
             return Ok(
@@ -998,7 +1385,7 @@ async fn route(s: App, request: Request) -> Result<Response> {
             }
             json!({"ok":true})
         }
-        ("POST", ["mcp"]) => {
+        ("POST", ["mcp"] | ["mcp", "services", _]) => {
             let secret = bearer(&headers)?;
             r.check_agent(&secret).await?;
             let messages = input
@@ -1022,9 +1409,14 @@ async fn route(s: App, request: Request) -> Result<Response> {
                 Request::from_parts(parts, Body::from(serde_json::to_vec(&input).unwrap()));
             return Ok(crate::mcp::handle(r.clone(), secret, request, input).await);
         }
-        (_, ["mcp"]) => return Err(Error::Api(405, "method_not_allowed")),
+        (_, ["mcp"] | ["mcp", "services", _]) => return Err(Error::Api(405, "method_not_allowed")),
         _ => return Err(Error::Api(404, "not_found")),
     };
+    if let Some(event) =
+        crate::telemetry::onboarding_outcome(&path, method.as_str(), status, &output)
+    {
+        r.delivery.record(event).await;
+    }
     Ok(json_response(output, status))
 }
 fn urlencoding(s: &str) -> Result<String> {

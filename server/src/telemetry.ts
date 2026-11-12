@@ -5,6 +5,7 @@ import type { Firestore, Query } from 'firebase-admin/firestore';
 export type Kind = 'sms' | 'form' | 'webhook';
 export type Category = 'quota' | 'timeout' | 'destination' | 'rejected' | 'unavailable' | 'internal';
 type Event =
+  | { event: 'onboarding_outcome'; phase: 'registration' | 'approval' | 'delivery' | 'setup'; outcome: string; count: number }
   | { event: 'http_completed'; method: string; route: string; status_class: string; duration_ms: number }
   | { event: 'delivery_attempt'; kind: Kind; outcome: 'accepted' | 'failed'; category?: Category; age_ms: number }
   | { event: 'wakeup_failed'; category: Category }
@@ -22,11 +23,18 @@ export class Telemetry {
   }
   http = (req: Request, res: Response, next: NextFunction) => {
     const started = this.now();
+    let lifecycle: Extract<Event, {event:'onboarding_outcome'}> | undefined;
+    const originalJson = res.json.bind(res);
+    res.json = body => {
+      lifecycle = onboardingOutcome(typeof req.route?.path === 'string' ? req.route.path : '', req.method, res.statusCode, body);
+      return originalJson(body);
+    };
     res.once('finish', () => {
       // Route templates come from Express registration, never the caller's path/query.
       const registered: unknown = req.route?.path;
-      const route = typeof registered === 'string' ? registered : Array.isArray(registered) ? '/health' : 'unmatched';
+      const route = typeof registered === 'string' ? registered : Array.isArray(registered) ? (req.path.startsWith('/mcp/services/') ? '/mcp/services/:serviceId' : req.path === '/mcp' ? '/mcp' : '/health') : 'unmatched';
       const method = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'].includes(req.method) ? req.method : 'OTHER';
+      if (lifecycle) this.emit(lifecycle);
       this.emit({ event: 'http_completed', method, route, status_class: `${Math.floor(res.statusCode / 100)}xx`, duration_ms: Math.max(0, this.now() - started) });
     });
     next();
@@ -83,3 +91,17 @@ export function category(error: unknown): Category {
   return 'internal';
 }
 export const telemetry = new Telemetry();
+
+/** Counts observed API outcomes, including retries; no account or payload dimensions. */
+export function onboardingOutcome(route: string, method: string, status: number, value: any): Extract<Event, {event:'onboarding_outcome'}> | undefined {
+  const phase = route.startsWith('/v3/registration-sessions') ? 'registration'
+    : route.startsWith('/v3/pairing-sessions') || route.startsWith('/v3/service/pairing-sessions') || route.startsWith('/v3/oauth/sessions') || route === '/v3/services/:id/connections' ? 'approval'
+    : route.startsWith('/v3/service/deliveries') ? 'delivery'
+    : method === 'GET' && ['/v3/connection','/v3/connections/:id','/v3/service/connections/:id'].includes(route) ? 'setup' : undefined;
+  if (!phase) return;
+  const candidate = status >= 400 ? (['session_expired','delivery_expired'].includes(value?.error) ? 'expired' : 'failed')
+    : phase === 'delivery' ? (route.endsWith('/acknowledgement') ? 'acknowledged' : 'available')
+    : phase === 'setup' ? value?.setup : value?.status ?? (value?.redirect ? 'decided' : 'pending');
+  const outcome = ['pending','approved','denied','expired','available','acknowledged','phone_setup_needed','waiting_for_service','setup_complete','disconnected','failed','decided'].includes(candidate) ? candidate : 'failed';
+  return {event:'onboarding_outcome',phase,outcome,count:phase==='delivery' && outcome==='available' ? Math.min(100,Array.isArray(value?.deliveries)?value.deliveries.length:0) : 1};
+}

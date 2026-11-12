@@ -23,7 +23,7 @@ impl Relay {
         let rid = id.clone();
         let claims=self.store.tx(move|tx|{let(s,id)=(s.clone(),rid.clone());Box::pin(async move{
  let mut r=tx.get("requests",&id).await?;if !active(text(&r,"status"))||text(&r,"status")=="queued"||flag(&r,"notificationSent")||num(&r,"nextNotificationAt")>s.now(){return Ok(vec![]);}
- let g=tx.get("grants",text(&r,"grantId")).await?;let a=tx.get("accounts",text(&r,"ownerId")).await?;if flag(&a,"deleting"){tx.merge("requests",&id,json!({"status":"cancelled","reason":"account_deleted","notificationSent":true}))?;return Ok(vec![]);}let ds=s.devices(tx,text(&r,"ownerId")).await?;s.expire(tx,&mut r,&a,s.valid_grant(&g),&ds)?;if !active(text(&r,"status")){return Ok(vec![]);}r["phones"]=phones(&r);let ttl=num(&r,"expiresAt")-s.now();let created_at=r["createdAt"].clone();let mut plans=vec![];
+ let g=tx.get("grants",text(&r,"grantId")).await?;let a=tx.get("accounts",text(&r,"ownerId")).await?;if flag(&a,"deleting"){tx.merge("requests",&id,json!({"status":"cancelled","reason":"account_deleted","notificationSent":true}))?;return Ok(vec![]);}let ds=s.devices(tx,text(&r,"ownerId")).await?;s.expire(tx,&mut r,&a,s.valid_grant(tx, &g).await? && crate::onboarding::capability(&g,"sms"),&ds)?;if !active(text(&r,"status")){return Ok(vec![]);}r["phones"]=phones(&r);let ttl=num(&r,"expiresAt")-s.now();let created_at=r["createdAt"].clone();let mut plans=vec![];
  for(device,p)in r["phones"].as_object_mut().unwrap(){let d=ds.iter().find(|d|text(d,"id")==device);if d.is_none()||!active(text(p,"status")){p["sent"]=json!(true);continue;}
 if flag(p,"sent")||num(p,"lease")>s.now()||num(p,"nextAt")>s.now(){continue;}p["lease"]=json!(s.now()+MINUTE);p["attempts"]=json!(num(p,"attempts")+1);plans.push(json!({"deviceId":device,"token":d.unwrap()["fcmToken"],"lease":p["lease"],"attempts":p["attempts"],"ttl":ttl,"createdAt":created_at}));}
  delivery_summary(&mut r);tx.set("requests",&id,r)?;Ok(plans)})}).await?;
@@ -77,7 +77,7 @@ if flag(p,"sent")||num(p,"lease")>s.now()||num(p,"nextAt")>s.now(){continue;}p["
         let (rid, l) = (id.clone(), lease.clone());
         let claim=self.store.tx(move|tx|{let(s,id,lease)=(s.clone(),rid.clone(),l.clone());Box::pin(async move{
  let j=tx.get("deliveryOutbox",&id).await?;if j.is_null()||num(&j,"nextAt")>s.now(){return Ok(Value::Null);}let g=tx.get("grants",text(&j,"grantId")).await?;let r=tx.get("formRequests",text(&j,"requestId")).await?;let a=tx.get("accounts",text(&j,"ownerId")).await?;let e=tx.get("requestEvents",text(&j,"eventId")).await?;let d=if text(&j,"deviceId").is_empty(){Value::Null}else{tx.get("devices",text(&j,"deviceId")).await?};let hook=arr(&g,"webhooks").into_iter().find(|h|h["id"]==j["hookId"]);
- if r.is_null()||e.is_null()||num(&j,"purgeAt")<=s.now()||flag(&a,"deleting")||!flag(&g,"formsApproved")||!s.valid_grant(&g)||(text(&j,"kind")=="push"&&(text(&r,"status")!="pending"||num(&r,"expiresAt")<=s.now()||d.is_null()||flag(&d,"deleted")||flag(&d,"paused")||d["ownerId"]!=j["ownerId"]||(r["definition"].get("steps").is_some()&&d["wizardVersion"]!=1)))||(text(&j,"kind")=="webhook"&&hook.is_none()){tx.delete("deliveryOutbox",&id)?;return Ok(Value::Null);}
+ if r.is_null()||e.is_null()||num(&j,"purgeAt")<=s.now()||flag(&a,"deleting")||!crate::forms::allowed(&g,&r["definition"])||!s.valid_grant(tx, &g).await?||(text(&j,"kind")=="push"&&(text(&r,"status")!="pending"||num(&r,"expiresAt")<=s.now()||d.is_null()||flag(&d,"deleted")||flag(&d,"paused")||d["ownerId"]!=j["ownerId"]||(r["definition"].get("steps").is_some()&&d["wizardVersion"]!=1)))||(text(&j,"kind")=="webhook"&&hook.is_none()){tx.delete("deliveryOutbox",&id)?;return Ok(Value::Null);}
  tx.merge("deliveryOutbox",&id,json!({"lease":lease,"nextAt":s.now()+MINUTE,"attempts":num(&j,"attempts")+1}))?;Ok(json!({"j":j,"r":r,"e":e,"token":d["fcmToken"],"hook":hook}))})}).await?;
         if claim.is_null() {
             return Ok(());
@@ -133,6 +133,7 @@ if flag(p,"sent")||num(p,"lease")>s.now()||num(p,"nextAt")>s.now(){continue;}p["
         Ok(())
     }
     pub async fn maintenance(&self) -> Result<()> {
+        self.onboarding_cleanup().await?;
         self.maintenance_page(
             "active-owners",
             Query::new("accounts").eq("hasWork", true),
@@ -278,7 +279,8 @@ if flag(p,"sent")||num(p,"lease")>s.now()||num(p,"nextAt")>s.now(){continue;}p["
                     }
                     let mut g = tx.get("grants", text(&r, "grantId")).await?;
                     if text(&r, "status") == "pending" && !g.is_null() {
-                        let valid = flag(&g, "formsApproved") && s.valid_grant(&g);
+                        let valid = crate::forms::allowed(&g, &r["definition"])
+                            && s.valid_grant(tx, &g).await?;
                         s.form_expire(tx, &mut r, &mut g, valid).await?;
                     }
                     Ok(())

@@ -48,7 +48,7 @@ fun SmsRequestScreen(
                             keyboardType = KeyboardType.Ascii, imeAction = ImeAction.Done),
                         supportingText = { Text(if (state.autofillDeclined) "SMS access declined. Enter the code yourself."
                             else if (state.codeDraft.isNotBlank() && !CodeExtractor.validCode(state.codeDraft.trim())) "Use 4–10 letters or digits, including at least one digit."
-                            else "Enter a code and tap Send, or approve Android’s prompt to send automatically.") },
+                            else "Approving shares the detected code with ${request.caller}. To share manually, enter a code and tap Send.") },
                         modifier = Modifier.fillMaxWidth())
                     if (state.candidates.size > 1) {
                         Text("Choose the code to send", style = MaterialTheme.typography.labelLarge)

@@ -1,0 +1,34 @@
+[
+  {
+    "name": "ChatGPT DCR",
+    "provider": "openai",
+    "redirectUri": "https://chatgpt.com/connector/oauth/relay-conformance",
+    "source": "https://developers.openai.com/plugins/build/auth"
+  },
+  {
+    "name": "ChatGPT CIMD",
+    "provider": "openai",
+    "redirectUri": "https://chatgpt.com/connector/oauth/relay-conformance",
+    "metadataId": "https://chatgpt.com/oauth/relay-conformance/client.json",
+    "source": "https://developers.openai.com/plugins/build/auth"
+  },
+  {
+    "name": "Claude hosted DCR",
+    "provider": "anthropic",
+    "redirectUri": "https://claude.ai/api/mcp/auth_callback",
+    "source": "https://docs.cloud.google.com/mcp/configure-mcp-ai-application"
+  },
+  {
+    "name": "Claude Messages OAuth bearer",
+    "provider": "anthropic",
+    "redirectUri": "https://8.8.8.8/application-owned-callback",
+    "source": "https://platform.claude.com/docs/en/agents-and-tools/mcp-connector"
+  },
+  {
+    "name": "Gemini Apps persistent linking",
+    "provider": "google",
+    "redirectUri": "https://oauth-redirect.googleusercontent.com/r/relay-conformance",
+    "blocked": "Google persistent linking requires stable refresh tokens; the requested relay policy rotates them. A compatible policy must be settled before claiming hosted Google acceptance.",
+    "source": "https://developers.google.com/connected-apps/mcp/oauth"
+  }
+]

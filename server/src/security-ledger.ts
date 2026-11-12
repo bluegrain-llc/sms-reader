@@ -4,7 +4,7 @@ import { z } from 'zod';
 import { ensure } from './model.js';
 
 export const securityIntentSchema = z.object({ version: z.literal(1), id: z.string().uuid(), at: z.number().int().nonnegative(),
-  ownerId: z.string().min(1).max(128), kind: z.enum(['account.delete', 'grant.revoke', 'forms.deny', 'device.pause', 'device.delete', 'webhook.delete']),
+  ownerId: z.string().min(1).max(128), kind: z.enum(['account.delete', 'grant.revoke', 'forms.deny', 'device.pause', 'device.delete', 'webhook.delete', 'service.invalidate', 'grant.restrict']),
   target: z.string().min(1).max(128), grantId: z.string().max(128).optional() }).strict();
 export type SecurityIntent = z.infer<typeof securityIntentSchema>;
 export type SecurityAction = Omit<SecurityIntent, 'version' | 'id' | 'at'>;

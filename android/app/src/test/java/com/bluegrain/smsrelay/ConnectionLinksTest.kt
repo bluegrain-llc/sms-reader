@@ -21,4 +21,13 @@ class ConnectionLinksTest {
         assertNull(ConnectionLinks.code("$base/connect?code=%XX", base))
         assertNull(ConnectionLinks.code("$base/connect?code=smsr_not_a_comparison_code", base))
     }
+    @Test fun onboardingLinksAreRestrictedToConfiguredOriginAndPublicPaths() {
+        for (kind in listOf("register", "pair", "services", "connections")) {
+            assertEquals(OnboardingLink(kind, "public-id"), ConnectionLinks.onboarding("$base/$kind/public-id", base))
+        }
+        assertEquals(OnboardingLink("oauth", "public-id"), ConnectionLinks.onboarding("$base/oauth/consent/public-id", base))
+        for (link in listOf("http://relay.example.test/pair/id", "https://other.example.test/pair/id", "$base/pair/id?token=secret", "$base/pair/id#fragment", "$base/pair/%2f", "$base/pair/../services/id", "https://attacker@relay.example.test/pair/id", "$base:8443/pair/id")) {
+            assertNull(ConnectionLinks.onboarding(link, base))
+        }
+    }
 }

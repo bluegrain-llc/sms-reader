@@ -15,6 +15,7 @@ gcp_auth = "0.12.7"
 hmac = "0.12"
 http-body = "1"
 ipnet = "2"
+josekit = "0.10.3"
 jsonschema = { version = "0.61", default-features = false }
 jsonwebtoken = { version = "11.1", default-features = false, features = ["aws_lc_rs"] }
 rand = "0.9"

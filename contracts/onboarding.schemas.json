@@ -1,0 +1,799 @@
+{
+  "OAuthAuthorization": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+      "response_type": {
+        "type": "string",
+        "const": "code"
+      },
+      "client_id": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 2048
+      },
+      "redirect_uri": {
+        "type": "string",
+        "maxLength": 2048
+      },
+      "resource": {
+        "type": "string",
+        "maxLength": 2048
+      },
+      "code_challenge": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9_-]{43}$"
+      },
+      "code_challenge_method": {
+        "type": "string",
+        "const": "S256"
+      },
+      "scope": {
+        "type": "string",
+        "maxLength": 80
+      },
+      "state": {
+        "type": "string",
+        "maxLength": 1024
+      }
+    },
+    "required": [
+      "response_type",
+      "client_id",
+      "redirect_uri",
+      "resource",
+      "code_challenge",
+      "code_challenge_method",
+      "scope"
+    ],
+    "additionalProperties": false
+  },
+  "OAuthClient": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+      "client_name": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 80
+      },
+      "redirect_uris": {
+        "minItems": 1,
+        "maxItems": 8,
+        "type": "array",
+        "items": {
+          "type": "string",
+          "maxLength": 2048,
+          "format": "uri"
+        }
+      },
+      "token_endpoint_auth_method": {
+        "default": "none",
+        "type": "string",
+        "enum": [
+          "none",
+          "client_secret_post"
+        ]
+      },
+      "grant_types": {
+        "default": [
+          "authorization_code",
+          "refresh_token"
+        ],
+        "type": "array",
+        "items": {
+          "type": "string",
+          "enum": [
+            "authorization_code",
+            "refresh_token"
+          ]
+        }
+      },
+      "response_types": {
+        "default": [
+          "code"
+        ],
+        "type": "array",
+        "items": {
+          "type": "string",
+          "const": "code"
+        }
+      },
+      "client_uri": {
+        "type": "string",
+        "format": "uri"
+      },
+      "client_id": {
+        "type": "string",
+        "maxLength": 2048
+      },
+      "scope": {
+        "type": "string",
+        "maxLength": 80
+      }
+    },
+    "required": [
+      "client_name",
+      "redirect_uris"
+    ]
+  },
+  "OAuthDecision": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+      "decision": {
+        "type": "string",
+        "enum": [
+          "approved",
+          "denied"
+        ]
+      },
+      "capabilities": {
+        "minItems": 1,
+        "maxItems": 2,
+        "type": "array",
+        "items": {
+          "type": "string",
+          "enum": [
+            "forms",
+            "sms"
+          ]
+        },
+        "uniqueItems": true
+      },
+      "expiresInDays": {
+        "anyOf": [
+          {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 365
+          },
+          {
+            "type": "null"
+          }
+        ]
+      }
+    },
+    "required": [
+      "decision",
+      "capabilities",
+      "expiresInDays"
+    ],
+    "additionalProperties": false
+  },
+  "Capabilities": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "minItems": 1,
+    "maxItems": 2,
+    "type": "array",
+    "items": {
+      "type": "string",
+      "enum": [
+        "forms",
+        "sms"
+      ]
+    },
+    "uniqueItems": true
+  },
+  "DeliveryPublicKey": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+      "kty": {
+        "type": "string",
+        "const": "EC"
+      },
+      "crv": {
+        "type": "string",
+        "const": "P-256"
+      },
+      "x": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9_-]{43}$"
+      },
+      "y": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9_-]{43}$"
+      }
+    },
+    "required": [
+      "kty",
+      "crv",
+      "x",
+      "y"
+    ],
+    "additionalProperties": false
+  },
+  "ServiceRegistration": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+      "name": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 80
+      },
+      "purpose": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 240
+      },
+      "capabilities": {
+        "default": [
+          "forms"
+        ],
+        "minItems": 1,
+        "maxItems": 2,
+        "type": "array",
+        "items": {
+          "type": "string",
+          "enum": [
+            "forms",
+            "sms"
+          ]
+        },
+        "uniqueItems": true
+      },
+      "deliveryPublicKey": {
+        "type": "object",
+        "properties": {
+          "kty": {
+            "type": "string",
+            "const": "EC"
+          },
+          "crv": {
+            "type": "string",
+            "const": "P-256"
+          },
+          "x": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{43}$"
+          },
+          "y": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{43}$"
+          }
+        },
+        "required": [
+          "kty",
+          "crv",
+          "x",
+          "y"
+        ],
+        "additionalProperties": false
+      },
+      "credentialHash": {
+        "type": "string",
+        "pattern": "^[a-f0-9]{64}$"
+      }
+    },
+    "required": [
+      "name",
+      "purpose",
+      "deliveryPublicKey",
+      "credentialHash"
+    ],
+    "additionalProperties": false
+  },
+  "Pairing": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+      "capabilities": {
+        "minItems": 1,
+        "maxItems": 2,
+        "type": "array",
+        "items": {
+          "type": "string",
+          "enum": [
+            "forms",
+            "sms"
+          ]
+        },
+        "uniqueItems": true
+      },
+      "expiresInDays": {
+        "default": null,
+        "anyOf": [
+          {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 365
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "externalAccountRef": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9_-]{16,128}$"
+      },
+      "idempotencyKey": {
+        "type": "string",
+        "minLength": 16,
+        "maxLength": 128
+      }
+    },
+    "required": [
+      "capabilities",
+      "idempotencyKey"
+    ],
+    "additionalProperties": false
+  },
+  "PairingDecision": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+      "decision": {
+        "type": "string",
+        "enum": [
+          "approved",
+          "denied"
+        ]
+      },
+      "capabilities": {
+        "minItems": 1,
+        "maxItems": 2,
+        "type": "array",
+        "items": {
+          "type": "string",
+          "enum": [
+            "forms",
+            "sms"
+          ]
+        },
+        "uniqueItems": true
+      },
+      "expiresInDays": {
+        "anyOf": [
+          {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 365
+          },
+          {
+            "type": "null"
+          }
+        ]
+      }
+    },
+    "required": [
+      "decision",
+      "capabilities",
+      "expiresInDays"
+    ],
+    "additionalProperties": false
+  },
+  "RegistrationDecision": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+      "decision": {
+        "type": "string",
+        "enum": [
+          "approved",
+          "denied"
+        ]
+      },
+      "selfAccess": {
+        "type": "boolean"
+      },
+      "capabilities": {
+        "minItems": 1,
+        "maxItems": 2,
+        "type": "array",
+        "items": {
+          "type": "string",
+          "enum": [
+            "forms",
+            "sms"
+          ]
+        },
+        "uniqueItems": true
+      },
+      "expiresInDays": {
+        "anyOf": [
+          {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 365
+          },
+          {
+            "type": "null"
+          }
+        ]
+      }
+    },
+    "required": [
+      "decision",
+      "selfAccess",
+      "capabilities",
+      "expiresInDays"
+    ],
+    "additionalProperties": false
+  },
+  "FormRequest": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+      "title": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 80
+      },
+      "body": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 16000
+      },
+      "fields": {
+        "default": [],
+        "maxItems": 30,
+        "type": "array",
+        "items": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "pattern": "^[a-zA-Z0-9_-]{1,128}$"
+                },
+                "label": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 160
+                },
+                "required": {
+                  "default": false,
+                  "type": "boolean"
+                },
+                "type": {
+                  "type": "string",
+                  "enum": [
+                    "text",
+                    "multiline"
+                  ]
+                },
+                "maxLength": {
+                  "default": 1000,
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 4000
+                },
+                "input": {
+                  "type": "string",
+                  "const": "sms_code"
+                }
+              },
+              "required": [
+                "id",
+                "label",
+                "type"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "pattern": "^[a-zA-Z0-9_-]{1,128}$"
+                },
+                "label": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 160
+                },
+                "required": {
+                  "default": false,
+                  "type": "boolean"
+                },
+                "type": {
+                  "type": "string",
+                  "const": "number"
+                },
+                "min": {
+                  "type": "number"
+                },
+                "max": {
+                  "type": "number"
+                }
+              },
+              "required": [
+                "id",
+                "label",
+                "type"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "pattern": "^[a-zA-Z0-9_-]{1,128}$"
+                },
+                "label": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 160
+                },
+                "required": {
+                  "default": false,
+                  "type": "boolean"
+                },
+                "type": {
+                  "type": "string",
+                  "const": "checkbox"
+                }
+              },
+              "required": [
+                "id",
+                "label",
+                "type"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "pattern": "^[a-zA-Z0-9_-]{1,128}$"
+                },
+                "label": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 160
+                },
+                "required": {
+                  "default": false,
+                  "type": "boolean"
+                },
+                "type": {
+                  "type": "string",
+                  "enum": [
+                    "single_choice",
+                    "multiple_choice"
+                  ]
+                },
+                "options": {
+                  "minItems": 1,
+                  "maxItems": 40,
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "id": {
+                        "type": "string",
+                        "pattern": "^[a-zA-Z0-9_-]{1,128}$"
+                      },
+                      "label": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 160
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "label"
+                    ],
+                    "additionalProperties": false
+                  }
+                }
+              },
+              "required": [
+                "id",
+                "label",
+                "type",
+                "options"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "pattern": "^[a-zA-Z0-9_-]{1,128}$"
+                },
+                "label": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 160
+                },
+                "required": {
+                  "default": false,
+                  "type": "boolean"
+                },
+                "type": {
+                  "type": "string",
+                  "const": "date"
+                }
+              },
+              "required": [
+                "id",
+                "label",
+                "type"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        }
+      },
+      "actions": {
+        "minItems": 1,
+        "maxItems": 8,
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "pattern": "^[a-zA-Z0-9_-]{1,128}$"
+            },
+            "label": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 80
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "submit",
+                "approve",
+                "decline",
+                "acknowledge"
+              ]
+            }
+          },
+          "required": [
+            "id",
+            "label",
+            "type"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "steps": {
+        "minItems": 2,
+        "maxItems": 12,
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "pattern": "^[a-zA-Z0-9_-]{1,128}$"
+            },
+            "title": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120
+            },
+            "body": {
+              "type": "string",
+              "maxLength": 4000
+            },
+            "fieldIds": {
+              "maxItems": 30,
+              "type": "array",
+              "items": {
+                "type": "string",
+                "pattern": "^[a-zA-Z0-9_-]{1,128}$"
+              }
+            },
+            "when": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "fieldId": {
+                      "type": "string",
+                      "pattern": "^[a-zA-Z0-9_-]{1,128}$"
+                    },
+                    "equals": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "maxLength": 4000
+                        },
+                        {
+                          "type": "number"
+                        },
+                        {
+                          "type": "boolean"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "fieldId",
+                    "equals"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "fieldId": {
+                      "type": "string",
+                      "pattern": "^[a-zA-Z0-9_-]{1,128}$"
+                    },
+                    "contains": {
+                      "type": "string",
+                      "pattern": "^[a-zA-Z0-9_-]{1,128}$"
+                    }
+                  },
+                  "required": [
+                    "fieldId",
+                    "contains"
+                  ],
+                  "additionalProperties": false
+                }
+              ]
+            }
+          },
+          "required": [
+            "id",
+            "title",
+            "fieldIds"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "expiresInSeconds": {
+        "default": 86400,
+        "type": "integer",
+        "minimum": 60,
+        "maximum": 604800
+      },
+      "idempotencyKey": {
+        "type": "string",
+        "minLength": 8,
+        "maxLength": 128
+      }
+    },
+    "required": [
+      "title",
+      "body",
+      "actions",
+      "idempotencyKey"
+    ],
+    "additionalProperties": false
+  },
+  "SmsRequest": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+      "purpose": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 4000,
+        "description": "Markdown explanation shown on the phone; pass the contents of your .md file"
+      },
+      "title": {
+        "description": "Short request title shown after the bot name",
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 80
+      },
+      "senderPhone": {
+        "type": "string",
+        "pattern": "^\\+[1-9][0-9]{5,14}$"
+      },
+      "idempotencyKey": {
+        "type": "string",
+        "minLength": 8,
+        "maxLength": 128
+      }
+    },
+    "required": [
+      "purpose",
+      "idempotencyKey"
+    ],
+    "additionalProperties": false
+  }
+}

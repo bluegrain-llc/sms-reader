@@ -26,6 +26,11 @@ export interface Grant {
   id: string; ownerId: string; deviceId: string; callerName: string;
   revoked: boolean; expiresAt: number; createdAt: number; rate: Rate;
   managerId?: string; callerId?: string; formRate?: Rate;
+  serviceId?: string; connectionId?: string; capabilities?: ('forms' | 'sms')[];
+  deliveryId?: string; deliveryAcknowledged?: boolean; deliveryExpiresAt?: number; deliveryKeyId?: string;
+}
+export function hasCapability(g: Grant & { formsApproved?: boolean }, capability: 'forms' | 'sms') {
+  return g.capabilities ? g.capabilities.includes(capability) : capability === 'sms' || !!g.formsApproved;
 }
 export interface Account { formListenerRequestId?: string; formListenerUntil?: number; deleting?: boolean; activeRequestId?: string | null; queueIds?: string[]; hasWork?: boolean; formRate?: Rate; rate?: Rate; connectionRate?: Rate }
 export interface PhoneState {

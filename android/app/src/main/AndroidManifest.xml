@@ -31,6 +31,19 @@
                 <data android:scheme="smsrelay" android:host="connect" />
             </intent-filter>
         </activity>
+        <activity android:name=".OnboardingActivity" android:exported="true" android:launchMode="singleTask"
+            android:label="Connect" android:taskAffinity="${applicationId}.onboarding">
+            <intent-filter android:autoVerify="true">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="https" android:host="${relayHost}" android:pathPrefix="/register/" />
+                <data android:scheme="https" android:host="${relayHost}" android:pathPrefix="/pair/" />
+                <data android:scheme="https" android:host="${relayHost}" android:pathPrefix="/services/" />
+                <data android:scheme="https" android:host="${relayHost}" android:pathPrefix="/connections/" />
+                <data android:scheme="https" android:host="${relayHost}" android:pathPrefix="/oauth/consent/" />
+            </intent-filter>
+        </activity>
         <service android:name=".RelayMessagingService" android:exported="false">
             <intent-filter><action android:name="com.google.firebase.MESSAGING_EVENT" /></intent-filter>
         </service>

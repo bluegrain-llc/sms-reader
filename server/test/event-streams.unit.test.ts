@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { setImmediate } from 'node:timers/promises';
+import { setTimeout as realSetTimeout, clearTimeout as realClearTimeout } from 'node:timers';
 import type { Firestore } from 'firebase-admin/firestore';
 import type { Forms } from '../src/forms.js';
 import { EventStreams } from '../src/event-streams.js';
@@ -54,4 +55,40 @@ test('one stream deadline preserves another subscriber and the final abort detac
     first.abort(); assert.equal(f.stops(), 0); assert.equal(f.streams.activeFeeds, 1);
     second.abort(); assert.equal(f.stops(), 3); assert.equal(f.streams.activeFeeds, 0);
   } finally { first.abort(); second.abort(); await Promise.allSettled([a, b]); }
+});
+
+test('scoped feeds follow updated expiry and discard delivery guards after acknowledgement', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 1000 });
+  const callbacks = new Map<string, (v: any) => void>();
+  let grant = { id: 'grant', ownerId: 'recipient', serviceId: 'service', formsApproved: true, capabilities: ['forms'], expiresAt: 10000, deliveryAcknowledged: false, deliveryExpiresAt: 1100, deliveryKeyId: 'old' };
+  const db = { runTransaction: async () => ({grant}), collection: (name: string) => {
+    let id = '';
+    const watch = { doc: (v: string) => { id = v; return watch; }, where: () => watch, orderBy: () => watch, limit: () => watch,
+      onSnapshot: (fn: (v: any) => void) => { const key = name + '/' + id; callbacks.set(key, fn); return () => callbacks.delete(key); } };
+    return watch;
+  } } as unknown as Firestore;
+  const streams = new EventStreams({ db, now: () => Date.now(), retained: () => true } as unknown as Forms);
+  let closed = 0;
+  const controller = new AbortController(), deadline = realSetTimeout(() => controller.abort(), 1000);
+  const pending = streams.subscribe('synthetic', {changed: () => {}, closed: () => { closed++; }}, controller.signal);
+  let subscription: Awaited<typeof pending> | undefined;
+  try {
+    await setImmediate();
+    callbacks.get('grants/grant')!({data: () => grant});
+    callbacks.get('accounts/recipient')!({data: () => ({})});
+    callbacks.get('services/service')!({data: () => ({active:true, ownerId:'operator'})});
+    callbacks.get('accounts/operator')!({data: () => ({})});
+    const keyChanged = callbacks.get('serviceDeliveryKeys/service_old')!;
+    keyChanged({exists:true,data:()=>({retired:false})});
+    callbacks.get('requestEvents/')!({docs:[]});
+    subscription = await pending;
+    grant = {...grant, deliveryAcknowledged:true};
+    callbacks.get('grants/grant')!({data:()=>grant});
+    assert.equal(callbacks.has('serviceDeliveryKeys/service_old'), false);
+    keyChanged({exists:true,data:()=>({retired:true})});
+    t.mock.timers.tick(101); assert.equal(closed,0); assert.equal(subscription.failed(),false);
+    grant = {...grant, expiresAt:1200};
+    callbacks.get('grants/grant')!({data:()=>grant});
+    t.mock.timers.tick(99); assert.equal(closed,1); assert.equal(subscription.failed(),true);
+  } finally { controller.abort(); await Promise.allSettled([pending]); subscription?.stop(); realClearTimeout(deadline); t.mock.timers.reset(); }
 });

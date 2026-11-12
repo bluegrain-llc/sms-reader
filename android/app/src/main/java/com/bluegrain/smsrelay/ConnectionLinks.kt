@@ -3,7 +3,18 @@ package com.bluegrain.smsrelay
 import java.net.URI
 import java.net.URLDecoder
 
+data class OnboardingLink(val kind: String, val id: String)
+
 object ConnectionLinks {
+    fun onboarding(link: String, serviceUrl: String): OnboardingLink? = runCatching {
+        val uri = URI(link)
+        val expected = URI(serviceUrl)
+        if (uri.scheme != "https" || expected.scheme != "https" || uri.host == null || !uri.host.equals(expected.host, true) ||
+            uri.port !in listOf(-1, 443) || uri.userInfo != null || uri.rawQuery != null || uri.rawFragment != null) return null
+        val match = Regex("^/(register|pair|services|connections|oauth/consent)/([a-zA-Z0-9_-]{1,128})$").matchEntire(uri.rawPath) ?: return null
+        OnboardingLink(if (match.groupValues[1] == "oauth/consent") "oauth" else match.groupValues[1], match.groupValues[2])
+    }.getOrNull()
+
     fun code(link: String, serviceUrl: String): String? = runCatching {
         val uri = URI(link)
         val expectedHost = runCatching { URI(serviceUrl).host }.getOrNull()

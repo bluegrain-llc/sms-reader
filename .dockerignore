@@ -6,6 +6,8 @@
 !server/tsconfig.json
 !server/src/
 !server/src/**
+!server/public/
+!server/public/**
 !server-rust/
 !server-rust/Cargo.toml
 !server-rust/Cargo.lock

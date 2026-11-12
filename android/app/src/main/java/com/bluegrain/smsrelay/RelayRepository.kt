@@ -78,6 +78,7 @@ class RelayRepository(context: Context) {
             }
         }
     }
+    suspend fun onboarding(method: String, path: String, body: JSONObject? = null) = JSONObject(call(method, path, body))
     suspend fun register(): JSONObject {
         val fcm = FirebaseMessaging.getInstance().token.await()
         val r = JSONObject(call("PUT", "/v1/devices/$deviceId", JSONObject().put("name", "${Build.MANUFACTURER} ${Build.MODEL}").put("fcmToken", fcm).put("wizardVersion", 1)))

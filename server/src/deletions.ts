@@ -7,7 +7,7 @@ import { Firestore } from 'firebase-admin/firestore';
 import { ensure, hash, HISTORY, MINUTE } from './model.js';
 
 const DAY = 24 * 60 * MINUTE;
-export const ownedCollections = ['devices', 'grants', 'managers', 'managerCallers', 'connections', 'connectionCodes', 'requests', 'results', 'audit', 'formRequests', 'formResults', 'requestEvents', 'deliveryOutbox'] as const;
+export const ownedCollections = ['devices', 'grants', 'managers', 'managerCallers', 'connections', 'connectionCodes', 'requests', 'results', 'audit', 'formRequests', 'formResults', 'requestEvents', 'deliveryOutbox', 'services', 'serviceCredentials', 'serviceDeliveryKeys', 'registrationSessions', 'pairingSessions', 'serviceConnections', 'connectionBindings', 'credentialDeliveries', 'oauthSessions', 'oauthBindings', 'oauthCodes', 'oauthFamilies', 'oauthAccess', 'oauthRefresh', 'oauthCleanup', 'oauthGrantCleanup'] as const;
 export interface DeletionJob {
   ownerId: string; status: 'pending' | 'running' | 'completed'; createdAt: number; updatedAt: number;
   nextAt: number; backlogAt: number; lease: string | null; leaseUntil: number; collectionIndex: number; batchSize: number; attempts: number; purgeAt: Date | null;
@@ -103,7 +103,10 @@ export class Deletions {
           const current = (await tx.get(ref)).data() as DeletionJob | undefined;
           if (current?.lease !== lease || current.leaseUntil <= this.now()) return;
           const page = await tx.get(this.db.collection(collection).where('ownerId', '==', job.ownerId).limit(batchSize));
-          for (const doc of page.docs) tx.delete(doc.ref);
+          for (const doc of page.docs) {
+            if (collection === 'services') tx.set(this.db.collection('serviceCleanup').doc(doc.id), { serviceId: doc.id, ownerId: job.ownerId, collectionIndex: 0 });
+            tx.delete(doc.ref);
+          }
           tx.update(ref, { collectionIndex: job.collectionIndex + (page.size < batchSize ? 1 : 0), status: 'pending', lease: null,
             leaseUntil: 0, nextAt: this.now(), updatedAt: this.now() });
         });

@@ -44,7 +44,34 @@ impl ServerHandler for Mcp {
         _: Option<PaginatedRequestParams>,
         _: RequestContext<RoleServer>,
     ) -> std::result::Result<ListToolsResult, rmcp::ErrorData> {
-        Ok(ListToolsResult::with_all_items(tools()))
+        let relay = self.relay.clone();
+        let secret = self.secret.clone();
+        let g = self
+            .relay
+            .store
+            .tx(move |tx| {
+                let (r, k) = (relay.clone(), secret.clone());
+                Box::pin(async move { Ok(r.agent(tx, &k).await?.0) })
+            })
+            .await
+            .map_err(|_| rmcp::ErrorData::invalid_request("invalid_token", None))?;
+        Ok(ListToolsResult::with_all_items(
+            tools()
+                .into_iter()
+                .filter(|tool| {
+                    g.get("capabilities").is_none()
+                        || tool
+                            .meta
+                            .as_ref()
+                            .and_then(|m| m.get("com.bluegrain.smsrelay/capability"))
+                            .and_then(Value::as_str)
+                            .is_some_and(|cap| {
+                                ["forms", "sms"].contains(&cap)
+                                    && crate::onboarding::capability(&g, cap)
+                            })
+                })
+                .collect(),
+        ))
     }
     async fn call_tool(
         &self,
@@ -254,6 +281,7 @@ async fn run_sdk(
         return Some(error);
     }
     envelope = crate::mcp_input::normalized_envelope(&envelope);
+    let oauth = secret.starts_with("smsa_");
     let original_id = envelope["id"].clone();
     let list_tools = envelope["method"] == "tools/list";
     if original_id.as_i64().is_some_and(|n| n < 0) {
@@ -288,10 +316,26 @@ async fn run_sdk(
         .unwrap();
     let mut value = serde_json::from_slice::<Value>(&bytes).ok()?;
     if list_tools && value["result"]["tools"].is_array() {
+        let allowed = value["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|t| t["name"].as_str().map(str::to_owned))
+            .collect::<Vec<_>>();
         static WIRE_TOOLS: OnceLock<Value> = OnceLock::new();
         value["result"]["tools"] = WIRE_TOOLS
             .get_or_init(|| serde_json::from_str(include_str!("../compat/tools.json")).unwrap())
             .clone();
+        value["result"]["tools"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|t| allowed.iter().any(|name| t["name"] == name.as_str()));
+        if oauth {
+            for tool in value["result"]["tools"].as_array_mut().unwrap() {
+                let cap = tool["_meta"]["com.bluegrain.smsrelay/capability"].clone();
+                tool["_meta"]["securitySchemes"] = json!([{"type":"oauth2","scopes":[cap]}]);
+            }
+        }
     }
     if value["id"] == "compat-negative-id" {
         value["id"] = original_id;
