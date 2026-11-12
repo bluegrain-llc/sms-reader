@@ -16,9 +16,9 @@ export const requestSchema = z.object({
 }).strict();
 export const deviceRegistrationSchema = z.object({ name: z.string().trim().min(1).max(80), fcmToken: z.string().min(1).max(4096),
   wizardVersion: z.literal(1).optional(), platform: z.enum(['android','ios']).default('android') }).strict();
-export const smsEventSchema = z.discriminatedUnion('status', [
-  z.object({ status: z.literal('ready'), listenerStartedAt: z.number().int().positive().optional(), mode: z.enum(['listener','manual']).default('listener') }).strict()
-    .refine(b => b.mode === 'manual' ? b.listenerStartedAt === undefined : b.listenerStartedAt !== undefined),
+export const smsEventSchema = z.union([
+  z.object({ status: z.literal('ready'), listenerStartedAt: z.number().int().positive(), mode: z.literal('listener').default('listener') }).strict(),
+  z.object({ status: z.literal('ready'), mode: z.literal('manual') }).strict(),
   z.object({ status: z.literal('awaiting_consent') }).strict(),
   z.object({ status: z.literal('completed'), code: codeSchema, source: z.enum(['android_consent','manual']).optional() }).strict(),
   z.object({ status: z.literal('denied') }).strict(), z.object({ status: z.literal('cancelled') }).strict(),

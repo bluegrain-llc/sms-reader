@@ -1,5 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { z } from 'zod';
 import { bump, codeSchema, hash, MINUTE, newSecret, requestSchema } from '../src/model.js';
 test('256-bit secrets, deterministic one-way identifier and strict request validation', () => {
   const token = newSecret();
@@ -28,4 +30,23 @@ test('device and SMS event schemas keep legacy Android clients compatible and ma
   assert.equal(smsEventSchema.parse({status:'ready',mode:'manual'}).status,'ready');
   for(const input of [{status:'ready'},{status:'ready',mode:'manual',listenerStartedAt:1},{status:'ready',mode:'manual',manualEntryDeadline:9999999}]) assert.equal(smsEventSchema.safeParse(input).success,false);
   assert.equal(smsEventSchema.parse({status:'ready',listenerStartedAt:1}).status,'ready');
+});
+
+test('published SMS readiness contracts enforce the runtime input alternatives', async () => {
+  const { smsEventSchema } = await import('../src/model.js');
+  const exported = JSON.parse(readFileSync(new URL('../../contracts/onboarding.schemas.json', import.meta.url), 'utf8'));
+  const openapi = JSON.parse(readFileSync(new URL('../../contracts/onboarding.openapi.json', import.meta.url), 'utf8'));
+  const inputs: [unknown, boolean][] = [
+    [{ status: 'ready', listenerStartedAt: 1 }, true],
+    [{ status: 'ready', mode: 'listener', listenerStartedAt: 1 }, true],
+    [{ status: 'ready', mode: 'manual' }, true],
+    [{ status: 'ready' }, false],
+    [{ status: 'ready', mode: 'listener' }, false],
+    [{ status: 'ready', mode: 'manual', listenerStartedAt: 1 }, false],
+    [{ status: 'ready', mode: 'manual', manualEntryDeadline: 9999999 }, false],
+    [{ status: 'ready', listenerStartedAt: 0 }, false],
+  ];
+  for (const schema of [smsEventSchema, z.fromJSONSchema(exported.SmsDeviceEvent), z.fromJSONSchema(openapi.components.schemas.SmsDeviceEvent)]) {
+    for (const [input, valid] of inputs) assert.equal(schema.safeParse(input).success, valid, JSON.stringify(input));
+  }
 });
