@@ -20,12 +20,12 @@ export const authorizationSchema = z.object({ response_type: z.literal('code'), 
   redirect_uri: z.string().max(2048), resource: z.string().max(2048), code_challenge: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
   code_challenge_method: z.literal('S256'), scope: z.string().max(80), state: z.string().max(1024).optional() }).strict();
 export const oauthDecisionSchema = decisionSchema;
-type Client = z.infer<typeof clientSchema> & { id: string; secretHash: string | null; expiresAt: number };
+type Client = z.infer<typeof clientSchema> & { id: string; secretHash: string | null; expiresAt: number; purgeAt?: unknown };
 type Session = z.infer<typeof authorizationSchema> & { id: string; serviceId: string; clientName: string;
   capabilities: ('forms' | 'sms')[]; status: string; ownerId: string | null; expiresAt: number; connectionId: string | null;
   decisionHash?: string; codeHash?: string; grantId?: string; selectedCapabilities?: ('forms' | 'sms')[] };
 type Family = { id: string; ownerId: string; serviceId: string; grantId: string; clientId: string; resource: string;
-  capabilities: ('forms' | 'sms')[]; revoked: boolean; expiresAt: number };
+  capabilities: ('forms' | 'sms')[]; revoked: boolean; expiresAt: number; purgeAt?: unknown };
 
 /** Public HTTPS metadata is fetched at a pinned address, with no redirects or environment proxy. */
 export async function fetchClientDocument(raw: string): Promise<unknown> {
@@ -179,7 +179,9 @@ export class OAuth {
     return c;
   }
   async token(input: Record<string, string>) {
-    const access = secret('smsa'), refresh = secret('smsf'), familyId = randomUUID();
+    const refresh = input.grant_type === 'refresh_token' ? input.refresh_token ?? '' : secret('smsf');
+    // Derive the stable access credential from static client credentials, never a deployment key.
+    const access = `smsa_${createHmac('sha256', refresh).update(`relay-oauth-access-v1\n${input.client_secret ?? ''}`).digest('base64url')}`, familyId = randomUUID();
     const result = await this.relay.db.runTransaction(async tx => {
       const c = await this.client(tx, input);
       const codeFlow = input.grant_type === 'authorization_code';
@@ -196,27 +198,31 @@ export class OAuth {
         family = (await tx.get(this.ref('oauthFamilies', record.familyId))).data() as Family;
         ensure(family && !family.revoked && family.expiresAt > this.relay.now(), 400, 'invalid_grant');
       }
-      if (record.consumed) {
-        if (record.familyId) { tx.update(this.ref('oauthFamilies', record.familyId), { revoked: true }); tx.set(this.ref('oauthCleanup', record.familyId), {familyId:record.familyId,ownerId:record.ownerId,serviceId:record.serviceId,collectionIndex:0}); }
-        return { replay: true as const };
-      }
+      ensure(!record.consumed, 400, 'invalid_grant');
       ensure(record.expiresAt > this.relay.now(), 400, 'invalid_grant');
       const g = (await tx.get(this.ref('grants', family.grantId))).data() as Grant | undefined;
       ensure(g && await this.relay.validGrant(tx, g), 400, 'invalid_grant'); await this.relay.account(tx, g.ownerId);
       const selected = input.scope === undefined ? family.capabilities : capabilitiesSchema.parse(input.scope.split(' '));
       ensure(selected.every(cap => family.capabilities.includes(cap) && g.capabilities?.includes(cap)), 400, 'invalid_scope');
-      family.capabilities = selected; family.expiresAt = g.expiresAt;
-      const accessExpiry = Math.min(g.expiresAt, this.relay.now() + 10 * MINUTE);
-      tx.update(ref, { consumed: true, familyId: family.id });
-      tx.set(this.ref('oauthFamilies', family.id), { ...family, purgeAt: family.expiresAt === FOREVER ? null : new Date(family.expiresAt + HISTORY) });
-      tx.create(this.ref('oauthAccess', hash(access)), { ownerId: g.ownerId, serviceId: g.serviceId, grantId: g.id, clientId: c.id,
-        familyId: family.id, resource: family.resource, capabilities: selected, expiresAt: accessExpiry, purgeAt: new Date(accessExpiry) });
+      const accessRef = this.ref('oauthAccess', hash(access)), accessRecord = { ownerId: g.ownerId, serviceId: g.serviceId, grantId: g.id, clientId: c.id,
+        familyId: family.id, resource: family.resource, capabilities: selected, expiresAt: FOREVER, purgeAt: null };
+      const existingAccess = codeFlow ? undefined : (await tx.get(accessRef)).data();
+      const response = { access_token: access, token_type: 'Bearer', ...(c.grant_types.includes('refresh_token') ? { refresh_token: refresh } : {}), scope: selected.join(' ') };
+      // Unchanged static refreshes need no writes; concurrent retries can share the same records.
+      if (!codeFlow && family.expiresAt === FOREVER && family.purgeAt === null && c.purgeAt === null
+        && record.expiresAt === FOREVER && record.purgeAt === null && JSON.stringify(family.capabilities) === JSON.stringify(selected)
+        && existingAccess && Object.entries(accessRecord).every(([key, value]) => key === 'capabilities'
+          ? JSON.stringify(existingAccess[key]) === JSON.stringify(value) : existingAccess[key] === value)) return response;
+      family.capabilities = selected; family.expiresAt = FOREVER;
+      if (codeFlow) tx.update(ref, { consumed: true, familyId: family.id });
+      tx.set(this.ref('oauthFamilies', family.id), { ...family, purgeAt: null });
+      tx.set(accessRef, accessRecord);
       tx.update(this.ref('oauthClients', hash(c.id)), { purgeAt: null });
-      if (c.grant_types.includes('refresh_token')) tx.create(this.ref('oauthRefresh', hash(refresh)), { ownerId: g.ownerId, serviceId: g.serviceId, clientId: c.id, resource: family.resource,
-        familyId: family.id, expiresAt: family.expiresAt, consumed: false, purgeAt: family.expiresAt === FOREVER ? null : new Date(family.expiresAt + HISTORY) });
-      return { replay: false as const, access_token: access, token_type: 'Bearer', expires_in: Math.floor((accessExpiry - this.relay.now()) / 1000), ...(c.grant_types.includes('refresh_token') ? { refresh_token: refresh } : {}), scope: selected.join(' ') };
+      if (c.grant_types.includes('refresh_token')) tx.set(this.ref('oauthRefresh', hash(refresh)), { ownerId: g.ownerId, serviceId: g.serviceId, clientId: c.id, resource: family.resource,
+        familyId: family.id, expiresAt: FOREVER, consumed: false, purgeAt: null });
+      return response;
     });
-    ensure(!result.replay, 400, 'invalid_grant'); const { replay: _, ...response } = result; return response;
+    return result;
   }
   async revoke(input: Record<string, string>) {
     await this.relay.db.runTransaction(async tx => {

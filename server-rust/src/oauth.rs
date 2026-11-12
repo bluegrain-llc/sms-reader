@@ -438,12 +438,18 @@ impl Relay {
         Ok(c)
     }
     pub async fn oauth_token(&self, input: Value) -> Result<Value> {
-        let (s, access, refresh, family_id) = (
-            self.clone(),
-            token("smsa"),
-            token("smsf"),
-            Uuid::new_v4().to_string(),
+        let refresh = if input["grant_type"] == "refresh_token" {
+            text(&input, "refresh_token").to_owned()
+        } else {
+            token("smsf")
+        };
+        let mut mac = Hmac::<Sha256>::new_from_slice(refresh.as_bytes()).unwrap();
+        mac.update(format!("relay-oauth-access-v1\n{}", text(&input, "client_secret")).as_bytes());
+        let access = format!(
+            "smsa_{}",
+            URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes())
         );
+        let (s, family_id) = (self.clone(), Uuid::new_v4().to_string());
         let out=self.store.tx(move|tx|{let(s,input,access,refresh,family_id)=(s.clone(),input.clone(),access.clone(),refresh.clone(),family_id.clone());Box::pin(async move{
             let c=s.oauth_client(tx,&input).await?;let code_flow=input["grant_type"]=="authorization_code";ensure(code_flow||input["grant_type"]=="refresh_token",400,"unsupported_grant_type")?;
             ensure(c["grant_types"].as_array().is_some_and(|a|a.contains(&input["grant_type"])),400,"unauthorized_client")?;
@@ -451,19 +457,25 @@ impl Relay {
             ensure(!record.is_null()&&record["clientId"]==c["id"]&&record["resource"]==input["resource"],400,"invalid_grant")?;
             if code_flow{let verifier=text(&input,"code_verifier");ensure(input["redirect_uri"]==record["redirectUri"]&&(43..=128).contains(&verifier.len())&&verifier.bytes().all(|b|b.is_ascii_alphanumeric()||b"._~-".contains(&b))&&challenge(verifier)==text(&record,"challenge"),400,"invalid_grant")?;}
             let mut family=if code_flow{json!({"id":family_id,"ownerId":record["ownerId"],"serviceId":record["serviceId"],"grantId":record["grantId"],"clientId":c["id"],"resource":record["resource"],"capabilities":record["capabilities"],"expiresAt":FOREVER,"revoked":false})}else{let f=tx.get("oauthFamilies",text(&record,"familyId")).await?;ensure(!f.is_null()&&!flag(&f,"revoked")&&num(&f,"expiresAt")>s.now(),400,"invalid_grant")?;f};
-            if flag(&record,"consumed"){if !text(&record,"familyId").is_empty(){tx.merge("oauthFamilies",text(&record,"familyId"),json!({"revoked":true}))?;tx.set("oauthCleanup",text(&record,"familyId"),json!({"familyId":record["familyId"],"ownerId":record["ownerId"],"serviceId":record["serviceId"],"collectionIndex":0}))?;}return Ok(json!({"replay":true}));}
+            ensure(!flag(&record,"consumed"),400,"invalid_grant")?;
             ensure(num(&record,"expiresAt")>s.now(),400,"invalid_grant")?;let g=tx.get("grants",text(&family,"grantId")).await?;ensure(s.valid_grant(tx,&g).await?,400,"invalid_grant")?;s.account(tx,text(&g,"ownerId")).await?;
             let caps=if let Some(scope)=input.get("scope"){json!(scope.as_str().ok_or(Error::Api(400,"invalid_scope"))?.split(' ').collect::<Vec<_>>())}else{family["capabilities"].clone()};crate::onboarding::caps(&caps)?;
             ensure(caps.as_array().unwrap().iter().all(|cap|family["capabilities"].as_array().unwrap().contains(cap)&&g["capabilities"].as_array().is_some_and(|a|a.contains(cap))),400,"invalid_scope")?;
-            family["capabilities"]=caps.clone();family["expiresAt"]=json!(num(&g,"expiresAt"));family["purgeAt"]=if num(&family,"expiresAt")==FOREVER{Value::Null}else{json!(num(&family,"expiresAt")+HISTORY)};let expiry=num(&g,"expiresAt").min(s.now()+10*MINUTE);
-            tx.merge(collection,&key,json!({"consumed":true,"familyId":family["id"]}))?;tx.set("oauthFamilies",text(&family,"id"),family.clone())?;
-            tx.create("oauthAccess",&hash(&access),json!({"ownerId":g["ownerId"],"serviceId":g["serviceId"],"grantId":g["id"],"clientId":c["id"],"familyId":family["id"],"resource":family["resource"],"capabilities":caps,"expiresAt":expiry,"purgeAt":expiry}))?;
+            let access_record=json!({"ownerId":g["ownerId"],"serviceId":g["serviceId"],"grantId":g["id"],"clientId":c["id"],"familyId":family["id"],"resource":family["resource"],"capabilities":caps,"expiresAt":FOREVER,"purgeAt":null});
+            let existing_access=if code_flow{Value::Null}else{tx.get("oauthAccess",&hash(&access)).await?};
+            let mut result=json!({"access_token":access,"token_type":"Bearer","refresh_token":refresh,"scope":caps.as_array().unwrap().iter().map(|c|c.as_str().unwrap()).collect::<Vec<_>>().join(" ")});
+            if !c["grant_types"].as_array().unwrap().contains(&json!("refresh_token")){result.as_object_mut().unwrap().remove("refresh_token");}
+            // Unchanged static refreshes need no writes; concurrent retries can share the same records.
+            if !code_flow&&num(&family,"expiresAt")==FOREVER&&family.get("purgeAt")==Some(&Value::Null)&&c.get("purgeAt")==Some(&Value::Null)
+                &&num(&record,"expiresAt")==FOREVER&&record.get("purgeAt")==Some(&Value::Null)&&family["capabilities"]==caps
+                &&access_record.as_object().unwrap().iter().all(|(key,value)|existing_access.get(key)==Some(value)){return Ok(result);}
+            family["capabilities"]=caps.clone();family["expiresAt"]=json!(FOREVER);family["purgeAt"]=Value::Null;
+            if code_flow{tx.merge(collection,&key,json!({"consumed":true,"familyId":family["id"]}))?;}tx.set("oauthFamilies",text(&family,"id"),family.clone())?;
+            tx.set("oauthAccess",&hash(&access),access_record)?;
             tx.merge("oauthClients",&hash(text(&c,"id")),json!({"purgeAt":null}))?;
-            if c["grant_types"].as_array().unwrap().contains(&json!("refresh_token")){tx.create("oauthRefresh",&hash(&refresh),json!({"ownerId":g["ownerId"],"serviceId":g["serviceId"],"clientId":c["id"],"resource":family["resource"],"familyId":family["id"],"expiresAt":family["expiresAt"],"consumed":false,"purgeAt":family["purgeAt"]}))?;}
-            let mut result=json!({"access_token":access,"token_type":"Bearer","expires_in":(expiry-s.now())/1000,"refresh_token":refresh,"scope":caps.as_array().unwrap().iter().map(|c|c.as_str().unwrap()).collect::<Vec<_>>().join(" ")});
-            if !c["grant_types"].as_array().unwrap().contains(&json!("refresh_token")){result.as_object_mut().unwrap().remove("refresh_token");}Ok(result)
+            if c["grant_types"].as_array().unwrap().contains(&json!("refresh_token")){tx.set("oauthRefresh",&hash(&refresh),json!({"ownerId":g["ownerId"],"serviceId":g["serviceId"],"clientId":c["id"],"resource":family["resource"],"familyId":family["id"],"expiresAt":FOREVER,"consumed":false,"purgeAt":null}))?;}
+            Ok(result)
         })}).await?;
-        ensure(out["replay"] != true, 400, "invalid_grant")?;
         Ok(out)
     }
     pub async fn oauth_revoke(&self, input: Value) -> Result<Value> {

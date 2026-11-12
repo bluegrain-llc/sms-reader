@@ -28,7 +28,6 @@
     "name": "Gemini Apps persistent linking",
     "provider": "google",
     "redirectUri": "https://oauth-redirect.googleusercontent.com/r/relay-conformance",
-    "blocked": "Google persistent linking requires stable refresh tokens; the requested relay policy rotates them. A compatible policy must be settled before claiming hosted Google acceptance.",
     "source": "https://developers.google.com/connected-apps/mcp/oauth"
   }
 ]
