@@ -6,6 +6,7 @@ import { idSchema } from './model.js';
 const document = readFileSync(new URL('../public/onboarding.html', import.meta.url), 'utf8');
 const script = readFileSync(new URL('../public/onboarding.js', import.meta.url), 'utf8');
 export function mountOnboardingPages(app: Express, config?: WebConfig) {
+  app.get('/ticket-browser.js', (_r,s)=>{s.type('application/javascript').send(readFileSync(new URL('../public/ticket-browser.js',import.meta.url),'utf8'));});
   app.get('/owned-services.js', (_r,s)=>{s.type('application/javascript').send(readFileSync(new URL('../public/owned-services.js',import.meta.url),'utf8'));});
   app.get('/onboarding-qr.js', (_r, s) => { s.type('application/javascript').send(readFileSync(new URL('../public/onboarding-qr.js', import.meta.url), 'utf8')); });
   app.get('/onboarding.js', (_r, s) => { s.type('application/javascript').send(script); });

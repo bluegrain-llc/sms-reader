@@ -6,7 +6,8 @@ let server: Server, origin: string;
 const config = { apiKey: 'public', authDomain: 'demo.firebaseapp.com', projectId: 'demo', appId: 'public' };
 test.beforeAll(async () => {
   server = createServer((req,res) => {
-    if (req.url === '/owned-services.js') { res.setHeader('Content-Type','application/javascript'); res.end(readFileSync(new URL('../public/owned-services.js',import.meta.url))); }
+    if (req.url === '/ticket-browser.js') { res.setHeader('Content-Type','application/javascript'); res.end(readFileSync(new URL('../public/ticket-browser.js',import.meta.url))); }
+    else if (req.url === '/owned-services.js') { res.setHeader('Content-Type','application/javascript'); res.end(readFileSync(new URL('../public/owned-services.js',import.meta.url))); }
     else if (req.url?.startsWith('/owned-services')) { res.setHeader('Content-Type','text/html'); res.end(readFileSync(new URL('../public/owned-services.html',import.meta.url),'utf8').replaceAll('__NONCE__','testnonce').replace('__CONFIG__',JSON.stringify(config))); }
     else if (req.url === '/onboarding-qr.js') { res.setHeader('Content-Type','application/javascript'); res.end(readFileSync(new URL('../public/onboarding-qr.js',import.meta.url))); }
     else if (req.url === '/onboarding.js') { res.setHeader('Content-Type','application/javascript'); res.end(readFileSync(new URL('../public/onboarding.js',import.meta.url))); }
@@ -16,7 +17,7 @@ test.beforeAll(async () => {
 test.afterAll(async () => { server.closeAllConnections(); await new Promise<void>(resolve=>server.close(()=>resolve())); });
 test.beforeEach(async ({ page }) => {
   await page.route('https://www.gstatic.com/firebasejs/**/firebase-app.js',r=>r.fulfill({contentType:'application/javascript',body:'export const initializeApp=()=>({});'}));
-  await page.route('https://www.gstatic.com/firebasejs/**/firebase-auth.js',r=>r.fulfill({contentType:'application/javascript',body:`const user={email:'my-own-account@example.test',getIdToken:async()=> 'owner-session'}; const auth={currentUser:user};export const getAuth=()=>auth;export class GoogleAuthProvider{};export const signInWithPopup=async()=>({});export const signInWithRedirect=async()=>({});export const getRedirectResult=async()=>({});export const onAuthStateChanged=(a,fn)=>{queueMicrotask(()=>fn(user));};export const setPersistence=async()=>{};export const browserLocalPersistence={};`}));
+  await page.route('https://www.gstatic.com/firebasejs/**/firebase-auth.js',r=>r.fulfill({contentType:'application/javascript',body:`const user={uid:'browser-owner',email:'my-own-account@example.test',getIdToken:async()=> 'owner-session'}; const auth={currentUser:user};export const getAuth=()=>auth;export const signOut=async()=>{};export class GoogleAuthProvider{};export class OAuthProvider{constructor(id){this.providerId=id;}};export const linkWithPopup=async()=>({user});export const signInWithPopup=async()=>({});export const signInWithRedirect=async()=>({});export const getRedirectResult=async()=>({});export const onAuthStateChanged=(a,fn)=>{queueMicrotask(()=>fn(user));};export const setPersistence=async()=>{};export const browserLocalPersistence={};`}));
 });
 const review = { sessionId:'public-session', serviceId:'public-service', name:'My personal agent', purpose:'Ask for decisions', capabilities:['forms','sms'], status:'pending', expiresAt:Date.now()+600000, expiresInDays:null, comparisonCode:'123456',connectionId:null };
 test('registration offers no owner-access control, needs one confirmation, no phone setup', async ({page})=>{
@@ -169,4 +170,42 @@ test('cancelled and disconnected permanent links allow a fresh explicit confirma
   await page.reload();await expect(page.locator('#review')).toBeVisible();expect(attempts[1]).not.toBe(attempts[0]);expect(approvals).toBe(0);
   await page.locator('#confirm').click();await expect(page.locator('#status')).toContainText('Setup complete');
   revoked=true;await page.reload();await expect(page.locator('#review')).toBeVisible();expect(attempts[2]).not.toBe(attempts[1]);expect(approvals).toBe(1);
+});
+
+test('manual creation retains one private ticket across interrupted provisioning and reload',async({page})=>{
+  const attempts:any[]=[];let fail=true;
+  await page.route('**/v3/services',async r=>{
+    if(r.request().method()==='POST'){
+      const body=r.request().postDataJSON();attempts.push(body);
+      expect(body).not.toHaveProperty('serviceCredential');expect(body.deliveryPublicKey).not.toHaveProperty('d');
+      await r.fulfill(fail?{status:503,json:{error:'unavailable'}}:{status:201,json:{serviceId:'new-agent'}});
+    } else await r.fulfill({json:[]});
+  });
+  await page.goto(origin+'/owned-services');await expect(page.locator('#list')).toBeVisible();
+  await page.locator('#create-agent').click();await page.locator('#agent-name').fill('Portable agent');await page.locator('#agent-purpose').fill('Ask for decisions');
+  await page.getByRole('button',{name:'Create agent and save ticket',exact:true}).click();await expect(page.locator('#retry')).toBeVisible();
+  await page.reload();await expect(page.locator('#save-ticket')).toBeVisible();fail=false;
+  const download=page.waitForEvent('download');await page.locator('#save-ticket').click();await download;
+  expect(attempts).toHaveLength(2);expect(attempts[0]).toEqual(attempts[1]);
+  await expect(page.locator('body')).not.toContainText('smss_');await expect(page.locator('body')).not.toContainText('privateKey');
+});
+
+test('a failed private storage write is retried before any provisioning request',async({page})=>{
+  await page.addInitScript(()=>{
+    const put=IDBObjectStore.prototype.put;let fail=true;
+    IDBObjectStore.prototype.put=function(this:IDBObjectStore,value:unknown,key?:IDBValidKey){
+      if(fail){fail=false;throw new DOMException('Synthetic storage failure','QuotaExceededError');}
+      return key===undefined ? put.call(this,value) : put.call(this,value,key);
+    };
+  });
+  let provisions=0;
+  await page.route('**/v3/services',async r=>{
+    if(r.request().method()==='POST'){provisions++;await r.fulfill({status:201,json:{serviceId:'agent'}});}
+    else await r.fulfill({json:[]});
+  });
+  await page.goto(origin+'/owned-services');await expect(page.locator('#list')).toBeVisible();
+  await page.locator('#create-agent').click();await page.locator('#agent-name').fill('Retry agent');await page.locator('#agent-purpose').fill('Decisions');
+  const submit=page.getByRole('button',{name:'Create agent and save ticket',exact:true});
+  await submit.click();await expect(page.locator('#retry')).toBeVisible();expect(provisions).toBe(0);
+  const download=page.waitForEvent('download');await submit.click();await download;expect(provisions).toBe(1);
 });

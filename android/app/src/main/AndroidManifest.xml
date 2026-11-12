@@ -31,6 +31,9 @@
                 <data android:scheme="smsrelay" android:host="connect" />
             </intent-filter>
         </activity>
+        <activity android:name=".AgentsActivity" android:exported="true" android:label="Agents">
+            <intent-filter android:autoVerify="true"><action android:name="android.intent.action.VIEW" /><category android:name="android.intent.category.DEFAULT" /><category android:name="android.intent.category.BROWSABLE" /><data android:scheme="https" android:host="${relayHost}" android:path="/owned-services" /></intent-filter>
+        </activity>
         <activity android:name=".OnboardingActivity" android:exported="true" android:launchMode="singleTask"
             android:label="Connect" android:taskAffinity="${applicationId}.onboarding">
             <intent-filter android:autoVerify="true">

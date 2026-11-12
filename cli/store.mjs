@@ -41,3 +41,22 @@ export class PrivateStore {
       retries: { retries: 5, minTimeout: 2500, maxTimeout: 2500 } });
   }
 }
+
+/** Publish a portable ticket without overwriting unrelated files; identical retries are safe. */
+export async function exportPrivateFile(path, value) {
+  const temporary = `${path}.${randomUUID()}.tmp`, data = JSON.stringify(value);
+  const file = await open(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+  try {
+    await file.writeFile(data); await file.sync(); await file.close();
+    try { const { link } = await import('node:fs/promises'); await link(temporary, path); }
+    catch (e) {
+      if (e.code !== 'EEXIST') throw e;
+      const existing = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+      try {
+        const st = await existing.stat();
+        if (!st.isFile() || (st.mode & 0o077) || st.uid !== process.getuid?.() || await existing.readFile('utf8') !== data) throw Error('Export destination is occupied. Choose a new file.');
+      } finally { await existing.close(); }
+    }
+    const directory = await open(dirname(path), constants.O_RDONLY); try { await directory.sync(); } finally { await directory.close(); }
+  } finally { await file.close().catch(() => {}); await unlink(temporary).catch(() => {}); }
+}
