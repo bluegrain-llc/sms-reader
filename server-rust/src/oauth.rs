@@ -461,13 +461,20 @@ impl Relay {
             ensure(num(&record,"expiresAt")>s.now(),400,"invalid_grant")?;let g=tx.get("grants",text(&family,"grantId")).await?;ensure(s.valid_grant(tx,&g).await?,400,"invalid_grant")?;s.account(tx,text(&g,"ownerId")).await?;
             let caps=if let Some(scope)=input.get("scope"){json!(scope.as_str().ok_or(Error::Api(400,"invalid_scope"))?.split(' ').collect::<Vec<_>>())}else{family["capabilities"].clone()};crate::onboarding::caps(&caps)?;
             ensure(caps.as_array().unwrap().iter().all(|cap|family["capabilities"].as_array().unwrap().contains(cap)&&g["capabilities"].as_array().is_some_and(|a|a.contains(cap))),400,"invalid_scope")?;
+            let access_record=json!({"ownerId":g["ownerId"],"serviceId":g["serviceId"],"grantId":g["id"],"clientId":c["id"],"familyId":family["id"],"resource":family["resource"],"capabilities":caps,"expiresAt":FOREVER,"purgeAt":null});
+            let existing_access=if code_flow{Value::Null}else{tx.get("oauthAccess",&hash(&access)).await?};
+            let mut result=json!({"access_token":access,"token_type":"Bearer","refresh_token":refresh,"scope":caps.as_array().unwrap().iter().map(|c|c.as_str().unwrap()).collect::<Vec<_>>().join(" ")});
+            if !c["grant_types"].as_array().unwrap().contains(&json!("refresh_token")){result.as_object_mut().unwrap().remove("refresh_token");}
+            // Unchanged static refreshes need no writes; concurrent retries can share the same records.
+            if !code_flow&&num(&family,"expiresAt")==FOREVER&&family.get("purgeAt")==Some(&Value::Null)&&c.get("purgeAt")==Some(&Value::Null)
+                &&num(&record,"expiresAt")==FOREVER&&record.get("purgeAt")==Some(&Value::Null)&&family["capabilities"]==caps
+                &&access_record.as_object().unwrap().iter().all(|(key,value)|existing_access.get(key)==Some(value)){return Ok(result);}
             family["capabilities"]=caps.clone();family["expiresAt"]=json!(FOREVER);family["purgeAt"]=Value::Null;
             if code_flow{tx.merge(collection,&key,json!({"consumed":true,"familyId":family["id"]}))?;}tx.set("oauthFamilies",text(&family,"id"),family.clone())?;
-            tx.set("oauthAccess",&hash(&access),json!({"ownerId":g["ownerId"],"serviceId":g["serviceId"],"grantId":g["id"],"clientId":c["id"],"familyId":family["id"],"resource":family["resource"],"capabilities":caps,"expiresAt":FOREVER,"purgeAt":null}))?;
+            tx.set("oauthAccess",&hash(&access),access_record)?;
             tx.merge("oauthClients",&hash(text(&c,"id")),json!({"purgeAt":null}))?;
             if c["grant_types"].as_array().unwrap().contains(&json!("refresh_token")){tx.set("oauthRefresh",&hash(&refresh),json!({"ownerId":g["ownerId"],"serviceId":g["serviceId"],"clientId":c["id"],"resource":family["resource"],"familyId":family["id"],"expiresAt":FOREVER,"consumed":false,"purgeAt":null}))?;}
-            let mut result=json!({"access_token":access,"token_type":"Bearer","refresh_token":refresh,"scope":caps.as_array().unwrap().iter().map(|c|c.as_str().unwrap()).collect::<Vec<_>>().join(" ")});
-            if !c["grant_types"].as_array().unwrap().contains(&json!("refresh_token")){result.as_object_mut().unwrap().remove("refresh_token");}Ok(result)
+            Ok(result)
         })}).await?;
         Ok(out)
     }

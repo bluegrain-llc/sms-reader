@@ -257,8 +257,8 @@ for (const runtime of [0,1]) test(`runtime ${runtime}: OAuth rejects malformed r
     assert.equal(response.status,400); assert.equal((await response.json()).error,'invalid_target');
   }
 });
-async function formCall(runtime: number, endpoint: string, fields: Record<string, string>, expected = 200) {
-  const response = await contractFetch(bases[runtime] + endpoint, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams(fields) });
+async function formCall(runtime: number, endpoint: string, fields: Record<string, string>, expected = 200, timeoutMs = 10000) {
+  const response = await fetch(bases[runtime] + endpoint, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams(fields), signal: AbortSignal.timeout(timeoutMs) });
   const value = await response.json();assert.equal(response.status, expected, JSON.stringify(value));return value;
 }
 async function approvedOAuth(f: Awaited<ReturnType<typeof oauthFlow>>, runtime: number, recipientUid = recipient, capabilities = ['forms']) {
@@ -389,7 +389,8 @@ for (const runtime of [0, 1]) {
     await formCall(runtime,'/oauth/token',{...renewal,client_secret:'wrong'},401);
     await formCall(runtime,'/oauth/token',{...renewal,scope:'forms sms'},400);
     await formCall(runtime,'/oauth/token',{...renewal,resource:'https://relay.example/mcp/services/wrong'},400);
-    for(const refreshed of await Promise.all([0,1,0,1].map(r=>formCall(r,'/oauth/token',renewal))))assert.deepEqual(refreshed,tokens);
+    // Same-family transaction retries can exceed the ordinary request deadline under emulator contention.
+    for(const refreshed of await Promise.all([0,1,0,1].map(r=>formCall(r,'/oauth/token',renewal,200,30000))))assert.deepEqual(refreshed,tokens);
     const records=await db.collection('oauthAccess').where('serviceId','==',f.s.session.serviceId).get();assert.equal(records.size,1);
     const refreshRecords=await db.collection('oauthRefresh').where('serviceId','==',f.s.session.serviceId).get();assert.equal(refreshRecords.size,1);
     for(const record of [...records.docs,...refreshRecords.docs]){
@@ -404,11 +405,50 @@ for (const runtime of [0, 1]) {
     const f=await oauthFlow(runtime),exchange=await approvedOAuth(f,runtime,recipient,['forms','sms']),tokens=await formCall(runtime,'/oauth/token',exchange);
     assert.equal((await oauthTools(runtime,f,tokens.access_token)).result.tools.length,8);
     const renewal={grant_type:'refresh_token',refresh_token:tokens.refresh_token,client_id:f.client.client_id,resource:f.params.resource};
+    await db.collection('oauthAccess').doc(hash(tokens.access_token)).update({capabilities:['forms']});
+    assert.equal((await oauthTools(runtime,f,tokens.access_token)).result.tools.length,5);
+    assert.deepEqual(await formCall(1-runtime,'/oauth/token',renewal),tokens);
+    assert.equal((await oauthTools(runtime,f,tokens.access_token)).result.tools.length,8);
     const updated=await formCall(1-runtime,'/oauth/token',{...renewal,scope:'forms'});
     assert.equal(updated.access_token,tokens.access_token);assert.equal(updated.refresh_token,tokens.refresh_token);
     assert.deepEqual(await formCall(runtime,'/oauth/token',renewal),updated);
     assert.equal((await oauthTools(1-runtime,f,tokens.access_token)).result.tools.length,5);
     await formCall(runtime,'/oauth/token',{...renewal,scope:'forms sms'},400);
+  });
+  test(`runtime ${runtime}: legacy OAuth refresh establishes static credentials without migrating old access`, async () => {
+    const f=await oauthFlow(runtime,true),exchange=await approvedOAuth(f,runtime);
+    const codeRef=db.collection('oauthCodes').doc(hash(exchange.code)),code=(await codeRef.get()).data()!;
+    const grant=(await db.collection('grants').doc(code.grantId).get()).data()!;
+    const familyId=randomUUID(),access=secrets('smsa'),refresh=secrets('smsf'),accessExpiry=time+10*MINUTE;
+    const family={id:familyId,ownerId:code.ownerId,serviceId:code.serviceId,grantId:code.grantId,clientId:code.clientId,resource:code.resource,capabilities:code.capabilities,expiresAt:grant.expiresAt,revoked:false,purgeAt:null};
+    const legacyRefresh={ownerId:code.ownerId,serviceId:code.serviceId,clientId:code.clientId,resource:code.resource,familyId,expiresAt:grant.expiresAt,consumed:false,purgeAt:null};
+    // Reproduce the pre-update schema: independently random access and refresh, with a ten-minute access TTL.
+    const seed=db.batch();
+    seed.update(codeRef,{consumed:true,familyId});
+    seed.update(db.collection('oauthClients').doc(hash(code.clientId)),{purgeAt:null});
+    seed.set(db.collection('oauthFamilies').doc(familyId),family);
+    seed.set(db.collection('oauthAccess').doc(hash(access)),{ownerId:code.ownerId,serviceId:code.serviceId,grantId:code.grantId,clientId:code.clientId,familyId,resource:code.resource,capabilities:code.capabilities,expiresAt:accessExpiry,purgeAt:new Date(accessExpiry)});
+    seed.set(db.collection('oauthRefresh').doc(hash(refresh)),legacyRefresh);
+    await seed.commit();
+    await oauthTools(1-runtime,f,access);
+    const renewal={grant_type:'refresh_token',refresh_token:refresh,client_id:f.client.client_id,client_secret:f.client.client_secret,resource:f.params.resource};
+    for(const state of ['expired','consumed','deleted']){
+      const invalid=secrets('smsf');
+      if(state!=='deleted')await db.collection('oauthRefresh').doc(hash(invalid)).set({...legacyRefresh,expiresAt:state==='expired'?time-1:grant.expiresAt,consumed:state==='consumed'});
+      await formCall(runtime,'/oauth/token',{...renewal,refresh_token:invalid},400);
+    }
+    time=accessExpiry+1;
+    await oauthTools(runtime,f,access,401);
+    const upgraded=await formCall(runtime,'/oauth/token',renewal);
+    assert.notEqual(upgraded.access_token,access);assert.equal(upgraded.refresh_token,refresh);assert.equal(upgraded.expires_in,undefined);
+    const previous=(await db.collection('oauthAccess').doc(hash(access)).get()).data()!;
+    assert.equal(previous.expiresAt,accessExpiry);assert.equal(previous.purgeAt.toMillis(),accessExpiry);
+    for(const repeated of await Promise.all([0,1,0,1].map(r=>formCall(r,'/oauth/token',renewal,200,30000))))assert.deepEqual(repeated,upgraded);
+    time+=400*24*60*MINUTE;
+    await relay.onboarding.cleanup();await native.call('onboarding.cleanup',[]);
+    assert.equal((await db.collection('oauthAccess').doc(hash(access)).get()).exists,false);
+    await oauthTools(1-runtime,f,upgraded.access_token);
+    assert.deepEqual(await formCall(1-runtime,'/oauth/token',renewal),upgraded);
   });
   test(`runtime ${runtime}: an access-only OAuth client needs no refresh to retain access`, async () => {
     const f=await oauthFlow(runtime,false,false),exchange=await approvedOAuth(f,runtime),tokens=await formCall(1-runtime,'/oauth/token',exchange);
