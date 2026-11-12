@@ -45,6 +45,7 @@ pub struct Options {
     pub auth: Arc<dyn Authentication>,
     pub serving: Option<Arc<dyn Serving>>,
     pub public_url: Option<String>,
+    pub apple_app_ids: Vec<String>,
     pub android_cert: Option<String>,
     pub android_certs: Option<Value>,
     pub firebase_web_config: Option<Value>,
@@ -563,8 +564,18 @@ fn validate_event(v: &Value) -> Result<()> {
     let target = string(v, "status", 1, 64, false)?;
     let allowed = match target.as_str() {
         "ready" => {
-            integer(v, "listenerStartedAt", 1, i64::MAX, None)?;
-            vec!["status", "listenerStartedAt"]
+            let mode = v.get("mode").and_then(Value::as_str).unwrap_or("listener");
+            ensure(
+                v.get("mode").is_none() || v["mode"] == "listener" || v["mode"] == "manual",
+                400,
+                "invalid_input",
+            )?;
+            if mode == "manual" {
+                ensure(v.get("listenerStartedAt").is_none(), 400, "invalid_input")?;
+            } else {
+                integer(v, "listenerStartedAt", 1, i64::MAX, None)?;
+            }
+            vec!["status", "listenerStartedAt", "mode"]
         }
         "completed" => {
             ensure(code(text(v, "code")), 400, "invalid_input")?;
@@ -1058,6 +1069,9 @@ async fn route(s: App, request: Request) -> Result<Response> {
             );
         }
         ("GET", ["v1", "account-deletion"]) => r.deletion_status(bearer(&headers)?).await?,
+        ("GET", [".well-known", "apple-app-site-association"]) => {
+            json!({"applinks":{"details":s.options.apple_app_ids.iter().filter(|id| regex::Regex::new(r"^[A-Z0-9]{10}\.[A-Za-z0-9.-]+$").unwrap().is_match(id)).map(|id|json!({"appID":id,"paths":["/register/*","/pair/*","/services/*","/connections/*","/oauth/consent/*","/connect","/owned-services"]})).collect::<Vec<_>>()}})
+        }
         ("GET", [".well-known", "assetlinks.json"]) => {
             let certificates = signing_fingerprints(
                 s.options.android_cert.as_deref(),
@@ -1138,7 +1152,18 @@ async fn route(s: App, request: Request) -> Result<Response> {
                 .owner(&headers, method == axum::http::Method::GET, false)
                 .await?
                 .uid;
-            strict(&input, &["name", "fcmToken", "wizardVersion"])?;
+            strict(&input, &["name", "fcmToken", "wizardVersion", "platform"])?;
+            let platform = input
+                .get("platform")
+                .and_then(Value::as_str)
+                .unwrap_or("android");
+            ensure(
+                input.get("platform").is_none()
+                    || input["platform"] == "android"
+                    || input["platform"] == "ios",
+                400,
+                "invalid_input",
+            )?;
             let name = string(&input, "name", 1, 80, true)?;
             let fcm = string(&input, "fcmToken", 1, 4096, false)?;
             ensure(
@@ -1153,6 +1178,7 @@ async fn route(s: App, request: Request) -> Result<Response> {
                 name,
                 fcm,
                 input["wizardVersion"].as_f64() == Some(1.0),
+                platform.to_owned(),
             )
             .await?
         }

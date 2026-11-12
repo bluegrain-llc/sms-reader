@@ -19,3 +19,13 @@ test('fixed rate window resets only at its boundary', () => {
   assert.throws(() => bump(rate, 1000 + 10 * MINUTE - 1, 3));
   assert.deepEqual(bump(rate, 1000 + 10 * MINUTE, 3), { start: 1000 + 10 * MINUTE, count: 1 });
 });
+
+test('device and SMS event schemas keep legacy Android clients compatible and manual windows server-timed', async () => {
+  const {deviceRegistrationSchema,smsEventSchema} = await import('../src/model.js');
+  assert.equal(deviceRegistrationSchema.parse({name:'Phone',fcmToken:'synthetic'}).platform,'android');
+  assert.equal(deviceRegistrationSchema.parse({name:'iPhone',fcmToken:'synthetic',platform:'ios'}).platform,'ios');
+  assert.equal(deviceRegistrationSchema.safeParse({name:'Other',fcmToken:'synthetic',platform:'web'}).success,false);
+  assert.equal(smsEventSchema.parse({status:'ready',mode:'manual'}).status,'ready');
+  for(const input of [{status:'ready'},{status:'ready',mode:'manual',listenerStartedAt:1},{status:'ready',mode:'manual',manualEntryDeadline:9999999}]) assert.equal(smsEventSchema.safeParse(input).success,false);
+  assert.equal(smsEventSchema.parse({status:'ready',listenerStartedAt:1}).status,'ready');
+});

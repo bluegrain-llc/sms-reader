@@ -29,7 +29,7 @@ let time = 1_800_000_000_000;
 const uid = 'onboarding-operator', recipient = 'onboarding-recipient';
 const secrets = (prefix: string) => `${prefix}_${randomBytes(32).toString('base64url')}`;
 const relay = new Relay(db, async () => {}, () => time), native = new RustRelay(db, async () => {}, () => time);
-const options: HttpOptions = { verifyOwner: async t => { assert.ok(t.startsWith('owner:') || t.startsWith('owner64:')); return { uid: t.startsWith('owner64:') ? Buffer.from(t.slice(8),'base64url').toString('utf8') : t.slice(6), authTime: time / 1000 }; }, verifyScheduler: async () => {}, deleteIdentity: async () => {}, publicUrl: 'https://relay.example', firebaseWebConfig: { apiKey: 'public', authDomain: 'demo-sms-relay.firebaseapp.com', projectId: 'demo-sms-relay', appId: 'public' } };
+const options: HttpOptions = { verifyOwner: async t => { assert.ok(t.startsWith('owner:') || t.startsWith('owner64:')); return { uid: t.startsWith('owner64:') ? Buffer.from(t.slice(8),'base64url').toString('utf8') : t.slice(6), authTime: time / 1000 }; }, verifyScheduler: async () => {}, deleteIdentity: async () => {}, publicUrl: 'https://relay.example', appleAppIds: ['ABCDEFGHIJ.com.bluegrain.smsrelay','invalid'], firebaseWebConfig: { apiKey: 'public', authDomain: 'demo-sms-relay.firebaseapp.com', projectId: 'demo-sms-relay', appId: 'public' } };
 let servers: Server[] = [], bases: string[] = [];
 const contractFetch: typeof fetch = (input, init) => fetch(input, { ...init, signal: init?.signal ? AbortSignal.any([init.signal, AbortSignal.timeout(10000)]) : AbortSignal.timeout(10000) });
 async function call(runtime: number, path: string, token: string, body?: unknown, method = body === undefined ? 'GET' : 'POST', expected = 200) {
@@ -632,5 +632,51 @@ for (const runtime of [0,1]) {
     await call(1-runtime,`/v3/registration-sessions/${session.sessionId}/decision`,owner(uid),decision(true),'POST',400);
     const approved=await call(runtime,`/v3/registration-sessions/${session.sessionId}/decision`,owner(uid),decision(false));
     assert.equal(approved.connectionId,null);assert.deepEqual((await call(runtime,'/v3/service/deliveries',credential)).deliveries,[]);
+  });
+  test(`runtime ${runtime}: iOS manual readiness is bounded, lease-free, and races Android safely`,async()=>{
+    const s=await register(runtime,false,['sms']), account='mixed-devices-'+randomUUID(), ios='ios-'+randomUUID(),android='android-'+randomUUID();
+    await call(runtime,`/v1/devices/${ios}`,owner(account),{name:'iPhone',fcmToken:'synthetic-ios',wizardVersion:1,platform:'ios'},'PUT');
+    await call(1-runtime,`/v1/devices/${android}`,owner(account),{name:'Android',fcmToken:'synthetic-android',wizardVersion:1},'PUT');
+    await call(runtime,`/v1/devices/${ios}`,owner(account),{name:'Wrong platform',fcmToken:'synthetic',platform:'android'},'PUT',409);
+    const p=await call(runtime,'/v3/service/pairing-sessions',s.credential,{capabilities:['sms'],expiresInDays:null,idempotencyKey:randomUUID()},'POST',201);
+    await call(1-runtime,`/v3/pairing-sessions/${p.sessionId}/decision`,owner(account),{decision:'approved',capabilities:['sms'],expiresInDays:null});
+    const {d,payload}=await consume(s,runtime);await call(runtime,`/v3/service/deliveries/${d.deliveryId}/acknowledgement`,s.credential,{});
+    const created=await call(runtime,'/v1/requests',payload.token,{purpose:'Explicit manual code',idempotencyKey:randomUUID()},'POST',201);
+    const iosPath=`/v1/devices/${ios}/requests/${created.requestId}/events`,androidPath=`/v1/devices/${android}/requests/${created.requestId}/events`;
+    await call(runtime,iosPath,owner(account),{status:'ready',listenerStartedAt:time},'POST',400);
+    await call(runtime,androidPath,owner(account),{status:'ready',mode:'manual'},'POST',400);
+    const ready=await call(1-runtime,iosPath,owner(account),{status:'ready',mode:'manual'});
+    assert.equal(ready.manualEntryDeadline,Math.min(time+5*MINUTE,created.expiresAt));assert.equal(ready.listeningDeadline,null);
+    const again=await call(runtime,iosPath,owner(account),{status:'ready',mode:'manual'});assert.equal(again.manualEntryDeadline,ready.manualEntryDeadline);
+    await call(runtime,iosPath,owner(account),{status:'ready',listenerStartedAt:time},'POST',400);
+    const phone=(await db.collection('devices').doc(ios).get()).data()!;
+    assert.equal(phone.listenerUntil,undefined);assert.equal(phone.formListenerUntil,undefined);
+    await call(runtime,iosPath,owner(account),{status:'awaiting_consent'},'POST',400);
+    await call(runtime,iosPath,owner(account),{status:'completed',code:'123456',source:'android_consent'},'POST',400);
+    await call(runtime,androidPath,owner(account),{status:'ready',listenerStartedAt:time});
+    const results=await Promise.all([call(runtime,iosPath,owner(account),{status:'completed',source:'manual',code:'123456'}),call(1-runtime,androidPath,owner(account),{status:'completed',source:'manual',code:'654321'})]);
+    assert.ok(results.every(r=>r.status==='completed'));assert.ok(results.some(r=>r.reason==='handled_on_another_device'));
+    for (const backend of [0,1]) {
+      const completed=await call(backend,iosPath.replace(/\/events$/,''),owner(account));
+      assert.equal(completed.listeningDeadline,null);assert.equal(completed.manualEntryDeadline,ready.manualEntryDeadline);
+    }
+    const code=await call(runtime,`/v1/requests/${created.requestId}`,payload.token);assert.ok(['123456','654321'].includes(code.code));
+    const overlap=await call(runtime,'/v1/requests',payload.token,{purpose:'Manual device remains available',idempotencyKey:randomUUID()},'POST',201);
+    await call(runtime,`/v1/devices/${ios}/requests/${overlap.requestId}/events`,owner(account),{status:'ready',mode:'manual'});
+    await call(runtime,`/v1/devices/${android}/requests/${overlap.requestId}/events`,owner(account),{status:'ready',listenerStartedAt:time},'POST',409);
+    await call(runtime,`/v1/requests/${overlap.requestId}/cancel`,payload.token,{});
+    time+=5*MINUTE+1;
+    const expiring=await call(runtime,'/v1/requests',payload.token,{purpose:'Expires without submission',idempotencyKey:randomUUID()},'POST',201);
+    const path=`/v1/devices/${ios}/requests/${expiring.requestId}/events`;
+    const manual=await call(runtime,path,owner(account),{status:'ready',mode:'manual'});
+    time=manual.manualEntryDeadline+1;
+    const late=await call(1-runtime,path,owner(account),{status:'completed',source:'manual',code:'123456'});assert.equal(late.status,'expired');
+    assert.equal(late.listeningDeadline,null);assert.equal(late.manualEntryDeadline,manual.manualEntryDeadline);
+    assert.equal((await db.collection('results').doc(expiring.requestId).get()).exists,false);
+  });
+  test(`runtime ${runtime}: Apple association serves only configured app identifiers and public routes`,async()=>{
+    const response=await fetch(bases[runtime]+'/.well-known/apple-app-site-association');assert.equal(response.status,200);
+    assert.ok(response.headers.get('content-type')?.includes('application/json'));
+    assert.deepEqual(await response.json(),{applinks:{details:[{appID:'ABCDEFGHIJ.com.bluegrain.smsrelay',paths:['/register/*','/pair/*','/services/*','/connections/*','/oauth/consent/*','/connect','/owned-services']}]}});
   });
 }

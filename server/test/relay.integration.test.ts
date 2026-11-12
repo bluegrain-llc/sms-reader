@@ -325,7 +325,9 @@ integration('REST role separation and bearer-authenticated MCP, including queued
     assert.equal((await event({ status: 'completed', code: '654321' })).status, 200);
     assert.equal((await tool('get_sms_code_request', { requestId: r.requestId })).code, '654321');
     assert.equal((await tool('get_sms_code_request', { requestId: q.requestId })).status, 'pending_phone');
-    const manualEvent = (body: object, credential = idToken) => call(`/v1/devices/${did}/requests/${q.requestId}/events`, credential, body);
+    // The second phone is available while the first phone's original listener lease is still live.
+    assert.equal((await call(`/v1/devices/${did}/requests/${q.requestId}/events`, idToken, {status:'ready',listenerStartedAt:time})).status,409);
+    const manualEvent = (body: object, credential = idToken) => call(`/v1/devices/${second}/requests/${q.requestId}/events`, credential, body);
     assert.equal((await manualEvent({ status: 'completed', source: 'manual', code: 'A12b34' }, child.token)).status, 401);
     assert.equal((await manualEvent({ status: 'completed', source: 'manual', code: 'A12b34' })).status, 409);
     assert.equal((await manualEvent({ status: 'ready', listenerStartedAt: time })).status, 200);
