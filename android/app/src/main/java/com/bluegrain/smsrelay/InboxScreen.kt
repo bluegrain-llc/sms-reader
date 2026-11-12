@@ -78,7 +78,7 @@ fun ResponseEntryScreen(state: RelayUiState, loading: Boolean, onClose: () -> Un
                 !state.configured -> Text("This build has no service connection. Ask the operator for a configured APK.")
                 !state.signedIn -> {
                     Text("Sign in to open this request.")
-                    Button(onClick = onSignIn, enabled = !state.busy, modifier = Modifier.fillMaxWidth()) { Text("Continue with Google") }
+                    Button(onClick = onSignIn, enabled = !state.busy, modifier = Modifier.fillMaxWidth()) { Text("Continue with Google or Apple") }
                 }
                 !state.registered -> {
                     Text("Connect this phone to open this request.")

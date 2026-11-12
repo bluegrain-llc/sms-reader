@@ -1,5 +1,5 @@
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/13.2.0/firebase-app.js';
-import { getAuth, signOut, GoogleAuthProvider, signInWithPopup, getRedirectResult, signInWithRedirect, onAuthStateChanged, setPersistence, browserLocalPersistence } from 'https://www.gstatic.com/firebasejs/13.2.0/firebase-auth.js';
+import { getAuth, signOut, GoogleAuthProvider, OAuthProvider, linkWithPopup, signInWithPopup, getRedirectResult, signInWithRedirect, onAuthStateChanged, setPersistence, browserLocalPersistence } from 'https://www.gstatic.com/firebasejs/13.2.0/firebase-auth.js';
 const $ = id => document.getElementById(id);
 const parts = location.pathname.split('/').filter(Boolean);
 const kind = parts[0], oauth = kind === 'oauth' && parts[1] === 'consent';
@@ -19,7 +19,7 @@ function fail(error) {
   status(expired ? 'This session expired. Start again and review access again.' : error.code === 'service_unavailable' ? 'This service is unavailable.' : 'Could not complete this step. Try again to check the current state.');
   $('retry').hidden = expired; $('restart').hidden = kind !== 'services' || !expired;
 }
-function lock(value) { busy = value; for (const id of ['confirm', 'cancel', 'signout', 'signin', 'self', 'forms', 'sms', 'duration', 'retry', 'restart', 'continue-to-app', 'check-phone']) $(id).disabled = value; }
+function lock(value) { busy = value; for (const id of ['confirm', 'cancel', 'signout', 'signin', 'signin-apple', 'self', 'forms', 'sms', 'duration', 'retry', 'restart', 'continue-to-app', 'check-phone']) $(id).disabled = value; }
 async function run(fn) { if (busy) return; lock(true); $('retry').hidden = true; try { await fn(); } catch (e) { retry = fn; fail(e); } finally { lock(false); } }
 const days = () => $('duration').value === '' ? null : Number($('duration').value);
 const selection = () => ['forms', 'sms'].filter(c => $(c).checked && (session.availableCapabilities || session.capabilities).includes(c));
@@ -51,7 +51,7 @@ async function completed() {
 async function load() {
   clearTimeout(monitor);
   if (!auth.currentUser) return;
-  $('signin').hidden = true;$('signout').hidden=false; $('identity').textContent = `Signed in as ${auth.currentUser.email || 'your account'}`;
+  $('signin').hidden = true;$('signin-apple').hidden=true;$('signout').hidden=false; $('identity').textContent = `Signed in as ${auth.currentUser.email || 'your account'}`;
   if (management) {
     session = await api(`/v3/connections/${encodeURIComponent(destination)}`);
     session = { ...session, sessionId: destination, status: session.revoked ? 'denied' : 'pending', expiresInDays: session.expiresAt === null ? null : Math.max(1, Math.ceil((session.expiresAt - Date.now()) / 86400000)) };
@@ -131,8 +131,9 @@ else {
   auth = getAuth(initializeApp(window.relayWebConfig)); await setPersistence(auth, browserLocalPersistence);
   async function signIn(provider) { try { await signInWithPopup(auth, provider); } catch (e) { if (e.code === 'auth/popup-blocked') await signInWithRedirect(auth, provider); else throw e; } }
   $('signin').onclick=()=>run(()=>signIn(new GoogleAuthProvider()));
+  $('signin-apple').onclick=()=>run(()=>signIn(new OAuthProvider('apple.com')));
   await getRedirectResult(auth).catch(fail);
-  onAuthStateChanged(auth, user => { if (user) { if (!busy) void run(load); else void load().catch(fail); } else { clearTimeout(monitor); $('identity').textContent = ''; $('review').hidden = true; $('phone').hidden = true; $('manage').hidden = true; $('handoff').hidden = true; $('signin').hidden = false;$('signout').hidden=true; status('Sign in to review this link. Opening it grants no access.'); } });
+  onAuthStateChanged(auth, user => { if (user) { if (!busy) void run(load); else void load().catch(fail); } else { clearTimeout(monitor); $('identity').textContent = ''; $('review').hidden = true; $('phone').hidden = true; $('manage').hidden = true; $('handoff').hidden = true; $('signin').hidden = false;$('signin-apple').hidden=false;$('signout').hidden=true; status('Sign in to review this link. Opening it grants no access.'); } });
 }
 
 $('signout').onclick=()=>run(()=>signOut(auth));

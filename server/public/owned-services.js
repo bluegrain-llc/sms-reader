@@ -1,6 +1,6 @@
 import { createTicket, declaration, retained, downloadTicket } from '/ticket-browser.js';
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/13.2.0/firebase-app.js';
-import { getAuth, signOut, GoogleAuthProvider, signInWithPopup, getRedirectResult, signInWithRedirect, onAuthStateChanged, setPersistence, browserLocalPersistence } from 'https://www.gstatic.com/firebasejs/13.2.0/firebase-auth.js';
+import { getAuth, signOut, GoogleAuthProvider, OAuthProvider, linkWithPopup, signInWithPopup, getRedirectResult, signInWithRedirect, onAuthStateChanged, setPersistence, browserLocalPersistence } from 'https://www.gstatic.com/firebasejs/13.2.0/firebase-auth.js';
 const $ = id => document.getElementById(id);
 let auth, busy = false, services = [], pendingTicket;
 const status = text => { $('status').textContent = text; };
@@ -36,7 +36,7 @@ async function render() {
   status(service.active?'Enabled. Each recipient controls their own permissions.':'Disabled. Its connections cannot send requests or read results.');
 }
 async function load() {
-  if(!auth.currentUser)return;$('signin').hidden=true;$('signout').hidden=false;$('identity').textContent=`Signed in as ${auth.currentUser.email || 'your account'}`;
+  if(!auth.currentUser)return;$('signin').hidden=true;$('signin-apple').hidden=true;$('signout').hidden=false;$('identity').textContent=`Signed in as ${auth.currentUser.email || 'your account'}`;
   pendingTicket=await retained(auth.currentUser.uid);$('ticket-state').hidden=!pendingTicket;
   services=await api('/v3/services');$('retry').hidden=true;await render();
 }
@@ -61,8 +61,14 @@ else {
   auth=getAuth(initializeApp(window.relayWebConfig));await setPersistence(auth,browserLocalPersistence);
   async function signIn(provider) { try { await signInWithPopup(auth, provider); } catch (e) { if (e.code === 'auth/popup-blocked') await signInWithRedirect(auth, provider); else throw e; } }
   $('signin').onclick=()=>run(()=>signIn(new GoogleAuthProvider()));
+  $('signin-apple').onclick=()=>run(()=>signIn(new OAuthProvider('apple.com')));
   await getRedirectResult(auth).catch(()=>status('Could not sign in. Try again.'));
-  onAuthStateChanged(auth,user=>{if(user)void load().catch(e=>{status(e.message);$('retry').hidden=false;});else{pendingTicket=undefined;services=[];$('list').hidden=true;$('detail').hidden=true;$('identity').textContent='';$('signin').hidden=false;$('signout').hidden=true;status('Sign in to manage the services you own.');}});
+  onAuthStateChanged(auth,user=>{if(user)void load().catch(e=>{status(e.message);$('retry').hidden=false;});else{pendingTicket=undefined;services=[];$('list').hidden=true;$('detail').hidden=true;$('identity').textContent='';$('signin').hidden=false;$('signin-apple').hidden=false;$('signout').hidden=true;status('Sign in to manage the services you own.');}});
 }
+
+for (const [id, provider] of [['link-google',new GoogleAuthProvider()],['link-apple',new OAuthProvider('apple.com')]]) $(id).onclick=()=>run(async()=>{
+  if(!auth.currentUser || !confirm('Link this provider to your current account? This requires your consent and preserves your relay account. Existing accounts are never merged by email.'))return;
+  const uid=auth.currentUser.uid;const result=await linkWithPopup(auth.currentUser,provider);if(result.user.uid!==uid)throw Error('Account changed.');status('Sign-in provider linked to your existing account.');
+});
 
 $('signout').onclick=()=>run(()=>signOut(auth));
