@@ -24,7 +24,16 @@ enum RelayFailure: LocalizedError {
 }
 struct EmptyReply: Decodable {}
 @MainActor
-final class RelayAPI {
+protocol RelayCalling {
+    var origin: URL { get }
+    func call<T: Decodable>(_ path: String, method: String, body: [String: Any]?) async throws -> T
+}
+extension RelayCalling {
+    func call<T: Decodable>(_ path: String) async throws -> T { try await call(path, method: "GET", body: nil) }
+    func call<T: Decodable>(_ path: String, method: String) async throws -> T { try await call(path, method: method, body: nil) }
+}
+@MainActor
+final class RelayAPI: RelayCalling {
     let origin: URL
     private let session: URLSession
     init(origin: URL) {
@@ -79,7 +88,7 @@ final class FormOpeningObservations: ObservableObject {
 @MainActor
 final class RelayModel: ObservableObject {
     let authentication = Authentication()
-    let api: RelayAPI
+    let api: any RelayCalling
     @Published var signedIn = false
     @Published var identity = ""
     @Published var inbox: [InboxRow] = []
@@ -97,6 +106,7 @@ final class RelayModel: ObservableObject {
     private var resumeWhenConnected = false
     private var removingDevices = Set<String>()
     private var registrationRevision = 0
+    private var refreshRevision = 0
     private var pushTokenRevision = 0
     private var synchronizedPushTokenRevision = -1
     private var pushUpdateInProgress = false
@@ -115,9 +125,9 @@ final class RelayModel: ObservableObject {
     private var drafts: [String: ResponseDraft] = [:]
     private var expiries: [String: Double] = [:]
     private var formDraftIDs = Set<String>()
-    init() {
+    init(api: (any RelayCalling)? = nil) {
         let origin = URL(string: Bundle.main.object(forInfoDictionaryKey: "RelayURL") as? String ?? "https://relay.invalid")!
-        api = RelayAPI(origin: origin)
+        self.api = api ?? RelayAPI(origin: origin)
         if authentication.configured {
             authListener = Auth.auth().addStateDidChangeListener { [weak self] _, user in
                 Task { @MainActor in
@@ -163,11 +173,12 @@ final class RelayModel: ObservableObject {
         if sms?.id == request.id { sms = request }
         if !request.active || (request.manualEntryDeadline ?? request.expiresAt) <= Date().timeIntervalSince1970 * 1000 { discard(request.id) }
     }
-    func reconcileFormDrafts(pendingIDs: Set<String>, fetch: (String) async throws -> FormRequest) async {
+    func reconcileFormDrafts(pendingIDs: Set<String>, isCurrent: () -> Bool = { true }, fetch: (String) async throws -> FormRequest) async {
         for id in formDraftIDs.subtracting(pendingIDs) {
+            guard isCurrent() else { return }
             guard let retained = drafts[id] else { continue }
             // Absence alone is not terminal: the inbox has a bounded result set.
-            if let request = try? await fetch(id), request.status != "pending", drafts[id] === retained { discard(id) }
+            if let request = try? await fetch(id), isCurrent(), request.status != "pending", drafts[id] === retained { discard(id) }
         }
     }
     func discard(_ id: String) { drafts[id]?.clear(); drafts.removeValue(forKey: id); expiries.removeValue(forKey: id); formDraftIDs.remove(id) }
@@ -183,23 +194,42 @@ final class RelayModel: ObservableObject {
     }
     func refresh() async {
         guard signedIn else { return }; expireDrafts()
+        refreshRevision += 1
+        let revision = refreshRevision, registration = registrationRevision, uid = authentication.user?.uid, installation = deviceID
+        func isCurrent() -> Bool {
+            signedIn && refreshRevision == revision && registrationRevision == registration &&
+                authentication.user?.uid == uid && deviceID == installation && !Task.isCancelled
+        }
         do {
-            let fetched: [Device] = try await api.call("/v1/devices"); devices = fetched
-            if acceptsPushUpdates(for: deviceID) {
+            let fetched: [Device] = try await api.call("/v1/devices")
+            guard isCurrent() else { return }; devices = fetched
+            if authentication.configured, acceptsPushUpdates(for: installation) {
                 if !requestedPushRegistration { requestedPushRegistration = true; UIApplication.shared.registerForRemoteNotifications() }
                 if Messaging.messaging().apnsToken != nil { try? await retryPushTokenUpdate { try await self.registerPushToken() } }
             }
-            if let device = fetched.first(where: { $0.id == deviceID }), !device.paused {
-                inbox = try await api.call("/v2/devices/\(deviceID)/inbox")
-                await reconcileFormDrafts(pendingIDs: Set(inbox.map(\.id))) { id in
-                    try await self.api.call("/v2/devices/\(self.deviceID)/requests/\(id)")
+            guard isCurrent() else { return }
+            if let device = fetched.first(where: { $0.id == installation }), !device.paused {
+                let rows: [InboxRow] = try await api.call("/v2/devices/\(installation)/inbox")
+                guard isCurrent() else { return }; inbox = rows
+                await reconcileFormDrafts(pendingIDs: Set(rows.map(\.id)), isCurrent: isCurrent) { id in
+                    try await self.api.call("/v2/devices/\(installation)/requests/\(id)")
                 }
+                guard isCurrent() else { return }
                 if let id = device.activeRequestId {
-                    let request: SMSRequest = try await api.call("/v1/devices/\(deviceID)/requests/\(id)"); updateSMS(request)
+                    let request: SMSRequest = try await api.call("/v1/devices/\(installation)/requests/\(id)")
+                    guard isCurrent() else { return }; updateSMS(request)
                 } else { updateSMS(nil) }
             } else { inbox = []; sms = nil; clearResponses() }
-            grants = try await api.call("/v1/callers"); agents = try await api.call("/v3/services"); history = try await api.call("/v1/history")
-        } catch { self.error = (error as? RelayFailure)?.localizedDescription ?? "Could not refresh. Pull to try again." }
+            let fetchedGrants: [Grant] = try await api.call("/v1/callers")
+            guard isCurrent() else { return }; grants = fetchedGrants
+            let fetchedAgents: [Agent] = try await api.call("/v3/services")
+            guard isCurrent() else { return }; agents = fetchedAgents
+            let fetchedHistory: [HistoryRow] = try await api.call("/v1/history")
+            guard isCurrent() else { return }; history = fetchedHistory
+        } catch {
+            guard isCurrent() else { return }
+            self.error = (error as? RelayFailure)?.localizedDescription ?? "Could not refresh. Pull to try again."
+        }
     }
     func registerDevice() async throws {
         guard try await UNUserNotificationCenter.current().requestAuthorization(options: [.alert,.badge,.sound]) else { throw RelayFailure.rejected("notifications_disabled") }

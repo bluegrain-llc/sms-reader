@@ -191,6 +191,94 @@ extension RelayTests {
         model.updateSMS(nil); XCTAssertTrue(second.code.isEmpty)
         model.clearResponses()
     }
+    @MainActor func testOlderRefreshCannotReplaceSuccessorFromInboxOrSMSWait() async throws {
+        let key = "installation:signed-out", original = try PrivateStorage.read("installation:signed-out")
+        defer { if let original { try? PrivateStorage.write(key, original) } else { PrivateStorage.remove(key) } }
+        for suspendedPath in ["inbox", "sms", "empty", "devices", "failure", "form"] {
+            let gate = SuspendedRelayReply()
+            let api = FixtureRelayAPI(), model = RelayModel(api: api)
+            model.signedIn = true
+            let installation = model.deviceID
+            XCTAssertFalse(installation.isEmpty)
+            let old = SMSRequest(requestId: "old", callerName: "Agent", title: "Old", purpose: "Test", status: "ready", expiresAt: 2000000000000)
+            let successor = SMSRequest(requestId: "new", callerName: "Agent", title: "New", purpose: "Test", status: "ready", expiresAt: old.expiresAt)
+            let oldDevice = Device(deviceId: installation, name: "Phone", paused: false, activeRequestId: suspendedPath == "empty" ? nil : old.id)
+            let newDevice = Device(deviceId: installation, name: "Phone", paused: false, activeRequestId: successor.id)
+            model.updateSMS(old)
+            if suspendedPath == "form" { model.formDraft(formState("pending")).values = ["answer": .text("retain me")] }
+            var newer = false
+            api.respond = { path, _, _ in
+                if path == "/v1/devices" {
+                    if !newer && suspendedPath == "devices" { return try await gate.reply() }
+                    return try JSONEncoder().encode([newer ? newDevice : oldDevice])
+                }
+                if path.hasSuffix("/inbox") {
+                    if !newer && ["inbox", "empty", "failure"].contains(suspendedPath) { return try await gate.reply() }
+                    return Data("[]".utf8)
+                }
+                if path == "/v2/devices/\(installation)/requests/form" {
+                    if !newer { return try await gate.reply() }
+                    return try JSONEncoder().encode(self.formState("pending"))
+                }
+                if path == "/v1/devices/\(installation)/requests/old" {
+                    if suspendedPath == "sms" { return try await gate.reply() }
+                    return try JSONEncoder().encode(old)
+                }
+                if path == "/v1/devices/\(installation)/requests/new" { return try JSONEncoder().encode(successor) }
+                return Data("[]".utf8)
+            }
+            let olderRefresh = Task { await model.refresh() }
+            defer { gate.resume(.failure(CancellationError())); olderRefresh.cancel(); model.clearResponses() }
+            await fulfillment(of: [gate.entered], timeout: 2)
+            newer = true
+            await model.refresh()
+            XCTAssertEqual(model.sms?.id, successor.id)
+            let draft = model.draft(successor.id, expiresAt: successor.expiresAt); draft.code = "123456"
+            let retainedForm = model.formDraft(formState("pending")); retainedForm.values = ["answer": .text("retain me")]
+            if suspendedPath == "failure" { gate.resume(.failure(RelayFailure.unavailable)) }
+            else if suspendedPath == "devices" { gate.resume(.success(try JSONEncoder().encode([oldDevice]))) }
+            else if suspendedPath == "sms" {
+                let terminal = SMSRequest(requestId: old.id, callerName: old.callerName, title: old.title, purpose: old.purpose, status: "completed", expiresAt: old.expiresAt)
+                gate.resume(.success(try JSONEncoder().encode(terminal)))
+            } else if suspendedPath == "form" { gate.resume(.success(try JSONEncoder().encode(formState("completed")))) }
+            else { gate.resume(.success(Data("[]".utf8))) }
+            await olderRefresh.value
+            XCTAssertEqual(model.sms?.id, successor.id, suspendedPath)
+            XCTAssertEqual(model.devices.first?.activeRequestId, successor.id, suspendedPath)
+            XCTAssertEqual(draft.code, "123456", suspendedPath)
+            XCTAssertEqual(retainedForm.values["answer"], .text("retain me"), suspendedPath)
+            XCTAssertNil(model.error, suspendedPath)
+        }
+    }
+    @MainActor func testRefreshCannotPublishAfterSignOutReplacementOrCancellation() async throws {
+        let key = "installation:signed-out", original = try PrivateStorage.read("installation:signed-out")
+        defer { if let original { try? PrivateStorage.write(key, original) } else { PrivateStorage.remove(key) } }
+        for invalidation in ["sign-out", "replacement", "cancel"] {
+            let gate = SuspendedRelayReply(), api = FixtureRelayAPI()
+            let model = RelayModel(api: api); model.signedIn = true
+            let installation = model.deviceID
+            XCTAssertFalse(installation.isEmpty)
+            api.respond = { path, _, _ in
+                XCTAssertEqual(path, "/v1/devices", "Invalidated refresh must stop before another API request")
+                return try await gate.reply()
+            }
+            let refresh = Task { await model.refresh() }
+            defer { gate.resume(.failure(CancellationError())); refresh.cancel(); model.clearResponses() }
+            await fulfillment(of: [gate.entered], timeout: 2)
+            if invalidation == "sign-out" { model.signedIn = false; model.clearResponses() }
+            else if invalidation == "cancel" { refresh.cancel() }
+            else {
+                _ = try await model.registerInstallation(allowReplacement: true) { id in
+                    if id == installation { throw RelayFailure.rejected("installation_id_unavailable") }
+                }
+                XCTAssertNotEqual(model.deviceID, installation)
+            }
+            gate.resume(.success(try JSONEncoder().encode([Device(deviceId: installation, name: "Old phone", paused: false)])))
+            await refresh.value
+            XCTAssertTrue(model.devices.isEmpty, invalidation)
+            XCTAssertNil(model.error, invalidation)
+        }
+    }
     @MainActor func testPushUpdateRetriesAfterAuthenticationAndConnectionRestoration() async throws {
         let model = RelayModel()
         var updates = 0
@@ -239,5 +327,34 @@ extension RelayTests {
     private func formState(_ status: String) -> FormRequest {
         .init(requestId: "form", callerName: "Agent", title: "Response", body: "Test", status: status,
               expiresAt: 2000000000000, fields: [.init(id: "answer", label: "Answer", type: "text", required: false)], actions: [])
+    }
+}
+
+@MainActor
+private final class FixtureRelayAPI: RelayCalling {
+    let origin = URL(string: "https://relay.example")!
+    var respond: (String, String, [String: Any]?) async throws -> Data = { _, _, _ in throw RelayFailure.unavailable }
+    func call<T: Decodable>(_ path: String, method: String, body: [String: Any]?) async throws -> T {
+        let data = try await respond(path, method, body)
+        return try JSONDecoder().decode(T.self, from: data)
+    }
+}
+
+@MainActor
+private final class SuspendedRelayReply {
+    let entered = XCTestExpectation(description: "Older refresh suspended at the requested API boundary")
+    private var continuation: CheckedContinuation<Data, Error>?
+    private var result: Result<Data, Error>?
+    func reply() async throws -> Data {
+        entered.fulfill()
+        return try await withCheckedThrowingContinuation { continuation in
+            if let result { continuation.resume(with: result) }
+            else { self.continuation = continuation }
+        }
+    }
+    func resume(_ result: Result<Data, Error>) {
+        guard self.result == nil else { return }
+        self.result = result
+        continuation?.resume(with: result); continuation = nil
     }
 }
