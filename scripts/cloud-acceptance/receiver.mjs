@@ -2,7 +2,7 @@ import { createServer } from 'node:http';
 import { timingSafeEqual, createHash } from 'node:crypto';
 import { initializeApp } from 'firebase-admin/app';
 import { FieldValue, getFirestore } from 'firebase-admin/firestore';
-import { callbackOutcome, clientDisconnectedBeforeResponse, eventMetadata, verifySignature } from './core.mjs';
+import { callbackOutcome, withholdCallbackResponse, eventMetadata, verifySignature } from './core.mjs';
 
 if (!process.env.GOOGLE_CLOUD_PROJECT || !/^[A-Za-z0-9_-]{43}$/.test(process.env.CALLBACK_ADMIN_SECRET ?? '') || !process.env.GOOGLE_CLOUD_PROJECT.match(/staging|-stg/) || process.env.FIRESTORE_EMULATOR_HOST) throw new Error('staging_receiver_configuration_required');
 initializeApp({ projectId: process.env.GOOGLE_CLOUD_PROJECT });
@@ -30,7 +30,7 @@ const server = createServer(async (req, res) => {
       const input = JSON.parse(body);
       if (typeof input.secret !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(input.secret) || !allowedModes.has(input.mode)) return json(res, 400, { error: 'invalid_input' });
       await ref.create({ secret: input.secret, mode: input.mode, receipts: [], purgeAt: new Date(Date.now() + 86_400_000) });
-      return json(res, 201, { ok: true });
+      return json(res, 201, { ok: true, proofSchemaVersion: 2 });
     }
     const run = (await ref.get()).data();
     if (!run || run.purgeAt.toMillis() <= Date.now()) return json(res, 404, { error: 'not_found' });
@@ -50,12 +50,11 @@ const server = createServer(async (req, res) => {
     });
     if (!outcome) return json(res, 410, { error: 'fixture_expired_or_full' });
     if (outcome.timeout) {
-      const clientClosedBeforeResponse = await clientDisconnectedBeforeResponse(res);
+      const withheldResponseMs = await withholdCallbackResponse();
       await db.runTransaction(async tx => {
         const latest = (await tx.get(ref)).data();
-        if (latest) tx.update(ref, { receipts: latest.receipts.map(r => r.id === event.id && r.attempt === 1 ? { ...r, clientClosedBeforeResponse } : r) });
+        if (latest) tx.update(ref, { receipts: latest.receipts.map(r => r.id === event.id && r.attempt === 1 ? { ...r, withheldResponseMs } : r) });
       });
-      if (clientClosedBeforeResponse) return;
     }
     const responseFinished = await new Promise(resolve => {
       const done = finished => { clearTimeout(timer); res.removeListener('finish', finish); res.removeListener('close', close); resolve(finished); };

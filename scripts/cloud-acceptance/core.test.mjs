@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { EventEmitter } from 'node:events';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { activeTtl, callbackOutcome, callbackReceipts, checkedScenario, clientDisconnectedBeforeResponse, config, eventMetadata, expiryFixtureState, fixtureCredentials, httpsOrigin, ownerClaims, preflight, privateValue, proveCancellation, readyIndexes, replayProgress, report, scenarios, settlePairings, verifySignature, winnerAgreement, writeReport } from './core.mjs';
+import { activeTtl, callbackOutcome, callbackReceipts, checkedScenario, config, eventMetadata, expiryFixtureState, fixtureCredentials, httpsOrigin, ownerClaims, preflight, privateValue, proveCancellation, readyIndexes, replayProgress, report, scenarios, settlePairings, verifySignature, winnerAgreement, writeReport } from './core.mjs';
 
 const base = { projectId: 'relay-staging-123', productionProjectId: 'relay-production-123', securityLedgerBucket: 'relay-staging-ledger', account: 'operator@example.com', region: 'us-central1', service: 'relay-service', serviceUrl: 'https://relay.run.app', ownerTokenFile: '/private/owner', disposableOwnerUid: 'disposable', fcmTokenFiles: ['/private/one', '/private/two'], budgetUsd: 10 };
 const startupProbe = { httpGet: { path: '/startup', port: 8080 } };
@@ -172,25 +172,13 @@ test('callback verification binds exact body and timestamp and refuses stale or 
   assert.equal(verifySignature(secret, timestamp, bytes, signedBytes, now), true);
   assert.equal(verifySignature(secret, timestamp, altered, signedBytes, now), false);
 });
-test('timeout evidence requires an observed client abort, not delayed rejection or success', async () => {
+test('callback rejection evidence requires a completed first503 and same-event successful retry', () => {
   assert.deepEqual(callbackOutcome('timeout-once', 1), { status: 204, timeout: true });
   assert.deepEqual(callbackOutcome('fail-once', 1), { status: 503, timeout: false });
-  const first = { id: 'same-event', attempt: 1, status: 204, clientClosedBeforeResponse: true }, retry = { id: 'same-event', attempt: 2, status: 204, responseFinished: true };
-  callbackReceipts('timeout-once', [first, retry]);
-  assert.throws(() => callbackReceipts('timeout-once', [{ ...first, status: 503 }, retry]));
-  assert.throws(() => callbackReceipts('timeout-once', [{ ...first, clientClosedBeforeResponse: false }, retry]));
-  assert.throws(() => callbackReceipts('timeout-once', [first]));
-  assert.throws(() => callbackReceipts('timeout-once', [first, { ...retry, responseFinished: undefined }]));
-  assert.throws(() => callbackReceipts('timeout-once', [first, { ...retry, responseFinished: false }]));
-  callbackReceipts('fail-once', [{ ...first, status: 503, responseFinished: true }, retry]);
-  for (const responseFinished of [false, undefined]) assert.throws(() => callbackReceipts('fail-once', [{ ...first, status: 503, responseFinished }, retry]), /callback_rejection_not_observed/);
-  const closed = new EventEmitter(); closed.writableFinished = false;
-  const observed = clientDisconnectedBeforeResponse(closed, 1000); closed.emit('close');
-  assert.equal(await observed, true); assert.equal(closed.listenerCount('close'), 0);
-  const finished = new EventEmitter(); finished.writableFinished = true;
-  const successful = clientDisconnectedBeforeResponse(finished, 1000); finished.emit('close');
-  assert.equal(await successful, false);
-  assert.equal(await clientDisconnectedBeforeResponse(new EventEmitter(), 1), false);
+  const first = { id: 'same-event', attempt: 1, status: 503, responseFinished: true }, retry = { id: 'same-event', attempt: 2, status: 204, responseFinished: true };
+  callbackReceipts('fail-once', [first, retry]);
+  for (const responseFinished of [false, undefined]) assert.throws(() => callbackReceipts('fail-once', [{ ...first, responseFinished }, retry]), /callback_rejection_not_observed/);
+  assert.throws(() => callbackReceipts('fail-once', [first, { ...retry, id: 'unrelated' }]));
 });
 test('winner evidence rejects last-writer-wins responses and missing winner identity', () => {
   const first = { status: 'submitted', completedByDeviceId: 'phone-one' };

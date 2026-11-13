@@ -66,7 +66,8 @@ identity with no personal records. No production project is accepted.
    These prove FCM provider acceptance, not physical display, owner recognition,
    carrier delivery or system consent. The runner creates unique installation
    IDs and submits synthetic manual values through authenticated owner APIs.
-6. The selected cloud operator needs read access to staging `deliveryOutbox` and
+6. The selected cloud operator needs read access to staging `deliveryOutbox`,
+   `logging.logEntries.list` on the staging project, and
    read/write access to the **disposable staging** `results` collection.
    The expiry check changes only its fixture's `purgeAt` to
    20 minutes ahead, leaving `expiresAt` unchanged. After 121 seconds it requires
@@ -109,17 +110,31 @@ timestamp tolerance, event
 ID, and an allowlist excluding answers and owner/grant fields. Receipt counters
 are transactional and survive receiver cold starts.
 
-Two modes independently exercise a completed first-attempt 503 and an 11-second response
-delay (longer than the relay's 10-second timeout). The timeout mode plans a 204,
-never a delayed rejection. It records whether the HTTP client disconnected before
-the response, and requires that observation plus a later same-event successful
-retry. A caller that waits for the delayed 204 cannot pass. If the hosting proxy
-does not propagate disconnects, this scenario fails rather than claiming timeout
-proof. Receipt `status` is the planned response; `clientClosedBeforeResponse`
-distinguishes an aborted timeout attempt. A retry additionally requires the
-receiver's completed response and deletion of its exact sender outbox job while
-the request, event and callback registration remain active. A planned 204 alone
-cannot pass recovery. The probe does not proxy destinations.
+Two modes independently exercise a completed first-attempt 503 and an actual
+11-second response withholding interval, longer than the relay's ten-second
+outbound timeout. The timeout mode plans a 204, never a delayed rejection.
+Cloud Run HTTP/1.1 does not propagate client disconnects to its container, so a
+receiver-side close event cannot establish the sender's timeout. See
+[Cloud Run troubleshooting](https://docs.cloud.google.com/run/docs/troubleshooting).
+
+The timeout check requires independent sender evidence: its exact owned outbox
+job must be observed with a first-attempt lease and then with that lease cleared
+by failure. A bounded, projected query must show no other webhook jobs. The
+harness requires exactly one real webhook delivery log in that revision and
+attempt window, classified as a failed timeout before the receiver's measured
+withholding interval ends. Missing transitions, unrelated jobs, ambiguous logs,
+a delayed 204 alone or a completed 500 cannot pass. Keep the source staging
+baseline exclusive; concurrent webhook work deliberately fails this gate.
+
+Both modes also require a same-event signed retry with a completed 204 and
+deletion of its exact sender outbox job while the request, event and registration
+remain active. Each successful probe removes its owned hook before the next
+request, and final owner cleanup still handles failed probes. Only allowlisted
+counts, delay and sender-proof booleans survive in failed-check evidence before
+the temporary collector is deleted. The receiver and harness use proof schema2;
+an older receiver is rejected before creating a callback request. Deploy the
+matching tested probe image when upgrading the harness. The probe does not proxy
+destinations.
 
 ## Running the baseline
 
