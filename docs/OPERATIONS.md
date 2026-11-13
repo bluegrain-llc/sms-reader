@@ -26,7 +26,7 @@ Backlog collection reads aggregate counts and one oldest due document for each e
 
 Enable Logging, Monitoring and Billing Budgets APIs in the explicitly selected project. Use an operator identity with log-metric, alert-policy and budget administration permissions. Application runtime needs no new monitoring/billing role: Cloud Run collects stdout. Keep the ordinary runtime least-privilege role set.
 
-Create, enable and verify an email notification channel first. The script checks it belongs to the selected project and is enabled and verified. The billing account must actually be linked to that project. Set these public resource identifiers in a private operator environment:
+Create and enable an email notification channel first, completing verification when Google requires it. The script checks it belongs to the selected project, is enabled and has no outstanding verification. Google's [notification-channel API](https://docs.cloud.google.com/monitoring/api/ref_v3/rest/v3/projects.notificationChannels) also treats an omitted or `VERIFICATION_STATUS_UNSPECIFIED` status as usable for channels that do not require verification or are exempt; the script accepts those channels, while rejecting `UNVERIFIED` and unrecognized states. This API state does not prove an alert reached the operator: actual delivery still requires the staging drills below. The billing account must actually be linked to that project. Set these public resource identifiers in a private operator environment:
 
 ```sh
 python3 scripts/monitoring/provision.py \
@@ -59,7 +59,7 @@ For every alert, record UTC time, selected project/service/revision, bounded eve
 
 Use a separate staging project and disposable identities only. Keep the production project unchanged. Run tests in this order, restore each injected fault in a `finally`/cleanup step, and keep the fixture alive only until the observed state is recorded:
 
-1. Install policies on staging, verify email channel, run successful maintenance and wait until the completion metric exists.
+1. Install policies on staging, confirm the selected email recipient and any required verification, run successful maintenance and wait until the completion metric exists.
 2. Pause the staging Scheduler job. Wait for the three-minute absence condition plus ingestion/notification delay. Record actual alert delivery; resume Scheduler and confirm completion/recovery. Set a ten-minute local drill deadline and always resume the job on timeout.
 3. Inject a provider failure using a staging-only fake receiver returning non-2xx or unavailable callback endpoint. Confirm a failed webhook attempt, bounded category and eventual retry success after restoring it. Do not use private/internal callback destinations to bypass the SSRF guard.
 4. Seed disposable due delivery/deletion metadata older than thresholds and more expired result documents than one cleanup batch. Invoke maintenance and verify remaining backlog snapshots trigger the correct policies. Drain and remove fixtures afterward; no real SMS or answer values are needed. A fixture deleted in the same maintenance run correctly does not produce a persistent-backlog alert.
