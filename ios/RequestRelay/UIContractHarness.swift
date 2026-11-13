@@ -5,6 +5,7 @@ import SwiftUI
 struct UIContractHarness: View {
     @StateObject private var codeDraft = ResponseDraft()
     @StateObject private var formDraft = ResponseDraft()
+    @StateObject private var numberDraft = ResponseDraft()
     @State private var privacySheet = false
     @State private var previewPhase: ScenePhase = .active
     private let expiry = (Date().timeIntervalSince1970 + 300) * 1000
@@ -14,6 +15,12 @@ struct UIContractHarness: View {
                 Button("Private modal") { previewPhase = .active; privacySheet = true }
                 NavigationLink("Manual code") {
                     CodeEditor(request: SMSRequest(requestId: "fixture-code", callerName: "Synthetic agent", title: "Test sign-in", purpose: "Share only by tapping Send.", status: "ready", expiresAt: expiry, manualEntryDeadline: expiry), draft: codeDraft)
+                }
+                NavigationLink("Numeric draft") {
+                    VStack {
+                        NativeField(field: .init(id: "number", label: "Private number", type: "number", required: false), values: $numberDraft.values, numberInputs: $numberDraft.numberInputs)
+                        Button("Clear retained draft") { numberDraft.clear() }
+                    }.padding()
                 }
                 NavigationLink("Wizard request") {
                     FormEditor(request: FormRequest(requestId: "fixture-wizard", callerName: "Synthetic agent", title: "Test wizard", body: "Choose what to share.", status: "pending", expiresAt: expiry,

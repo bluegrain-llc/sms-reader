@@ -83,14 +83,61 @@ extension RelayTests {
         XCTAssertFalse(model.formDraft(pending) === retained)
         model.clearResponses()
     }
-    @MainActor func testTerminalFormLoadClearsBeforeAnyOpeningObservation() {
+    @MainActor func testTerminalFormLoadClearsBeforeAnyOpeningObservation() async throws {
         let model = RelayModel(), retained = model.formDraft(formState("pending"))
         retained.values = ["answer": .text("private")]
-        let terminal = model.formDraft(formState("cancelled"))
-        XCTAssertTrue(terminal === retained); XCTAssertTrue(terminal.values.isEmpty)
-        // The response loader checks terminal status before issuing any observation POST.
+        retained.numberInputs = ["number": "123."]
+        let terminal = try await model.prepareFormResponse(formState("cancelled"), opening: true, fromNotification: true) { _ in
+            XCTFail("Terminal loads must not issue opening observations")
+            throw RelayFailure.unavailable
+        }
+        XCTAssertTrue(terminal === retained); XCTAssertTrue(terminal.values.isEmpty); XCTAssertTrue(terminal.numberInputs.isEmpty)
         XCTAssertFalse(model.formDraft(formState("pending")) === retained)
+        var observations: [String] = []
+        var received = false
+        do {
+            _ = try await model.prepareFormResponse(formState("pending"), opening: true, fromNotification: true, receive: { _ in received = true }) { event in
+                XCTAssertTrue(received)
+                observations.append(event); throw RelayFailure.unavailable
+            }
+            XCTFail("The failing observation must propagate")
+        } catch { XCTAssertEqual(observations, ["notification.tapped"]) }
         model.clearResponses()
+    }
+    @MainActor func testSMSSuccessorErasesPriorPrivateDraft() {
+        let model = RelayModel()
+        func request(_ id: String) -> SMSRequest {
+            .init(requestId: id, callerName: "Agent", title: "Code", purpose: "Test", status: "ready", expiresAt: 2000000000000)
+        }
+        model.updateSMS(request("first"))
+        let first = model.draft("first", expiresAt: 2000000000000); first.code = "123456"
+        model.updateSMS(request("second"))
+        XCTAssertTrue(first.code.isEmpty)
+        XCTAssertFalse(model.draft("first", expiresAt: 2000000000000) === first)
+        let second = model.draft("second", expiresAt: 2000000000000); second.code = "654321"
+        model.updateSMS(request("second")); XCTAssertEqual(second.code, "654321")
+        model.updateSMS(nil); XCTAssertTrue(second.code.isEmpty)
+        model.clearResponses()
+    }
+    @MainActor func testPushUpdateRetriesAfterAuthenticationAndConnectionRestoration() async throws {
+        let model = RelayModel()
+        var updates = 0
+        try await model.updatePushToken()
+        model.signedIn = true
+        try await model.retryPushTokenUpdate { updates += 1 }
+        XCTAssertEqual(updates, 0)
+        model.devices = [.init(deviceId: model.deviceID, name: "Phone", paused: true)]
+        do {
+            try await model.retryPushTokenUpdate { throw RelayFailure.unavailable }
+            XCTFail("Failed token upload must propagate")
+        } catch {}
+        try await model.retryPushTokenUpdate {
+            updates += 1
+            try await model.retryPushTokenUpdate { XCTFail("A refresh must not recursively synchronize") }
+        }
+        try await model.retryPushTokenUpdate { updates += 1 }
+        XCTAssertEqual(updates, 1)
+        model.signedIn = false
     }
     @MainActor func testPushRefreshRequiresAnExistingConnection() {
         let model = RelayModel(); model.signedIn = true

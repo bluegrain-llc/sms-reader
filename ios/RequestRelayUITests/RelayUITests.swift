@@ -40,6 +40,16 @@ extension RelayUITests {
 }
 
 extension RelayUITests {
+    func testClearingDraftErasesMountedNumericInput() {
+        let app = XCUIApplication(); app.launchArguments = ["--ui-contract"]; app.launch()
+        app.buttons["Numeric draft"].tap()
+        let input = app.textFields["Private number"]
+        XCTAssertTrue(input.waitForExistence(timeout: 5))
+        input.tap(); input.typeText("123.")
+        XCTAssertEqual(input.value as? String, "123.")
+        app.buttons["Clear retained draft"].tap()
+        XCTAssertEqual(input.value as? String, "Private number")
+    }
     func testPrivacyCoverAlsoCoversPresentedResponse() {
         let app = XCUIApplication(); app.launchArguments = ["--ui-contract"]; app.launch()
         app.buttons["Private modal"].tap()

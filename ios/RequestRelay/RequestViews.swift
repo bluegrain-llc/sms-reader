@@ -96,10 +96,11 @@ struct FormResponse: View {
             while !Task.isCancelled {
                 do {
                     let result: FormRequest = try await model.api.call("/v2/devices/\(model.deviceID)/requests/\(id)")
-                    let first = request == nil; request = result; draft = model.formDraft(result)
+                    let first = request == nil
+                    draft = try await model.prepareFormResponse(result, opening: first, fromNotification: fromNotification, receive: { value in request = result; draft = value }) { event in
+                        let _: EmptyReply = try await model.api.call("/v2/devices/\(model.deviceID)/requests/\(id)/events", method: "POST", body: ["type":event])
+                    }
                     if result.status != "pending" { break }
-                    if first && fromNotification { let _: EmptyReply = try await model.api.call("/v2/devices/\(model.deviceID)/requests/\(id)/events", method: "POST", body: ["type":"notification.tapped"]) }
-                    if first { let _: EmptyReply = try await model.api.call("/v2/devices/\(model.deviceID)/requests/\(id)/events", method: "POST", body: ["type":"request.opened"]) }
                 } catch { failed = true; model.error = (error as? RelayFailure)?.localizedDescription ?? "Could not refresh the request. Try again."; break }
                 try? await Task.sleep(for: .seconds(3))
             }
@@ -139,7 +140,7 @@ struct FormEditor: View {
                     } else {
                         Section(request.steps == nil || steps.isEmpty ? "Your response" : "\(current + 1) of \(steps.count) · \(steps[current].title)") {
                             if request.steps != nil, !steps.isEmpty, let body = steps[current].body { Text(.init(body)) }
-                            ForEach(fields) { field in NativeField(field: field, values: $draft.values) }
+                            ForEach(fields) { field in NativeField(field: field, values: $draft.values, numberInputs: $draft.numberInputs) }
                         }
                         Section {
                             if current > 0 { Button("Previous") { draft.stepID = steps[current - 1].id; validation = [] } }
@@ -158,7 +159,7 @@ struct FormEditor: View {
             }
             .onChange(of: active) { _, active in if !active { draft.clear() } }
             .onChange(of: draft.values) { _, _ in
-                let visible = Set(request.visibleFields(draft.values).map(\.id)); draft.values = draft.values.filter { visible.contains($0.key) }
+                let visible = Set(request.visibleFields(draft.values).map(\.id)); draft.values = draft.values.filter { visible.contains($0.key) }; draft.numberInputs = draft.numberInputs.filter { visible.contains($0.key) }
                 if let id = draft.stepID, !steps.contains(where: { $0.id == id }) { draft.stepID = steps.first?.id; draft.review = false }
             }
             .confirmationDialog("Send this response to \(request.callerName)?", isPresented: Binding(get: { confirmation != nil }, set: { if !$0 { confirmation = nil } }), titleVisibility: .visible) {
@@ -180,9 +181,9 @@ struct FormEditor: View {
 struct NativeField: View {
     let field: FormField
     @Binding var values: [String: Answer]
-    @State private var numberText = ""
-    private var text: Binding<String> { Binding(get: { field.type == "number" ? numberText : values[field.id]?.text ?? "" }, set: { newValue in
-        if field.type == "number" { numberText = newValue; if newValue.isEmpty { values.removeValue(forKey: field.id) } else if let number = Double(newValue), number.isFinite { values[field.id] = .number(number) } else { values[field.id] = .text(newValue) } }
+    @Binding var numberInputs: [String: String]
+    private var text: Binding<String> { Binding(get: { field.type == "number" ? (numberInputs[field.id] ?? values[field.id]?.text ?? "") : values[field.id]?.text ?? "" }, set: { newValue in
+        if field.type == "number" { numberInputs[field.id] = newValue; if newValue.isEmpty { values.removeValue(forKey: field.id) } else if let number = Double(newValue), number.isFinite { values[field.id] = .number(number) } else { values[field.id] = .text(newValue) } }
         else if field.type == "single_choice" && newValue.isEmpty { values.removeValue(forKey: field.id) }
         else { values[field.id] = .text(String(newValue.prefix(field.maxLength ?? 4000))) }
     }) }
@@ -207,7 +208,7 @@ struct NativeField: View {
                     if field.input == "sms_code" { Text("Type or paste deliberately. AutoFill depends on the code’s domain. Review and send explicitly.").font(.footnote).foregroundStyle(.secondary) }
                 }
             }
-        }.privacySensitive().onAppear { if field.type == "number" { numberText = values[field.id]?.text ?? "" } }
+        }.privacySensitive()
     }
     private static let formatter: DateFormatter = { let f = DateFormatter(); f.calendar = Calendar(identifier: .gregorian); f.locale = Locale(identifier: "en_US_POSIX"); f.dateFormat = "yyyy-MM-dd"; return f }()
 }

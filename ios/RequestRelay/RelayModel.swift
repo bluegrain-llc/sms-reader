@@ -58,10 +58,11 @@ final class RejectRedirects: NSObject, URLSessionTaskDelegate {
 final class ResponseDraft: ObservableObject {
     @Published var values: [String: Answer] = [:]
     @Published var code = ""
+    @Published var numberInputs: [String: String] = [:]
     @Published var stepID: String?
     @Published var review = false
     let submissionID = UUID().uuidString
-    func clear() { values = [:]; code = ""; stepID = nil; review = false }
+    func clear() { values = [:]; code = ""; numberInputs = [:]; stepID = nil; review = false }
 }
 @MainActor
 final class RelayModel: ObservableObject {
@@ -84,6 +85,10 @@ final class RelayModel: ObservableObject {
     private var resumeWhenConnected = false
     private var removingDevices = Set<String>()
     private var registrationRevision = 0
+    private var pushTokenRevision = 0
+    private var synchronizedPushTokenRevision = -1
+    private var pushUpdateInProgress = false
+    private var requestedPushRegistration = false
     private var cachedDeviceID: String?
     var deviceID: String {
         if let cachedDeviceID { return cachedDeviceID }
@@ -105,7 +110,7 @@ final class RelayModel: ObservableObject {
             authListener = Auth.auth().addStateDidChangeListener { [weak self] _, user in
                 Task { @MainActor in
                     guard let self else { return }
-                    if self.owner != user?.uid { self.clearResponses(); self.cachedDeviceID = nil; self.resumeWhenConnected = false; self.registrationRevision += 1; self.owner = user?.uid; self.inbox = []; self.devices = []; self.grants = []; self.history = []; self.agents = []; self.sms = nil }
+                    if self.owner != user?.uid { self.clearResponses(); self.cachedDeviceID = nil; self.resumeWhenConnected = false; self.registrationRevision += 1; self.synchronizedPushTokenRevision = -1; self.requestedPushRegistration = false; self.owner = user?.uid; self.inbox = []; self.devices = []; self.grants = []; self.history = []; self.agents = []; self.sms = nil }
                     self.signedIn = user != nil; self.identity = user?.email ?? "Your account"
                     if user != nil { await self.refresh() }
                 }
@@ -129,6 +134,19 @@ final class RelayModel: ObservableObject {
         if request.status != "pending" { discard(request.id) }
         return value
     }
+    func prepareFormResponse(_ request: FormRequest, opening: Bool, fromNotification: Bool, receive: (ResponseDraft) -> Void = { _ in }, observe: (String) async throws -> Void) async throws -> ResponseDraft {
+        let value = formDraft(request)
+        receive(value)
+        guard request.status == "pending", opening else { return value }
+        if fromNotification { try await observe("notification.tapped") }
+        try await observe("request.opened")
+        return value
+    }
+    func updateSMS(_ request: SMSRequest?) {
+        if let old = sms, old.id != request?.id { discard(old.id) }
+        sms = request
+        if let request, !request.active { discard(request.id) }
+    }
     func reconcileFormDrafts(pendingIDs: Set<String>, fetch: (String) async throws -> FormRequest) async {
         for id in formDraftIDs.subtracting(pendingIDs) {
             guard let retained = drafts[id] else { continue }
@@ -151,22 +169,25 @@ final class RelayModel: ObservableObject {
         guard signedIn else { return }; expireDrafts()
         do {
             let fetched: [Device] = try await api.call("/v1/devices"); devices = fetched
+            if acceptsPushUpdates(for: deviceID) {
+                if !requestedPushRegistration { requestedPushRegistration = true; UIApplication.shared.registerForRemoteNotifications() }
+                if Messaging.messaging().apnsToken != nil { try? await retryPushTokenUpdate { try await self.registerPushToken() } }
+            }
             if let device = fetched.first(where: { $0.id == deviceID }), !device.paused {
                 inbox = try await api.call("/v2/devices/\(deviceID)/inbox")
                 await reconcileFormDrafts(pendingIDs: Set(inbox.map(\.id))) { id in
                     try await self.api.call("/v2/devices/\(self.deviceID)/requests/\(id)")
                 }
                 if let id = device.activeRequestId {
-                    let request: SMSRequest = try await api.call("/v1/devices/\(deviceID)/requests/\(id)"); sms = request
-                    if !request.active { discard(id) }
-                } else { if let old = sms { discard(old.id) }; sms = nil }
+                    let request: SMSRequest = try await api.call("/v1/devices/\(deviceID)/requests/\(id)"); updateSMS(request)
+                } else { updateSMS(nil) }
             } else { inbox = []; sms = nil; clearResponses() }
             grants = try await api.call("/v1/callers"); agents = try await api.call("/v3/services"); history = try await api.call("/v1/history")
         } catch { self.error = (error as? RelayFailure)?.localizedDescription ?? "Could not refresh. Pull to try again." }
     }
     func registerDevice() async throws {
         guard try await UNUserNotificationCenter.current().requestAuthorization(options: [.alert,.badge,.sound]) else { throw RelayFailure.rejected("notifications_disabled") }
-        resumeWhenConnected = true
+        resumeWhenConnected = true; requestedPushRegistration = true
         UIApplication.shared.registerForRemoteNotifications()
         // The FCM delegate retries registration when APNs supplies a token.
         if Messaging.messaging().apnsToken != nil { try await updatePushToken() }
@@ -175,6 +196,19 @@ final class RelayModel: ObservableObject {
         signedIn && !removingDevices.contains(id) && (resumeWhenConnected || devices.contains { $0.id == id })
     }
     func updatePushToken() async throws {
+        pushTokenRevision += 1
+        try await retryPushTokenUpdate { try await self.registerPushToken() }
+    }
+    func retryPushTokenUpdate(update: () async throws -> Void) async throws {
+        guard signedIn, !pushUpdateInProgress, synchronizedPushTokenRevision != pushTokenRevision,
+              acceptsPushUpdates(for: deviceID) else { return }
+        let revision = pushTokenRevision, registration = registrationRevision
+        pushUpdateInProgress = true
+        defer { pushUpdateInProgress = false }
+        try await update()
+        if registration == registrationRevision { synchronizedPushTokenRevision = revision }
+    }
+    private func registerPushToken() async throws {
         guard signedIn else { return }
         let id = deviceID
         guard acceptsPushUpdates(for: id) else { return }
@@ -202,7 +236,7 @@ final class RelayModel: ObservableObject {
         if request.status == "pending_phone" {
             request = try await api.call("/v1/devices/\(deviceID)/requests/\(id)/events", method: "POST", body: ["status":"ready","mode":"manual"])
         }
-        sms = request
+        updateSMS(request)
         if !request.active || (request.manualEntryDeadline ?? request.expiresAt) <= Date().timeIntervalSince1970 * 1000 { discard(id) }
         return request
     }
@@ -211,7 +245,7 @@ final class RelayModel: ObservableObject {
         let body: [String: Any] = deny ? ["status":"denied"] : ["status":"completed","source":"manual","code":code]
         let state: SMSRequest = try await api.call("/v1/devices/\(deviceID)/requests/\(request.id)/events", method: "POST", body: body)
         if !state.active { discard(request.id); notice = state.reason == "handled_on_another_device" ? "Handled on another device." : "Response accepted." }
-        sms = state; await refresh()
+        updateSMS(state); await refresh()
     }
     func submitForm(_ request: FormRequest, action: FormAction, draft: ResponseDraft) async throws -> FormRequest {
         let fields = request.visibleFields(draft.values), ids = Set(fields.map(\.id))
