@@ -21,6 +21,7 @@ import type { HttpOptions } from '../src/http.js';
 import type { Server } from 'node:http';
 import { capabilityTools, hostedProviderConfig, providerTools } from '../../integrations/providers.mjs';
 import { OAuth } from '../src/oauth.js';
+import { bedrockTools } from '../../integrations/aws.mjs';
 
 if (!process.env.FIRESTORE_EMULATOR_HOST) throw Error('Onboarding contracts require the Firestore emulator');
 process.env.OAUTH_CODE_KEY = '64'.repeat(32); // Isolated contract key, never used for deployment.
@@ -641,3 +642,45 @@ test('native scoped stream closes at undelivered expiry and tracks shortened gra
     } finally {await native.call('streamStop',[subscription.subscriptionId]);}
   }
 });
+
+for (const runtime of [0, 1]) {
+  test(`AWS Bedrock runtime ${runtime}: scoped Converse calls remain isolated and revocable`, {timeout:60000}, async () => {
+    time += 11 * MINUTE;
+    const s = await register(runtime, false, ['forms','sms']);
+    const paired = await connect(s, runtime, ['forms'], randomUUID());
+    const {d,payload} = await consume(s,runtime);
+    await call(runtime,`/v3/service/deliveries/${d.deliveryId}/acknowledgement`,s.credential,{});
+    // Service-management authority is never accepted as recipient request authority.
+    const definition = {title:'Review',body:'AWS fixture',fields:[{id:'decision',type:'text',label:'Decision'}],actions:[{id:'send',type:'submit',label:'Send'}],idempotencyKey:randomUUID()};
+    await call(runtime,'/v2/requests',s.credential,definition,'POST',401);
+    await call(runtime,`/v1/devices/${randomUUID()}`,owner(recipient),{name:'Synthetic AWS phone',fcmToken:'synthetic',wizardVersion:1},'PUT');
+    const client = new Client({name:'bedrock-conformance',version:'1'});
+    try {
+      await client.connect(new StreamableHTTPClientTransport(new URL(bases[runtime]+'/mcp'),{fetch:contractFetch,requestInit:{headers:{Authorization:`Bearer ${payload.token}`}}}));
+      const tools = capabilityTools((await client.listTools()).tools,['forms']);
+      const adapter = bedrockTools(providerTools(tools,(name: string,args: Record<string,unknown>) => client.callTool({name,arguments:args})));
+      const serialized = JSON.stringify(adapter.toolConfig);
+      for (const secret of [payload.token,s.credential,uid,recipient]) assert.ok(!serialized.includes(secret));
+      assert.equal(adapter.toolConfig.tools.length,5);
+      await assert.rejects(adapter.executeToolUse({toolUseId:'denied',name:'request_sms_code',input:{}}),/invalid_or_unapproved_tool_use/);
+      const created = await adapter.executeToolUse({toolUseId:'create.1',name:'create_request',input:definition});
+      const requestId = created.toolResult.content[0].json.structuredContent.requestId;
+      assert.equal(typeof requestId,'string');assert.equal(created.toolResult.toolUseId,'create.1');
+      const repeated = await adapter.executeToolUse({toolUseId:'create.2',name:'create_request',input:definition});
+      assert.equal(repeated.toolResult.content[0].json.structuredContent.requestId,requestId);
+      const inspected = await adapter.executeToolUse({toolUseId:'inspect.1',name:'inspect_request',input:{requestId}});
+      assert.equal(inspected.toolResult.content[0].json.structuredContent.requestId,requestId);
+      const other = await connect(s,runtime,['forms'],randomUUID());
+      const otherDelivery = await consume(s,runtime);
+      assert.notEqual(other.approved.connectionId,paired.approved.connectionId);
+      const isolated = await call(runtime,'/mcp',otherDelivery.payload.token,{jsonrpc:'2.0',id:'isolated',method:'tools/call',params:{name:'inspect_request',arguments:{requestId}}});
+      assert.equal(isolated.result.isError,true);
+      await call(runtime,`/v3/services/${s.session.serviceId}`,owner(uid),{active:false},'PATCH');
+      await assert.rejects(adapter.executeToolUse({toolUseId:'disabled',name:'inspect_request',input:{requestId}}));
+      await call(runtime,`/v3/services/${s.session.serviceId}`,owner(uid),{active:true},'PATCH');
+      await adapter.executeToolUse({toolUseId:'cancel',name:'cancel_request',input:{requestId}});
+      await call(runtime,`/v3/connections/${paired.approved.connectionId}`,owner(recipient),undefined,'DELETE');
+      await assert.rejects(adapter.executeToolUse({toolUseId:'disconnected',name:'inspect_request',input:{requestId}}));
+    } finally {await client.close();}
+  });
+}
