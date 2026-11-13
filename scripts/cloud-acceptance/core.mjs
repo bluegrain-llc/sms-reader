@@ -167,7 +167,7 @@ export async function cloud(cfg, args) {
   const { stdout } = await execute('gcloud', [...args, `--account=${cfg.account}`, `--project=${cfg.projectId}`, '--format=json', '--quiet'], { timeout: 60_000, maxBuffer: 4 * 1024 * 1024, signal: cfg.signal });
   return JSON.parse(stdout);
 }
-export async function preflight(cfg, inspect = cloud) {
+export async function preflight(cfg, inspect = cloud, recordContext = () => {}) {
   requireThat(!process.env.FIRESTORE_EMULATOR_HOST && !process.env.FIREBASE_AUTH_EMULATOR_HOST, 'emulators_forbidden');
   const project = await inspect(cfg, ['projects', 'describe', cfg.projectId]);
   requireThat(project.projectId === cfg.projectId && project.lifecycleState === 'ACTIVE' && project.labels?.environment === 'staging', 'staging_project_label_required');
@@ -207,13 +207,15 @@ export async function preflight(cfg, inspect = cloud) {
   }
   const billing = await inspect(cfg, ['billing', 'projects', 'describe', cfg.projectId]);
   requireThat(billing.billingEnabled === true, 'staging_billing_not_enabled');
+  const context = { revision: active.revisionName, projectId: cfg.projectId };
+  recordContext(context);
   const queue = await inspect(cfg, ['tasks', 'queues', 'describe', delivery.queueId, `--location=${cfg.region}`]);
   const scheduler = await inspect(cfg, ['scheduler', 'jobs', 'describe', 'sms-relay-maintenance', `--location=${cfg.region}`]);
   requireThat(queue.name === delivery.queue, 'delivery_queue_mismatch');
   requireThat(queue.state === 'RUNNING' && scheduler.state === 'ENABLED', 'delivery_resources_disabled');
   const target = scheduler.httpTarget;
   requireThat(target?.httpMethod === 'POST' && target.uri === `${cfg.serviceUrl}/internal/maintenance` && target.oidcToken?.audience === cfg.serviceUrl && target.oidcToken.serviceAccountEmail === delivery.schedulerEmail, 'scheduler_target_mismatch');
-  return { revision: active.revisionName, projectId: cfg.projectId };
+  return context;
 }
 export function verifySignature(secret, timestamp, rawBody, signature, now = Date.now()) {
   if (!/^\d+$/.test(timestamp ?? '') || Math.abs(now / 1000 - Number(timestamp)) > 300 || !/^v1=[a-f0-9]{64}$/.test(signature ?? '')) return false;

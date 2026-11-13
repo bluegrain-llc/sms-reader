@@ -81,6 +81,39 @@ test('cloud preflight binds delivery readiness to each serving revision and Sche
     await assert.rejects(preflight(cfg, inspect(mismatched)), /replay_delivery_configuration_mismatch/);
   }
 });
+test('delivery preflight failures retain serving revision and timing before credential access', { timeout: 30_000 }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'relay-preflight-evidence-'));
+  try {
+    const cfg = config({ ...base, ownerTokenFile: join(dir, 'missing-owner') });
+    const queue = `projects/${cfg.projectId}/locations/${cfg.region}/queues/relay-delivery`;
+    const signer = `scheduler@${cfg.projectId}.iam.gserviceaccount.com`;
+    const env = Object.entries({ GOOGLE_CLOUD_PROJECT: cfg.projectId, SECURITY_LEDGER_BUCKET: cfg.securityLedgerBucket, SERVICE_URL: cfg.serviceUrl, DELIVERY_QUEUE: queue, SCHEDULER_EMAIL: signer }).map(([name, value]) => ({ name, value }));
+    const fixtures = {
+      projects: { projectId: cfg.projectId, lifecycleState: 'ACTIVE', labels: { environment: 'staging' } },
+      service: { metadata: { labels: { environment: 'staging' } }, status: { url: cfg.serviceUrl, traffic: [{ revisionName: 'current', percent: 100 }] } },
+      revision: { metadata: { name: 'current' }, spec: { containers: [{ env }] } },
+      billing: { billingEnabled: true },
+      tasks: { name: queue, state: 'RUNNING' },
+      scheduler: { state: 'ENABLED', httpTarget: { httpMethod: 'POST', uri: `${cfg.serviceUrl}/internal/maintenance`, oidcToken: { audience: cfg.serviceUrl, serviceAccountEmail: signer } } },
+    };
+    const fixturePath = join(dir, 'fixtures.json'), configPath = join(dir, 'config.json');
+    await writeFile(configPath, JSON.stringify(cfg), { mode: 0o600 });
+    await writeFile(join(dir, 'gcloud'), `#!${process.execPath}\nconst fs = require('node:fs'); const path = require('node:path'); const fixtures = JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures.json'), 'utf8')); const args = process.argv.slice(2); const key = args[0] === 'run' ? args[1] === 'services' ? 'service' : 'revision' : args[0]; if (!fixtures[key]) throw new Error('unexpected cloud command'); console.log(JSON.stringify(fixtures[key]));\n`, { mode: 0o700 });
+    for (const [name, patch] of [['queue', { tasks: { ...fixtures.tasks, state: 'PAUSED' } }], ['scheduler', { scheduler: { ...fixtures.scheduler, state: 'PAUSED' } }]]) {
+      await writeFile(fixturePath, JSON.stringify({ ...fixtures, ...patch }), { mode: 0o600 });
+      const evidencePath = join(dir, `${name}.json`);
+      await assert.rejects(promisify(execFile)(process.execPath, [new URL('./run.mjs', import.meta.url).pathname, '--config', configPath, '--evidence', evidencePath], { timeout: 10_000, env: { ...process.env, PATH: `${dir}:${process.env.PATH}`, FIRESTORE_EMULATOR_HOST: '', FIREBASE_AUTH_EMULATOR_HOST: '' } }), error => error.code === 1);
+      const evidence = JSON.parse(await readFile(evidencePath, 'utf8'));
+      assert.equal(evidence.revision, 'current');
+      assert.equal(evidence.projectId, cfg.projectId);
+      assert.equal(evidence.complete, false);
+      assert.equal(evidence.cleanupComplete, true);
+      const infrastructure = evidence.results.find(result => result.scenario === 'infrastructure');
+      assert.equal(infrastructure.status, 'failed');
+      assert.ok(Number.isFinite(infrastructure.durationMs) && infrastructure.durationMs >= 0);
+    }
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
 test('callback verification binds exact body and timestamp and refuses stale or malformed signatures', () => {
   const secret = 'private-test-secret', now = 1800000000000, timestamp = String(now / 1000), body = '{"id":"event"}';
   const signature = `v1=${createHmac('sha256', secret).update(`${timestamp}.${body}`).digest('hex')}`;

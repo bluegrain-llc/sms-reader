@@ -20,6 +20,7 @@ if (args.includes('--plan')) {
   process.exit(0);
 }
 const results = [], startedAt = new Date().toISOString(), runId = randomUUID();
+const preflightStarted = Date.now();
 const interrupts = runInterrupts(); cfg.signal = interrupts.signal;
 const wait = ms => delay(ms, undefined, { signal: cfg.signal });
 let context = {}, caller, otherCaller, owner, credentials, hookIds = [], collectorIds = [], createdDevices = [], apiStarted = false;
@@ -67,7 +68,7 @@ async function callbackProbe(mode) {
 
 try {
   // Complete the cloud guard before reading credentials or sending any mutating request.
-  context = await preflight(cfg);
+  context = await preflight(cfg, cloud, facts => { context = facts; });
   credentials = await fixtureCredentials(cfg); owner = credentials.owner;
   if (cfg.callbackUrl) requireThat((await request(cfg.callbackUrl, `/admin/${randomUUID()}`, credentials.callbackAdmin, undefined, 'GET', cfg.signal)).status === 404, 'callback_admin_preflight_failed');
   requireThat((await ok('/v1/devices', owner)).length === 0 && (await ok('/v1/callers', owner)).length === 0, 'fresh_disposable_owner_required');
@@ -192,7 +193,7 @@ try {
   // Never print arbitrary provider errors, responses, tokens or submitted values.
   if (!results.some(r => r.status === 'failed')) {
     const previous = results.find(r => r.scenario === 'infrastructure');
-    if (previous) previous.status = 'failed'; else results.push({ scenario: 'infrastructure', status: 'failed' });
+    if (previous) previous.status = 'failed'; else results.push({ scenario: 'infrastructure', status: 'failed', ...(context.revision ? { durationMs: Date.now() - preflightStarted } : {}) });
   }
 }
 finally {
