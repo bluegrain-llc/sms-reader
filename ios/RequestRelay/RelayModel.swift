@@ -209,7 +209,7 @@ final class RelayModel: ObservableObject {
     func expireDrafts() { for (id, expiry) in expiries where expiry <= Date().timeIntervalSince1970 * 1000 { discard(id, status: "expired") } }
     @discardableResult
     func reportResponseFailure(_ failure: Error, fallback: String) -> Bool {
-        guard !Task.isCancelled else { return false }
+        guard !Task.isCancelled, !(failure is CancellationError) else { return false }
         error = (failure as? RelayFailure)?.localizedDescription ?? fallback
         return true
     }

@@ -146,8 +146,11 @@ extension RelayTests {
                             try await model.loadFormResponse(id, observations: FormOpeningObservations(), fromNotification: true) { _, _ in installed = true }
                         } else { _ = try await model.loadSMS(id); installed = true }
                         return false
-                    } catch is CancellationError { return true }
-                    catch { XCTFail("Expected obsolete detail load cancellation: \(error)"); return false }
+                    } catch let failure as CancellationError {
+                        XCTAssertEqual(Task.isCancelled, transition == "task-cancel")
+                        XCTAssertFalse(model.reportResponseFailure(failure, fallback: "Could not refresh the request. Try again."))
+                        return true
+                    } catch { XCTFail("Expected obsolete detail load cancellation: \(error)"); return false }
                 }
                 defer { gate.resume(.failure(CancellationError())); load.cancel(); model.clearResponses() }
                 await fulfillment(of: [gate.entered], timeout: 2)
@@ -163,9 +166,12 @@ extension RelayTests {
                 default: load.cancel()
                 }
                 let acceptedObservations = observations
+                let previousNotice = model.notice
                 gate.resume(.success(pending))
                 let cancelled = await load.value
                 XCTAssertTrue(cancelled, "\(form): \(transition)")
+                XCTAssertNil(model.error, "\(form): \(transition)")
+                XCTAssertEqual(model.notice, previousNotice, "\(form): \(transition)")
                 XCTAssertFalse(installed, "\(form): \(transition)")
                 XCTAssertEqual(observations, acceptedObservations)
                 if ["submission", "discard"].contains(transition) {
@@ -240,21 +246,27 @@ extension RelayTests {
         }
     }
     @MainActor func testResponsePollingCancellationDoesNotPublishNavigationErrors() async {
-        for cancelled in [false, true] {
-            let gate = SuspendedRelayReply(), api = FixtureRelayAPI(), model = RelayModel()
-            api.respond = { _, _, _ in try await gate.reply() }
-            let poll = Task {
-                do { let _: EmptyReply = try await api.call("/response"); XCTFail("The suspended request must fail") }
-                catch { return model.reportResponseFailure(error, fallback: "Could not refresh the request. Try again.") }
-                return false
+        let failures: [Error] = [RelayFailure.unavailable, URLError(.notConnectedToInternet), CancellationError()]
+        for failure in failures {
+            for cancelled in [false, true] {
+                let gate = SuspendedRelayReply(), api = FixtureRelayAPI(), model = RelayModel()
+                api.respond = { _, _, _ in try await gate.reply() }
+                let poll = Task {
+                    do { let _: EmptyReply = try await api.call("/response"); XCTFail("The suspended request must fail") }
+                    catch { return model.reportResponseFailure(error, fallback: "Could not refresh the request. Try again.") }
+                    return false
+                }
+                defer { gate.resume(.failure(CancellationError())); poll.cancel() }
+                await fulfillment(of: [gate.entered], timeout: 2)
+                if cancelled { poll.cancel() }
+                gate.resume(.failure(failure))
+                let failed = await poll.value
+                let expectedFailure = !cancelled && !(failure is CancellationError)
+                XCTAssertEqual(failed, expectedFailure)
+                if expectedFailure {
+                    XCTAssertEqual(model.error, (failure as? RelayFailure)?.localizedDescription ?? "Could not refresh the request. Try again.")
+                } else { XCTAssertNil(model.error) }
             }
-            defer { gate.resume(.failure(CancellationError())); poll.cancel() }
-            await fulfillment(of: [gate.entered], timeout: 2)
-            if cancelled { poll.cancel() }
-            gate.resume(.failure(RelayFailure.unavailable))
-            let failed = await poll.value
-            XCTAssertEqual(failed, !cancelled)
-            if cancelled { XCTAssertNil(model.error) } else { XCTAssertEqual(model.error, RelayFailure.unavailable.localizedDescription) }
         }
     }
     func testFinitePermissionsUseIntegerMillisecondsAndDenialCanReturn() throws {
