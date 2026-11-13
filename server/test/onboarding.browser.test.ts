@@ -255,3 +255,50 @@ test('two already-open tabs cannot replace another retained private ticket',asyn
   await expect.poll(()=>declarations.length).toBe(2);
   expect(declarations[1]).toEqual(declarations[0]);
 });
+
+test('a delayed retained-ticket read cannot cross an account change',async({page})=>{
+  await page.route('https://www.gstatic.com/firebasejs/**/firebase-auth.js',r=>r.fulfill({contentType:'application/javascript',body:`
+    const user=uid=>({uid,email:uid+'@example.test',getIdToken:async()=>uid});
+    const auth={currentUser:user('owner-a')};let listener;
+    window.switchRelayOwner=uid=>{auth.currentUser=user(uid);listener(auth.currentUser);};
+    export const getAuth=()=>auth;export const signOut=async()=>{};export class GoogleAuthProvider{};
+    export const signInWithPopup=async()=>({});export const signInWithRedirect=async()=>({});export const getRedirectResult=async()=>({});
+    export const onAuthStateChanged=(a,fn)=>{listener=fn;queueMicrotask(()=>fn(a.currentUser));};export const setPersistence=async()=>{};export const browserLocalPersistence={};
+  `}));
+  await page.route('**/ticket-browser-real.js',r=>r.fulfill({contentType:'application/javascript',body:readFileSync(new URL('../public/ticket-browser.js',import.meta.url),'utf8')}));
+  await page.route('**/ticket-browser.js',r=>r.fulfill({contentType:'application/javascript',body:`
+    import * as real from '/ticket-browser-real.js';
+    export const {createTicket,declaration,downloadTicket}=real;
+    export async function retained(uid,...args){
+      const value=await real.retained(uid,...args);
+      if(args.length===0&&sessionStorage.getItem('gate-owner-reads')){
+        await new Promise(resolve=>{window[uid==='owner-a'?'releaseOwnerA':'releaseOwnerB']=resolve;});
+        if(uid==='owner-a')setTimeout(()=>{window.ownerAReadFlushed=true;},0);
+      }
+      return value;
+    }
+  `}));
+  let ownerBPosts=0;
+  await page.route('**/v3/services',async r=>{
+    if(r.request().method()==='POST'){
+      if(r.request().headers().authorization==='Bearer owner-b')ownerBPosts++;
+      await r.fulfill({status:503,json:{error:'interrupted'}});
+    }else await r.fulfill({json:[]});
+  });
+  await page.goto(origin+'/owned-services');await expect(page.locator('#list')).toBeVisible();
+  await page.locator('#create-agent').click();await page.locator('#agent-name').fill('Owner A agent');await page.locator('#agent-purpose').fill('Decisions');
+  await page.getByRole('button',{name:'Create agent and save ticket',exact:true}).click();await expect(page.locator('#retry')).toBeVisible();
+  await page.evaluate(()=>sessionStorage.setItem('gate-owner-reads','yes'));await page.reload();
+  await page.waitForFunction(()=>typeof (window as any).releaseOwnerA==='function');
+  await page.evaluate(()=>(window as any).switchRelayOwner('owner-b'));
+  await page.waitForFunction(()=>typeof (window as any).releaseOwnerB==='function');
+  await expect(page.locator('#identity')).toContainText('owner-b@example.test');
+  await page.evaluate(()=>(window as any).releaseOwnerA());await page.waitForFunction(()=>(window as any).ownerAReadFlushed);
+  if(await page.locator('#ticket-state').isVisible()){
+    await page.locator('#save-ticket').click();await expect(page.locator('#retry')).toBeVisible();
+  }
+  const ownerBHasTicket=await page.evaluate(async()=>!!await (await import(location.origin+'/ticket-browser-real.js')).retained('owner-b'));
+  await page.evaluate(()=>(window as any).releaseOwnerB());
+  expect(ownerBPosts).toBe(0);expect(ownerBHasTicket).toBe(false);
+  await expect(page.locator('#ticket-state')).toBeHidden();
+});
