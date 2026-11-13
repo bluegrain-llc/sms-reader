@@ -70,6 +70,14 @@ class CheckBundleManifest {
                         throw new IllegalArgumentException("Ambiguous Android manifest attribute identity");
                     }
                 }
+                boolean permission = name.equals("permission")
+                        || (name.equals("name") && element.getName().startsWith("uses-permission"));
+                // Other compiled types can dump differently from their binary XML
+                // value. Only ordinary strings (or uncompiled literals) are provable.
+                if (permission && attribute.hasCompiledItem()
+                        && !attribute.getCompiledItem().hasStr()) {
+                    throw new IllegalArgumentException("Unverifiable compiled permission value");
+                }
             }
             pending.addAll(element.getChildList());
         }

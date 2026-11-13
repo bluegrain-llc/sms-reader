@@ -595,12 +595,13 @@ class RawManifestTest(unittest.TestCase):
         return cls.varint((number << 3) | 2) + cls.varint(len(value)) + value
 
     @classmethod
-    def attribute(cls, name, resource_id, value="false", namespace=gate.ANDROID_NS[1:-1], boolean=False):
+    def attribute(cls, name, resource_id, value="false", namespace=gate.ANDROID_NS[1:-1], boolean=False, compiled=None):
         # XmlAttribute: namespace=1, name=2, value=3, resource_id=5,
         # compiled_item=6 -> Item.prim=7 -> Primitive.boolean_value=8.
-        compiled = cls.field(2, cls.field(1, value)) if boolean is None else cls.field(7, cls.field(8, int(boolean)))
+        if compiled is None:
+            compiled = cls.field(2, cls.field(1, value)) if boolean is None else cls.field(7, cls.field(8, int(boolean)))
         return (cls.field(1, namespace) + cls.field(2, name) + cls.field(3, value) +
-                cls.field(5, resource_id) + cls.field(6, compiled))
+                cls.field(5, resource_id) + (cls.field(6, compiled) if compiled is not False else b""))
 
     @classmethod
     def element(cls, name, attributes=(), children=(), namespace=""):
@@ -651,6 +652,49 @@ class RawManifestTest(unittest.TestCase):
         manifest = gate.ET.fromstring(self.dump())
         self.assertIn("AAB base: forbidden broad permissions", gate.bundle_manifest_errors(manifest, "base"))
 
+    def test_styled_permission_cannot_hide_binary_permission_behind_dump_markup(self):
+        value = "android.permission.READ_SMS"
+        # Item.styled_str=4 -> StyledString.value=1, span=2;
+        # Span.tag=1, first_char=2, last_char=3.
+        styled = self.field(4, self.field(1, value) + self.field(2,
+            self.field(1, "b") + self.field(2, 0) + self.field(3, len(value) - 1)))
+        permission = self.element("uses-permission", [self.attribute(
+            "name", 0x01010003, value=value, compiled=styled)])
+        # Mirror the unrelated attribute-name collision from the signed-APK
+        # reproducer, where trusted AAPT2 confirmed the READ_SMS declaration.
+        application = self.element("application", [
+            self.attribute(value, 0x01010000),
+            self.attribute("allowBackup", 0x01010280),
+            self.attribute("usesCleartextTraffic", 0x010104EC)])
+        result = self.inspect(self.element("manifest", children=[permission, application]))
+        dumped = self.dump()
+        self.assertIn("&lt;b&gt;android.permission.READ_SMS&lt;/b&gt;", dumped)
+        self.assertEqual(gate.bundle_manifest_errors(gate.ET.fromstring(dumped), "base"), [])
+        self.assertNotEqual(result.returncode, 0, "raw inspection must reject the misleading dump")
+        self.assertIn("Unverifiable compiled permission value", result.stderr)
+
+    def test_permission_values_require_plain_strings_in_every_context(self):
+        value = "com.bluegrain.smsrelay.PRIVATE"
+        contexts = (("uses-permission", "name", 0x01010003),
+                    ("uses-permission-sdk-23", "name", 0x01010003),
+                    ("uses-permission-sdk-m", "name", 0x01010003),
+                    ("application", "permission", 0x01010006),
+                    ("service", "permission", 0x01010006))
+        # All non-string Item cases, including an empty compiled message.
+        unsupported = (b"", self.field(1, self.field(2, 0x7f010001)),
+                       self.field(3, self.field(1, value)),
+                       self.field(4, self.field(1, value)),
+                       self.field(5, self.field(1, value)), self.field(6, b""),
+                       self.field(7, self.field(8, 0)))
+        for element, name, resource_id in contexts:
+            for compiled in (False, self.field(2, self.field(1, value)), *unsupported):
+                with self.subTest(element=element, compiled=compiled):
+                    attribute = self.attribute(name, resource_id, value=value, compiled=compiled)
+                    result = self.inspect(self.element("manifest", children=[
+                        self.element(element, [attribute], namespace="urn:test")]))
+                    self.assertEqual(result.returncode == 0, compiled is False or compiled not in unsupported,
+                                     result.stderr)
+
     def test_raw_identity_checks_all_requested_modules(self):
         manifests = {"base": self.element("manifest"), "feature": self.element("manifest", children=[
             self.element("application", [self.attribute("optimized", 0x0101000F, value="true", boolean=True)])])}
@@ -671,7 +715,7 @@ class RawManifestTest(unittest.TestCase):
                     "versionCode": 0x0101021B, "targetSdkVersion": 0x01010270}
         for name, resource_id in expected.items():
             with self.subTest(name=name):
-                self.assertEqual(self.inspect(self.element("manifest", [self.attribute(name, resource_id)])).returncode, 0)
+                self.assertEqual(self.inspect(self.element("manifest", [self.attribute(name, resource_id, boolean=None if name == "permission" else False)])).returncode, 0)
                 self.assertNotEqual(self.inspect(self.element("manifest", [self.attribute("alias", resource_id)])).returncode, 0)
                 self.assertNotEqual(self.inspect(self.element("manifest", [self.attribute(name, 0x01010001)])).returncode, 0)
 
