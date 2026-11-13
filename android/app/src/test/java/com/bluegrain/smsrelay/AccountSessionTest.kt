@@ -65,6 +65,37 @@ class AccountSessionTest {
         assertTrue(failed); assertTrue(signedIn); assertEquals("device-a", installation)
     }
 
+    @Test(timeout = 5000) fun deletedAccountAllowsLocalSignOut() = runBlocking {
+        var installation: String? = "device-a"
+        var signedIn = true
+        disconnectBeforeSignOut(installation,
+            unregister = { throw ApiFailure("account_deleted", 403) },
+            finish = { signedIn = false; installation = null })
+        assertFalse(signedIn); assertEquals(null, installation)
+    }
+
+    @Test(timeout = 5000) fun missingInstallationAllowsLocalSignOut() = runBlocking {
+        var signedIn = true
+        disconnectBeforeSignOut("device-a",
+            unregister = { throw ApiFailure("device_not_found", 404) },
+            finish = { signedIn = false })
+        assertFalse(signedIn)
+    }
+
+    @Test(timeout = 5000) fun otherDisconnectRejectionsPreserveInstallationForRetry() = runBlocking {
+        for (failure in listOf(ApiFailure("origin_not_allowed", 403), ApiFailure("account_deleted", 500),
+            ApiFailure("invalid_owner_session", 401))) {
+            var installation: String? = "device-a"
+            var signedIn = true
+            var received: ApiFailure? = null
+            try {
+                disconnectBeforeSignOut(installation, unregister = { throw failure },
+                    finish = { signedIn = false; installation = null })
+            } catch (e: ApiFailure) { received = e }
+            assertTrue(received === failure); assertTrue(signedIn); assertEquals("device-a", installation)
+        }
+    }
+
     @Test(timeout = 5000) fun repeatedSignOutsDoNotAccumulateRegisteredDevices() = runBlocking {
         val active = mutableSetOf<String>()
         repeat(25) { cycle ->

@@ -113,8 +113,7 @@ class RelayRepository(private val context: Context) {
     suspend fun signOut(owner: String) {
         check(owner.isNotBlank() && ownerId == owner) { "Sign in to the same account before signing out." }
         disconnectBeforeSignOut(prefs.getString("id", null), unregister = { id ->
-            try { call("DELETE", "/v1/devices/$id", expectedOwner = owner) }
-            catch (e: ApiFailure) { if (e.status != 404) throw e }
+            call("DELETE", "/v1/devices/$id", expectedOwner = owner)
         }, finish = {
             check(ownerId == owner) { "The signed-in account changed." }
             auth.signOut(); reset(); autoConnect = false

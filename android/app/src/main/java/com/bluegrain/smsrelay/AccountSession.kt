@@ -5,7 +5,12 @@ internal suspend fun disconnectBeforeSignOut(
     unregister: suspend (String) -> Unit,
     finish: () -> Unit,
 ) {
-    if (deviceId != null) unregister(deviceId)
+    if (deviceId != null) {
+        try { unregister(deviceId) }
+        catch (e: ApiFailure) {
+            if (e.status != 404 && !(e.status == 403 && e.reason == "account_deleted")) throw e
+        }
+    }
     finish()
 }
 
