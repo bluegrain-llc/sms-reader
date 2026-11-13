@@ -1,6 +1,9 @@
 package com.bluegrain.smsrelay
 
 import androidx.test.core.app.ApplicationProvider
+import androidx.test.core.app.ActivityScenario
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.ViewModelProvider
 import org.junit.Assert.*
 import org.junit.Test
 import java.math.BigInteger
@@ -16,6 +19,40 @@ import java.util.UUID
 import javax.crypto.KeyAgreement
 
 class AgentTicketTest {
+    @Test fun managementActivityTracksForegroundAcrossStopAndResume() {
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        org.junit.Assume.assumeFalse((context as RelayApplication).configured)
+        ActivityScenario.launch<AgentsActivity>(android.content.Intent(context, AgentsActivity::class.java)).use { scenario ->
+            lateinit var model: RelayViewModel
+            scenario.onActivity { activity ->
+                model = ViewModelProvider(activity)[RelayViewModel::class.java]
+                assertTrue(model.state.value.foreground)
+            }
+            scenario.moveToState(Lifecycle.State.CREATED)
+            assertFalse(model.state.value.foreground)
+            scenario.moveToState(Lifecycle.State.RESUMED)
+            assertTrue(model.state.value.foreground)
+        }
+    }
+    @Test fun outstandingExportCannotReadAnotherAgentsReplacementTicket() {
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        val storage = AgentTicket(context, "test-ticket-" + UUID.randomUUID())
+        val selected = AgentTicket.create("Selected", "Decisions", listOf("forms"))
+        val replacement = AgentTicket.create("Replacement", "Decisions", listOf("forms"))
+        val selectedCredential = selected.getString("serviceCredential")
+        try {
+            storage.saveNew(selected)
+            assertEquals(selected.toString(), storage.loadForExport(selectedCredential).toString())
+            assertTrue(storage.clear(selectedCredential))
+            storage.saveNew(replacement)
+            try {
+                storage.loadForExport(selectedCredential)
+                fail("A document result must not export a different retained identity")
+            } catch (_: IllegalStateException) { }
+            assertEquals(replacement.toString(), storage.load()!!.toString())
+            assertEquals(replacement.toString(), storage.loadForExport(replacement.getString("serviceCredential")).toString())
+        } finally { storage.clearForDeletedAccount() }
+    }
     @Test fun ticketUsesPortableMatchingP256KeysAndRetainsPrivateProvisioningState() {
         val ticket = AgentTicket.create("Synthetic agent", "Decisions", listOf("forms"))
         val key = ticket.getJSONArray("deliveryKeys").getJSONObject(0)

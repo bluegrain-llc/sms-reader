@@ -48,6 +48,11 @@ class AgentTicket(private val context: Context, ownerId: String) {
         check(load() == null) { "Save or clear the retained ticket before creating another agent." }
         save(ticket)
     }
+    fun loadForExport(expectedCredential: String): JSONObject = synchronized(retentionLock) {
+        val retained = load() ?: error("ticket_missing")
+        check(retained.getString("serviceCredential") == expectedCredential) { "ticket_changed" }
+        retained
+    }
     fun clear(expectedCredential: String): Boolean = synchronized(retentionLock) {
         val retained = load()
         if (retained == null) true
