@@ -16,6 +16,8 @@ RELEASE_TOOLS = (
     'scripts/deploy.sh',
     'scripts/deploy.py',
     'scripts/check-security-ledger.ts',
+    'server/src/security-ledger.ts',
+    'server/src/model.ts',
     'scripts/release-smoke.mjs',
 )
 

@@ -42,6 +42,24 @@ class ReleaseTooling(unittest.TestCase):
                     tooling.verify(self.root, self.expected)
                 path.write_bytes(original)
 
+    def test_ledger_validator_and_assertion_dependencies_cannot_drift_independently(self):
+        dependencies = ('server/src/security-ledger.ts', 'server/src/model.ts')
+        for name in dependencies:
+            path = self.root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('current ledger validation implementation\n')
+        expected = tooling.hashes(self.root)
+        for name in dependencies:
+            path = self.root / name
+            original = path.read_bytes()
+            with self.subTest(name=name):
+                try:
+                    path.write_text('older implementation without the ledger checks\n')
+                    with self.assertRaisesRegex(ValueError, name):
+                        tooling.verify(self.root, expected)
+                finally:
+                    path.write_bytes(original)
+
     def test_matching_symlinked_file_or_directory_is_refused(self):
         path = self.root / tooling.RELEASE_TOOLS[0]
         outside = Path(self.folder.name) / 'outside-tool'
