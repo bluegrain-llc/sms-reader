@@ -73,10 +73,17 @@ class CheckBundleManifest {
                 boolean permission = name.equals("permission")
                         || (name.equals("name") && element.getName().startsWith("uses-permission"));
                 // Other compiled types can dump differently from their binary XML
-                // value. Only ordinary strings (or uncompiled literals) are provable.
+                // value. Only ordinary strings or unchanged raw literals are provable.
                 if (permission && attribute.hasCompiledItem()
                         && !attribute.getCompiledItem().hasStr()) {
                     throw new IllegalArgumentException("Unverifiable compiled permission value");
+                }
+                // AAPT interprets raw backslash escapes when producing binary XML;
+                // bundletool's dump preserves them instead. Compiled strings do not
+                // take that path, and preserve-spaces mode leaves raw quotes intact.
+                if (permission && !attribute.hasCompiledItem()
+                        && attribute.getValue().indexOf('\\') >= 0) {
+                    throw new IllegalArgumentException("Unverifiable uncompiled permission value");
                 }
             }
             pending.addAll(element.getChildList());

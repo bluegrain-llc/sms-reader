@@ -695,6 +695,44 @@ class RawManifestTest(unittest.TestCase):
                     self.assertEqual(result.returncode == 0, compiled is False or compiled not in unsupported,
                                      result.stderr)
 
+    def test_uncompiled_permission_escapes_cannot_hide_binary_permission(self):
+        contexts = (("uses-permission", "name", 0x01010003),
+                    ("uses-permission-sdk-23", "name", 0x01010003),
+                    ("uses-permission-sdk-m", "name", 0x01010003),
+                    ("application", "permission", 0x01010006),
+                    ("service", "permission", 0x01010006))
+        values = (r"android.permission.READ_\u0053MS", r"android.permission.READ_\SMS",
+                  r"android.permission.BIND_\u004eOTIFICATION_LISTENER_SERVICE",
+                  r"com.bluegrain.PRIVATE\n", r"com.bluegrain.PRIVATE\\",
+                  "com.bluegrain.PRIVATE" + "\\")
+        for element, name, resource_id in contexts:
+            for value in values:
+                with self.subTest(element=element, value=value):
+                    safe_flags = [
+                        self.attribute("allowBackup", 0x01010280),
+                        self.attribute("usesCleartextTraffic", 0x010104EC)]
+                    permission = self.element(element, [self.attribute(
+                        name, resource_id, value=value, compiled=False),
+                        *(safe_flags if element == "application" else [])])
+                    application = self.element("application", safe_flags)
+                    result = self.inspect(self.element("manifest", children=[permission, application]))
+                    manifest = gate.ET.fromstring(self.dump())
+                    self.assertEqual(gate.android_attribute(manifest[0], name), value)
+                    self.assertEqual(gate.bundle_manifest_errors(manifest, "base"), [])
+                    self.assertNotEqual(result.returncode, 0, "raw escapes must not bypass dump checks")
+                    self.assertIn("Unverifiable uncompiled permission value", result.stderr)
+
+    def test_plain_raw_and_compiled_permission_strings_remain_supported(self):
+        for value, compiled in (("com.bluegrain.PRIVATE", False),
+                                ('"com.bluegrain.PRIVATE"', False),
+                                (r"com.bluegrain.PRIVATE\u0053", None)):
+            with self.subTest(value=value, compiled=compiled):
+                attribute = self.attribute("name", 0x01010003, value=value,
+                                           boolean=None, compiled=compiled)
+                result = self.inspect(self.element("manifest", children=[
+                    self.element("uses-permission", [attribute])]))
+                self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_raw_identity_checks_all_requested_modules(self):
         manifests = {"base": self.element("manifest"), "feature": self.element("manifest", children=[
             self.element("application", [self.attribute("optimized", 0x0101000F, value="true", boolean=True)])])}
