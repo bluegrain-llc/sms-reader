@@ -133,6 +133,12 @@ def bundle_manifest_errors(manifest, module):
     if any((element.tag.startswith("uses-permission") and element.get(ANDROID_NS + "name") in FORBIDDEN_PERMISSIONS) or
            element.get(ANDROID_NS + "permission") in FORBIDDEN_PERMISSIONS for element in manifest.iter()):
         errors.append(prefix + "forbidden broad permissions")
+    for element in manifest.iter():
+        permission = element.get(ANDROID_NS + "permission")
+        if permission and (permission.startswith(("@", "?")) or
+                           re.fullmatch(r"0x[0-9a-fA-F]{8}", permission)):
+            errors.append(prefix + "unresolved permission resource reference")
+            break
     application = manifest.find("application")
     if module == "base" and application is None:
         errors.append(prefix + "application missing")
@@ -274,7 +280,7 @@ def check_record(record, base, offline=False, run=command, now=None):
                     target = re.search(r"targetSdkVersion:'(\d+)'", manifest)
                     require(target is not None and type(minimum) is int and int(target[1]) >= minimum, "APK target API below requirement")
                 require("application-debuggable" not in manifest, "APK is debuggable")
-                require(not re.search(r"android.permission.(READ_SMS|RECEIVE_SMS|READ_CONTACTS|WRITE_CONTACTS|BIND_ACCESSIBILITY_SERVICE|BIND_NOTIFICATION_LISTENER_SERVICE)", manifest), "APK requests forbidden broad permissions")
+                require(not any(permission in manifest for permission in FORBIDDEN_PERMISSIONS), "APK requests forbidden broad permissions")
         except (OSError, subprocess.SubprocessError, ValueError, RuntimeError, zipfile.BadZipFile,
                 zlib.error, lzma.LZMAError, struct.error, ET.ParseError):
             blockers.append(kind + ": required artifact tool or structural verification failed")

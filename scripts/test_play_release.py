@@ -295,6 +295,37 @@ class GateTest(unittest.TestCase):
         self.aab_manifest = self.aab_manifest.replace('/></manifest>', '><service android:name=".Listener" android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE"/></application></manifest>')
         self.assertIn("AAB base: forbidden broad permissions", self.check()["blockers"])
 
+    def test_aab_permission_references_cannot_establish_safe_service_bindings(self):
+        original = self.aab_manifest
+        for permission in ("@string/listener_permission", "?attr/listener_permission", "0x7f010001"):
+            for inherited in (False, True):
+                with self.subTest(permission=permission, inherited=inherited):
+                    if inherited:
+                        self.aab_manifest = original.replace('<application ', '<application android:permission="' + permission + '" ')
+                    else:
+                        self.aab_manifest = original.replace('/></manifest>', '><service android:name=".Listener" android:permission="' + permission + '"/></application></manifest>')
+                    result = self.check()
+                    self.assertFalse(result["ready"])
+                    self.assertIn("AAB base: unresolved permission resource reference", result["blockers"])
+        self.aab_manifest = original.replace('/></manifest>', '><service android:name=".Private" android:permission="com.bluegrain.smsrelay.PRIVATE"/></application></manifest>')
+        self.assertTrue(self.check()["ready"])
+
+    def test_permission_policy_changes_apply_to_aab_and_apk(self):
+        original_aab, original_apk = self.aab_manifest, self.manifest
+        permission = "com.bluegrain.smsrelay.RESTRICTED"
+        with patch.object(gate, "FORBIDDEN_PERMISSIONS", gate.FORBIDDEN_PERMISSIONS | {permission}):
+            for artifact, blocker in (("aab", "AAB base: forbidden broad permissions"),
+                                      ("apk", "APK requests forbidden broad permissions")):
+                with self.subTest(artifact=artifact):
+                    self.aab_manifest, self.manifest = original_aab, original_apk
+                    if artifact == "aab":
+                        self.aab_manifest = original_aab.replace('</manifest>', '<uses-permission android:name="' + permission + '"/></manifest>')
+                    else:
+                        self.manifest += "\nuses-permission: name='" + permission + "'"
+                    result = self.check()
+                    self.assertFalse(result["ready"])
+                    self.assertIn(blocker, result["blockers"])
+
     def test_aab_feature_module_cannot_hide_forbidden_permission(self):
         path = self.base / "aab"
         with zipfile.ZipFile(path, "a") as archive:
