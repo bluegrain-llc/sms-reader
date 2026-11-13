@@ -48,6 +48,7 @@ pub struct Options {
     pub apple_app_ids: Vec<String>,
     pub android_cert: Option<String>,
     pub android_certs: Option<Value>,
+    pub android_package: Option<String>,
     pub firebase_web_config: Option<Value>,
     pub privacy_contact: Option<String>,
     pub origins: Vec<String>,
@@ -685,7 +686,8 @@ async fn route(s: App, request: Request) -> Result<Response> {
         .collect::<Vec<_>>();
     let segments = parts_of_path.iter().map(String::as_str).collect::<Vec<_>>();
     let p = segments.as_slice();
-    let health = method == axum::http::Method::GET && matches!(p, ["health" | "healthz"]);
+    let health =
+        method == axum::http::Method::GET && matches!(p, ["health" | "healthz" | "startup"]);
     if !health
         && (headers
             .get("authorization")
@@ -1062,6 +1064,16 @@ async fn route(s: App, request: Request) -> Result<Response> {
                 .await?
         }
         ("GET", ["health" | "healthz"]) => json!({"ok":true}),
+        ("GET", ["startup"]) => {
+            let ready = match &s.options.serving {
+                Some(gate) => gate.assert_serving().await.is_ok(),
+                None => true,
+            };
+            return Ok(json_response(
+                json!({"ok":ready}),
+                if ready { 200 } else { 503 },
+            ));
+        }
         ("GET", ["privacy"] | ["account", "delete"]) => {
             return Ok(
                 crate::account_pages::account_page(&path.to_ascii_lowercase(), &s.options)
@@ -1073,16 +1085,20 @@ async fn route(s: App, request: Request) -> Result<Response> {
             json!({"applinks":{"details":s.options.apple_app_ids.iter().filter(|id| regex::Regex::new(r"^[A-Z0-9]{10}\.[A-Za-z0-9.-]+$").unwrap().is_match(id)).map(|id|json!({"appID":id,"paths":["/register/*","/pair/*","/services/*","/connections/*","/oauth/consent/*","/connect","/owned-services"]})).collect::<Vec<_>>()}})
         }
         ("GET", [".well-known", "assetlinks.json"]) => {
+            let (package, _) = android_link_target(s.options.android_package.as_deref())?;
             let certificates = signing_fingerprints(
                 s.options.android_cert.as_deref(),
                 s.options.android_certs.as_ref(),
             )?;
-            json!([{"relation":["delegate_permission/common.handle_all_urls"],"target":{"namespace":"android_app","package_name":"com.bluegrain.smsrelay","sha256_cert_fingerprints":certificates}}])
+            json!([{"relation":["delegate_permission/common.handle_all_urls"],"target":{"namespace":"android_app","package_name":package,"sha256_cert_fingerprints":certificates}}])
         }
         ("GET", ["connect"]) => {
             let code = user_code(&query_value("code")?.ok_or(Error::Api(400, "invalid_input"))?)?;
             let code = format!("{}-{}", &code[..5], &code[5..]);
-            let html = include_str!("../compat/connect.html").replace("{{CODE}}", &code);
+            let (_, scheme) = android_link_target(s.options.android_package.as_deref())?;
+            let html = include_str!("../compat/connect.html")
+                .replace("{{CODE}}", &code)
+                .replace("smsrelay://connect", &format!("{scheme}://connect"));
             let mut response=(StatusCode::OK,[("Content-Type","text/html; charset=utf-8"),("Content-Security-Policy","default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'"),("Referrer-Policy","no-referrer")],html).into_response();
             response
                 .headers_mut()
@@ -1476,6 +1492,15 @@ fn urlencoding(s: &str) -> Result<String> {
     }
     String::from_utf8(bytes).map_err(|_| Error::External)
 }
+fn android_link_target(package: Option<&str>) -> Result<(&'static str, &'static str)> {
+    match package.unwrap_or("com.bluegrain.smsrelay") {
+        "com.bluegrain.smsrelay" => Ok(("com.bluegrain.smsrelay", "smsrelay")),
+        "com.bluegrain.smsrelay.staging" => {
+            Ok(("com.bluegrain.smsrelay.staging", "smsrelay-staging"))
+        }
+        _ => Err(Error::Api(503, "app_links_not_configured")),
+    }
+}
 fn signing_fingerprints(legacy: Option<&str>, additional: Option<&Value>) -> Result<Vec<String>> {
     ensure(
         additional.is_none_or(Value::is_array),
@@ -1778,7 +1803,80 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    struct ProbeGate(AtomicBool);
+    impl Serving for ProbeGate {
+        fn assert_serving(&self) -> futures::future::BoxFuture<'_, Result<()>> {
+            Box::pin(async { ensure(!self.0.load(Ordering::SeqCst), 503, "recovery_in_progress") })
+        }
+    }
+    struct ProbeAuth;
+    impl Authentication for ProbeAuth {
+        fn owner<'a>(&'a self, _: &'a str) -> futures::future::BoxFuture<'a, Result<Identity>> {
+            Box::pin(async { panic!("probes must not authenticate an owner") })
+        }
+        fn worker<'a>(&'a self, _: &'a str) -> futures::future::BoxFuture<'a, Result<()>> {
+            Box::pin(async { panic!("probes must not authenticate a worker") })
+        }
+        fn delete<'a>(&'a self, _: &'a str) -> futures::future::BoxFuture<'a, Result<()>> {
+            Box::pin(async { panic!("probes must not delete an identity") })
+        }
+    }
+
+    #[tokio::test]
+    async fn startup_probe_waits_for_serving_gate_while_liveness_stays_available() {
+        use tower::ServiceExt;
+        let gate = Arc::new(ProbeGate(AtomicBool::new(true)));
+        let (logger, _events) = tokio::sync::mpsc::unbounded_channel();
+        let relay = Relay {
+            store: crate::store::Store::new("demo-startup-probe")
+                .await
+                .unwrap(),
+            clock: Arc::new(crate::model::now),
+            delivery: Arc::new(Capture(logger)),
+        };
+        let router = app(
+            relay,
+            Options {
+                auth: Arc::new(ProbeAuth),
+                serving: Some(gate.clone()),
+                public_url: None,
+                apple_app_ids: vec![],
+                android_cert: None,
+                android_certs: None,
+                android_package: None,
+                firebase_web_config: None,
+                privacy_contact: None,
+                origins: vec![],
+                trust_proxy_hops: 0,
+                sse_duration: Duration::from_secs(100),
+            },
+        );
+        for (blocked, path, status, ok) in [
+            (true, "/health", 200, true),
+            (true, "/healthz", 200, true),
+            (true, "/startup", 503, false),
+            (false, "/startup", 200, true),
+            (true, "/startup", 503, false),
+            (true, "/health", 200, true),
+        ] {
+            gate.0.store(blocked, Ordering::SeqCst);
+            let response = router
+                .clone()
+                .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status().as_u16(), status, "{path}");
+            let bytes = axum::body::to_bytes(response.into_body(), 1024)
+                .await
+                .unwrap();
+            assert_eq!(
+                serde_json::from_slice::<Value>(&bytes).unwrap(),
+                json!({"ok":ok})
+            );
+        }
+    }
 
     #[derive(Default)]
     struct ScriptedFeed {
@@ -2331,6 +2429,25 @@ mod tests {
             .unwrap();
     }
 
+    #[test]
+    fn android_links_isolate_staging_and_retain_production_default() {
+        assert_eq!(
+            android_link_target(None).unwrap(),
+            ("com.bluegrain.smsrelay", "smsrelay")
+        );
+        assert_eq!(
+            android_link_target(Some("com.bluegrain.smsrelay.staging")).unwrap(),
+            ("com.bluegrain.smsrelay.staging", "smsrelay-staging")
+        );
+        for invalid in [
+            "",
+            "com.bluegrain.smsrelay.other",
+            "com.bluegrain.smsrelay\n",
+            "<script>",
+        ] {
+            assert!(android_link_target(Some(invalid)).is_err());
+        }
+    }
     #[test]
     fn signing_fingerprints_preserve_order_and_reject_partial_configuration() {
         let a = ["AA"; 32].join(":");

@@ -16,6 +16,14 @@ class ConnectionLinksTest {
         assertNull(ConnectionLinks.code("http://relay.example.test/connect?code=ABCDE-FG234", base))
         assertNull(ConnectionLinks.code("https://attacker@relay.example.test/connect?code=ABCDE-FG234", base))
     }
+    @Test fun stagingFallbackCannotOpenProductionAndProductionFallbackCannotOpenStaging() {
+        val stage = "https://staging.example.test"
+        assertEquals("ABCDEFG234", ConnectionLinks.code("smsrelay-staging://connect?code=ABCDE-FG234", stage, "smsrelay-staging"))
+        assertNull(ConnectionLinks.code("smsrelay://connect?code=ABCDE-FG234", stage, "smsrelay-staging"))
+        assertNull(ConnectionLinks.code("smsrelay-staging://connect?code=ABCDE-FG234", base))
+        assertNull(ConnectionLinks.code("$base/connect?code=ABCDE-FG234", stage, "smsrelay-staging"))
+        assertNull(ConnectionLinks.code("$stage/connect?code=ABCDE-FG234", base))
+    }
     @Test fun malformedDuplicateAndCredentialValuesAreRejected() {
         assertNull(ConnectionLinks.code("$base/connect?code=ABCDE-FG234&code=ZZZZZ-ZZZZZ", base))
         assertNull(ConnectionLinks.code("$base/connect?code=%XX", base))

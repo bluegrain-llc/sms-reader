@@ -44,6 +44,29 @@ for (const path of ['/account/delete','/rust/account/delete']) test(`cancelled p
   await expect(page.locator('#identity')).toHaveText('google-owner@example.test');await page.locator('#remove').click();
   await expect(page.locator('#status')).toHaveText('Account deletion completed.');expect(providers).toEqual(['google.com']);expect(deletions).toBe(1);
 });
+for (const path of ['/account/delete','/rust/account/delete']) test(`switching deletion accounts requires fresh confirmation (${path})`,async({page})=>{
+  const deletedAccounts:string[]=[];
+  await page.route('https://www.gstatic.com/firebasejs/**/firebase-auth.js',r=>r.fulfill({contentType:'application/javascript',body:`
+    let selection=0;
+    const users=['first-owner','second-owner'].map(uid=>({uid,email:uid+'@example.test',providerData:[{providerId:'google.com'}],getIdToken:async()=>uid}));
+    export const getAuth=()=>({});export const setPersistence=async()=>{};export const inMemoryPersistence={};export const signOut=async()=>{};
+    export class GoogleAuthProvider{providerId='google.com';setCustomParameters(){}}
+    export class OAuthProvider{constructor(id){this.providerId=id;}}
+    export const revokeAccessToken=async()=>{};
+    export const signInWithPopup=async()=>({user:users[selection++]});
+    export const reauthenticateWithPopup=async user=>({user});
+  `}));
+  await page.route('**/v1/account',async r=>{expect(r.request().method()).toBe('DELETE');deletedAccounts.push(r.request().headers().authorization);await r.fulfill({status:202,json:{receipt:'private-receipt'}});});
+  await page.route('**/v1/account-deletion',r=>r.fulfill({json:{status:'completed'}}));
+  await page.goto(origin+path);await page.getByRole('button',{name:'Continue with Google',exact:true}).click();
+  await expect(page.locator('#identity')).toHaveText('first-owner@example.test');await page.locator('#confirm').check();
+  await expect(page.locator('#remove')).toBeEnabled();
+  await page.getByRole('button',{name:'Continue with Google',exact:true}).click();
+  await expect(page.locator('#identity')).toHaveText('second-owner@example.test');
+  await expect(page.locator('#confirm')).not.toBeChecked();await expect(page.locator('#remove')).toBeDisabled();expect(deletedAccounts).toEqual([]);
+  await page.locator('#confirm').check();await page.locator('#remove').click();
+  await expect(page.locator('#status')).toHaveText('Account deletion completed.');expect(deletedAccounts).toEqual(['Bearer second-owner']);
+});
 const review = { sessionId:'public-session', serviceId:'public-service', name:'My personal agent', purpose:'Ask for decisions', capabilities:['forms','sms'], status:'pending', expiresAt:Date.now()+600000, expiresInDays:null, comparisonCode:'123456',connectionId:null };
 test('registration offers no owner-access control, needs one confirmation, no phone setup', async ({page})=>{
   let approvals=0;

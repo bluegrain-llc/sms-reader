@@ -15,10 +15,10 @@ object ConnectionLinks {
         OnboardingLink(if (match.groupValues[1] == "oauth/consent") "oauth" else match.groupValues[1], match.groupValues[2])
     }.getOrNull()
 
-    fun code(link: String, serviceUrl: String): String? = runCatching {
+    fun code(link: String, serviceUrl: String, fallbackScheme: String = "smsrelay"): String? = runCatching {
         val uri = URI(link)
         val expectedHost = runCatching { URI(serviceUrl).host }.getOrNull()
-        val supported = (uri.scheme == "smsrelay" && uri.host == "connect") ||
+        val supported = (uri.scheme == fallbackScheme && uri.host == "connect") ||
             (uri.scheme == "https" && expectedHost != null && uri.host.equals(expectedHost, true) && uri.path == "/connect" && uri.port in listOf(-1, 443))
         if (!supported || uri.userInfo != null) return null
         val codes = uri.rawQuery.orEmpty().split('&').mapNotNull { field ->

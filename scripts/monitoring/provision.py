@@ -11,7 +11,7 @@ import urllib.request
 
 def resources(project, service, channels, number, billing):
     scope = f'resource.type="cloud_run_revision" resource.labels.project_id="{project}" resource.labels.service_name="{service}" jsonPayload.component="relay"'
-    valid_http = 'jsonPayload.event="http_completed" jsonPayload.route!~"^/internal/" jsonPayload.route!="/health" jsonPayload.route!="/healthz" jsonPayload.route!="/v2/events/stream" jsonPayload.route!="unmatched" jsonPayload.status_class!="4xx"'
+    valid_http = 'jsonPayload.event="http_completed" jsonPayload.route!~"^/internal/" jsonPayload.route!="/health" jsonPayload.route!="/healthz" jsonPayload.route!="/startup" jsonPayload.route!="/v2/events/stream" jsonPayload.route!="unmatched" jsonPayload.status_class!="4xx"'
     definitions = [
         ('http_requests', valid_http, None, ['status_class']),
         ('http_latency_ms', valid_http, 'duration_ms', []),
@@ -91,8 +91,11 @@ def apply(config, account):
         raise ValueError('Selected billing account is not enabled and linked to this project.')
     for channel in config['policies'][0]['notificationChannels']:
         resource = api(token, 'GET', 'https://monitoring.googleapis.com/v3/' + channel)
-        if resource.get('type') != 'email' or resource.get('verificationStatus') != 'VERIFIED' or resource.get('enabled') is not True:
-            raise ValueError('Use enabled verified email channels; billing budget notification channels must be email.')
+        # The API leaves verification unspecified for working channels that do
+        # not require verification; UNVERIFIED explicitly means non-functioning.
+        verification = resource.get('verificationStatus', 'VERIFICATION_STATUS_UNSPECIFIED')
+        if resource.get('type') != 'email' or verification not in ['VERIFIED', 'VERIFICATION_STATUS_UNSPECIFIED'] or resource.get('enabled') is not True:
+            raise ValueError('Use enabled email channels with no outstanding verification; billing budget notification channels must be email.')
     logging = f'https://logging.googleapis.com/v2/projects/{project}/metrics'
     for metric in config['metrics']:
         # PUT is an upsert, so reruns do not create duplicate metrics.
@@ -136,7 +139,7 @@ def main():
     parser.add_argument('--project-number', required=True)
     parser.add_argument('--service', default='sms-code-relay')
     parser.add_argument('--billing-account', required=True)
-    parser.add_argument('--channel', action='append', required=True, help='Verified email channel resource; repeat for multiple channels.')
+    parser.add_argument('--channel', action='append', required=True, help='Enabled email channel resource with no outstanding verification; repeat for multiple channels.')
     parser.add_argument('--account', help='Explicit gcloud account, mandatory with --apply.')
     parser.add_argument('--apply', action='store_true')
     args = parser.parse_args()

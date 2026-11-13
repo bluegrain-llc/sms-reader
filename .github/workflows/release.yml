@@ -74,9 +74,15 @@ jobs:
           RELAY_STORE_PASSWORD: ${{ secrets.RELAY_STORE_PASSWORD }}
           RELAY_KEY_PASSWORD: ${{ secrets.RELAY_KEY_PASSWORD }}
         run: python3 scripts/check-release-prerequisites.py
+      - name: Pin release safety tooling from the workflow revision
+        run: |
+          python3 scripts/check-release-tooling.py snapshot "$RUNNER_TEMP/release-tooling.json"
+          cp scripts/check-release-tooling.py "$RUNNER_TEMP/check-release-tooling.py"
       - uses: actions/checkout@v4
         with:
           ref: ${{ steps.source.outputs.sha }}
+      - name: Reject candidates with older release safety tooling
+        run: python3 "$RUNNER_TEMP/check-release-tooling.py" verify "$RUNNER_TEMP/release-tooling.json"
       - uses: actions/setup-node@v4
         with:
           node-version: 24

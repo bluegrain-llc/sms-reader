@@ -1,5 +1,10 @@
 import { ensure } from './model.js';
 
+export function androidLinkTarget(packageName = 'com.bluegrain.smsrelay') {
+  ensure(['com.bluegrain.smsrelay', 'com.bluegrain.smsrelay.staging'].includes(packageName), 503, 'app_links_not_configured');
+  return { packageName, scheme: packageName.endsWith('.staging') ? 'smsrelay-staging' : 'smsrelay' };
+}
+
 /** Keep legacy installed APKs associated while Play adds signing identities. */
 export function signingFingerprints(legacy?: string, additional?: unknown): string[] {
   ensure(additional === undefined || Array.isArray(additional), 503, 'app_links_not_configured');

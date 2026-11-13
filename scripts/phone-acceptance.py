@@ -28,6 +28,7 @@ CASES = {
 }
 REASONS = ('observed_expected_behavior', 'unexpected_behavior', 'device_unavailable',
            'owner_action_required', 'service_unavailable', 'not_run')
+PACKAGES = ('com.bluegrain.smsrelay', 'com.bluegrain.smsrelay.staging')
 
 
 def now():
@@ -42,7 +43,21 @@ def run(args):
         raise ValueError('Metadata command failed; verify selected device/tools locally') from exc
 
 
-def device_metadata(adb, serial):
+def installed_apk_hash(adb, serial, package_name=PACKAGES[0]):
+    paths = run([adb, '-s', serial, 'shell', 'pm', 'path', package_name]).splitlines()
+    # This gate is for the standalone signed APK, not a Play split installation.
+    if len(paths) != 1 or not re.fullmatch(r'package:/data/app/[A-Za-z0-9_./=+~-]+/base\.apk', paths[0]):
+        raise ValueError('Expected one installed standalone relay APK')
+    remote = paths[0].removeprefix('package:')
+    if '..' in remote.split('/'):
+        raise ValueError('Invalid installed package path')
+    with tempfile.TemporaryDirectory(prefix='relay-installed-apk-') as directory:
+        installed = Path(directory) / 'base.apk'
+        run([adb, '-s', serial, 'pull', remote, str(installed)])
+        return hashlib.sha256(installed.read_bytes()).hexdigest()
+
+
+def device_metadata(adb, serial, apk_hash, package_name=PACKAGES[0]):
     def prop(name):
         return run([adb, '-s', serial, 'shell', 'getprop', name]).strip()
     if serial.startswith('emulator-') or prop('ro.kernel.qemu') == '1':
@@ -56,24 +71,28 @@ def device_metadata(adb, serial):
     version = re.search(r'^\s*versionName=([^\s]+)', play, re.MULTILINE)
     if not version:
         raise ValueError('Google Play services version unavailable')
+    installed_hash = installed_apk_hash(adb, serial, package_name)
+    if installed_hash != apk_hash:
+        raise ValueError('Installed relay APK does not match the selected candidate')
     return {'deviceHash': hashlib.sha256(identity.encode()).hexdigest(),
             'model': prop('ro.product.model'), 'android': prop('ro.build.version.release'),
-            'api': prop('ro.build.version.sdk'), 'playServices': version.group(1)}
+            'api': prop('ro.build.version.sdk'), 'playServices': version.group(1),
+            'installedApkSha256': installed_hash}
 
 
-def initial_record(apk, commit, signer, aapt, devices, project, region, revision):
+def initial_record(apk, commit, signer, aapt, devices, project, region, revision, package_name=PACKAGES[0]):
     if not re.fullmatch(r'[0-9a-f]{40}', commit):
         raise ValueError('Commit must be a full Git SHA')
     manifest = run([aapt, 'dump', 'badging', str(apk)])
     packages = re.findall(r"^package: name='([^']+)'(?:\s|$)", manifest, re.MULTILINE)
     debuggable = re.search(r'^application-debuggable(?:\s|$)', manifest, re.MULTILINE)
-    if packages != ['com.bluegrain.smsrelay'] or debuggable:
+    if package_name not in PACKAGES or packages != [package_name] or debuggable:
         raise ValueError('Expected non-debuggable relay APK')
     certificate = run([signer, 'verify', '--print-certs', str(apk)])
     digests = re.findall(r'^Signer #\d+ certificate SHA-256 digest: ([0-9a-fA-F]{64})$', certificate, re.MULTILINE)
     if not digests:
         raise ValueError('APK signer certificate not verified')
-    return {'schemaVersion': 1, 'createdAt': now(), 'commit': commit,
+    return {'schemaVersion': 2, 'createdAt': now(), 'commit': commit, 'packageName': package_name,
             'apkSha256': hashlib.sha256(apk.read_bytes()).hexdigest(),
             'project': project, 'region': region, 'backendRevision': revision,
             'signerSha256': [value.lower() for value in digests], 'devices': devices,
@@ -89,9 +108,11 @@ def validate(record):
             raise ValueError('Invalid observation timestamp')
         datetime.fromisoformat(value)
 
-    if not isinstance(record, dict) or set(record) != {'schemaVersion', 'createdAt', 'commit', 'apkSha256', 'signerSha256', 'devices', 'cases', 'project', 'region', 'backendRevision'}:
+    if not isinstance(record, dict) or set(record) != {'schemaVersion', 'createdAt', 'commit', 'apkSha256', 'signerSha256', 'devices', 'cases', 'project', 'region', 'backendRevision', 'packageName'}:
         raise ValueError('Unexpected record fields')
-    if type(record['schemaVersion']) is not int or record['schemaVersion'] != 1 or not matches(r'[0-9a-f]{40}', record['commit']):
+    if record['packageName'] not in PACKAGES:
+        raise ValueError('Unsupported Android package')
+    if type(record['schemaVersion']) is not int or record['schemaVersion'] != 2 or not matches(r'[0-9a-f]{40}', record['commit']):
         raise ValueError('Invalid record identity')
     if not matches(r'[0-9a-f]{64}', record['apkSha256']):
         raise ValueError('Invalid artifact hash')
@@ -108,8 +129,10 @@ def validate(record):
         raise ValueError('Invalid device list')
     identities = set()
     for device in record['devices']:
-        if not isinstance(device, dict) or set(device) != {'deviceHash', 'model', 'android', 'api', 'playServices'}:
+        if not isinstance(device, dict) or set(device) != {'deviceHash', 'model', 'android', 'api', 'playServices', 'installedApkSha256'}:
             raise ValueError('Unexpected device fields')
+        if device['installedApkSha256'] != record['apkSha256']:
+            raise ValueError('Installed device artifact does not match candidate')
         if not matches(r'[0-9a-f]{64}', device['deviceHash']) or device['deviceHash'] in identities:
             raise ValueError('Invalid or duplicate physical device')
         identities.add(device['deviceHash'])
@@ -166,6 +189,7 @@ def main():
     init.add_argument('--project', required=True)
     init.add_argument('--region', required=True)
     init.add_argument('--backend-revision', required=True)
+    init.add_argument('--package-name', choices=PACKAGES, default=PACKAGES[0])
     init.add_argument('--apksigner', required=True)
     init.add_argument('--aapt', required=True)
     init.add_argument('--adb', default='adb')
@@ -184,8 +208,8 @@ def main():
             if args.command == 'init':
                 if args.file.exists():
                     raise ValueError('Record already exists; use a new file for a new candidate')
-                devices = [device_metadata(args.adb, serial) for serial in args.serial]
-                value = initial_record(args.apk, args.commit, args.apksigner, args.aapt, devices, args.project, args.region, args.backend_revision)
+                value = initial_record(args.apk, args.commit, args.apksigner, args.aapt, [], args.project, args.region, args.backend_revision, args.package_name)
+                value['devices'] = [device_metadata(args.adb, serial, value['apkSha256'], args.package_name) for serial in args.serial]
                 save(args.file, value)
                 print('Pending release matrix created; no physical outcomes claimed')
             else:
@@ -200,10 +224,11 @@ def main():
                     save(args.file, value)
                     print(f'{args.case}: {args.outcome}')
                 else:
+                    print('Android package: ' + value['packageName'])
                     for case, result in value['cases'].items():
                         print(f"{case}: {result['status']}")
                     passed = all(result['status'] == 'pass' for result in value['cases'].values())
-                    print('Operator acceptance complete' if passed else 'Physical acceptance incomplete')
+                    print(('Staging acceptance complete' if value['packageName'].endswith('.staging') else 'Operator acceptance complete') if passed else 'Physical acceptance incomplete')
                     if args.require_pass and not passed:
                         return 1
     except (ValueError, KeyError, TypeError, OSError) as exc:

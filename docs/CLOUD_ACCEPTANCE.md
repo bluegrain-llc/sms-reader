@@ -30,6 +30,25 @@ identity with no personal records. No production project is accepted.
    association and reads the actual active/tagged revision environments before
    forwarding caller credentials; a newer no-traffic template cannot satisfy
    these guards for an older serving revision.
+   Both relay revisions must configure an HTTP startup probe on `/startup`, port
+   8080. This endpoint returns 503 until the recovery control watch authoritatively
+   permits serving, then 200. `/health` and `/healthz` remain liveness checks and
+   do not establish readiness. The deployment script sets a two-second probe
+   period, one-second timeout and 60 failed attempts before startup is rejected.
+   Preflight rejects missing, TCP, wrong-path and wrong-port relay startup probes;
+   the separate callback receiver is excluded because it runs another server.
+   Cloud Run can route requests before its first readiness probe, so the startup
+   probe itself must establish readiness. See [Cloud Run health checks](https://docs.cloud.google.com/run/docs/configuring/healthchecks).
+   Expected `/startup` failures are excluded from user-traffic error/latency
+   metrics and canary error checks. Other API failures remain included. Reapply
+   the monitoring configuration when upgrading an existing deployment.
+   Both relay revisions must use the canonical `SERVICE_URL`, the same
+   `SCHEDULER_EMAIL` service account in the selected staging project, and the same
+   `DELIVERY_QUEUE` in the selected staging project/region. Preflight inspects
+   that configured queue rather than assuming its name. It requires the queue
+   running and the maintenance Scheduler enabled, with POST, matching canonical
+   target/audience and that exact OIDC signer. These configuration checks do not
+   establish successful authenticated task delivery or replace the live drills.
    Provision a separate staging security ledger using [the recovery runbook](recovery/README.md)
    and configure its bucket as `securityLedgerBucket`. The runtime's
    `SECURITY_LEDGER_BUCKET` must match it; the bucket name must contain `staging`

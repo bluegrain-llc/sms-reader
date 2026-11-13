@@ -31,14 +31,21 @@ Environment variables:
 
 Environment secrets: `RELAY_KEYSTORE_BASE64`, `RELAY_STORE_PASSWORD`, `RELAY_KEY_PASSWORD`, and `RELAY_SMOKE_TOKEN`. The smoke token belongs to a dedicated paired caller. Smoke only lists tools and checks an absent request; it never creates a request or triggers SMS. Signing material is written to a private temporary file and removed on success or failure.
 
-The workflow checks that every required variable and secret is present before installing dependencies, authenticating to Google Cloud or writing signing material. It loads the preflight from the workflow revision, then checks out the tested candidate, so older candidates can still be deployed. Missing values are reported together by setting name; their contents are never printed. `GCP_REGION` and `GCP_SERVICE` retain their defaults. Presence does not prove that a credential is valid: the existing cloud, signing and deployment checks still apply.
+The workflow checks that every required variable and secret is present before installing dependencies, authenticating to Google Cloud or writing signing material. It loads the preflight from the workflow revision and retains hashes of that revision's release safety tools outside the checkout, including the ledger preflight's shared validator and assertion helper. After checking out the tested candidate, a retained verifier rejects changed, missing or symlinked safety tools before dependencies, cloud access or signing. Older application candidates remain usable when their release tools match; otherwise select a successful CI run on current main. This prevents an older candidate from restoring a deploy script that rebuilds source or skips guarded promotion. Missing settings are reported together by name; their contents are never printed. `GCP_REGION` and `GCP_SERVICE` retain their defaults. Presence does not prove that a credential is valid: the existing cloud, signing and deployment checks still apply.
 
 For a local configuration check, export the same required settings and run `python3 scripts/check-release-prerequisites.py`. Do not put secret values on the command line or commit them. A newly configured protected environment cannot deploy until these credentials and public settings have been supplied.
+
+The pinned safety-tool inventory includes the Play release validator and its raw AAB manifest Java helper, as well as the ledger validator's local dependencies. An older candidate cannot silently replace these checks while keeping their wrapper unchanged. The Java helper uses the trusted bundletool JAR selected through `BUNDLETOOL_JAR` and the installed JDK; the Play workflow verifies its pinned bundletool download separately.
+
 ## Apple Universal Links
 
 Set the production GitHub environment variable `APPLE_APP_IDS` to the Apple team and bundle identifiers of the companion apps that may open relay links. The release workflow forwards this value to both backend runtimes. Leaving it unset preserves any existing Cloud Run value; on an unconfigured service, the association contains no app identifiers.
 
 After deployment, check the canonical relay origin's `/.well-known/apple-app-site-association` response for the configured `applinks.details[].appID` values. Configure the companion app's Associated Domains entitlement for that origin and verify on a physical iOS device that a public pairing or registration link opens the intended app before accepting Universal Links for release.
+
+## Isolated staging associations
+
+For an isolated staging deployment, export `ANDROID_PACKAGE_NAME=com.bluegrain.smsrelay.staging` when invoking local deployment tools and select that staging project's Firebase app and signing certificates. Associations and fallback links target the selected package. The protected production release workflow uses the default `com.bluegrain.smsrelay` package. See [isolated staging candidate](PILOT.md#isolated-staging-candidate).
 
 ## Release procedure
 

@@ -47,6 +47,10 @@ def config(env):
         if not all(re.fullmatch(r'[A-Z0-9]{10}\.[A-Za-z0-9.-]+', app_id) for app_id in apple_app_ids.split(',')):
             raise ValueError('Invalid Apple app identifiers')
         c['APPLE_APP_IDS'] = apple_app_ids
+    package = env.get('ANDROID_PACKAGE_NAME', 'com.bluegrain.smsrelay')
+    if package not in ('com.bluegrain.smsrelay', 'com.bluegrain.smsrelay.staging'):
+        raise ValueError('Unsupported Android package')
+    c['ANDROID_PACKAGE_NAME'] = package
     c['HOLD'] = int(env.get('PROMOTION_HOLD_SECONDS', '60'))
     if c['HOLD'] < 60:
         raise ValueError('Promotion observation window must be at least 60 seconds')
@@ -102,7 +106,8 @@ def deploy(c):
         # One deploy creates the final configured revision; no follow-up config revision.
         runtime = {'GOOGLE_CLOUD_PROJECT': project, 'SERVICE_URL': url, 'SCHEDULER_EMAIL': scheduler,
                    'DELIVERY_QUEUE': queue, 'ANDROID_SIGNING_SHA256S': json.dumps(c['CERTS']),
-                   'SECURITY_LEDGER_BUCKET': c['SECURITY_LEDGER_BUCKET']}
+                   'SECURITY_LEDGER_BUCKET': c['SECURITY_LEDGER_BUCKET'],
+                   'ANDROID_PACKAGE_NAME': c['ANDROID_PACKAGE_NAME']}
         if 'APPLE_APP_IDS' in c:
             runtime['APPLE_APP_IDS'] = c['APPLE_APP_IDS']
         # Preserve unrelated runtime settings, including secrets and approved origins.
@@ -116,6 +121,7 @@ def deploy(c):
         run(['gcloud', 'run', 'deploy', service, *scope, '--image', c['IMAGE_URI'], '--revision-suffix', revision[len(service)+1:],
              '--service-account', f'sms-relay-server@{project}.iam.gserviceaccount.com', '--allow-unauthenticated',
              '--port', '8080', '--memory', '512Mi', '--timeout', '120', '--max-instances', '10', '--min-instances', '0',
+             '--startup-probe', 'httpGet.path=/startup,httpGet.port=8080,periodSeconds=2,timeoutSeconds=1,failureThreshold=60',
              '--update-env-vars', values, '--no-traffic', '--tag', 'candidate', '--quiet'], capture=False)
         live = json.loads(run(['gcloud', 'run', 'services', 'describe', service, *scope, '--format=json']))
         candidate = next(t['url'] for t in live['status']['traffic'] if t.get('tag') == 'candidate' and t.get('revisionName') == revision)
@@ -124,7 +130,7 @@ def deploy(c):
         if actual.rsplit('@', 1)[-1] != c['IMAGE_URI'].rsplit('@', 1)[-1]:
             raise RuntimeError('Revision digest does not match tested artifact')
         smoke_env = os.environ.copy()
-        smoke_env.update(RELAY_URL=candidate, RELAY_SMOKE_TOKEN=c['RELAY_SMOKE_TOKEN'], ANDROID_SIGNING_SHA256S=json.dumps(c['CERTS']))
+        smoke_env.update(RELAY_URL=candidate, RELAY_SMOKE_TOKEN=c['RELAY_SMOKE_TOKEN'], ANDROID_SIGNING_SHA256S=json.dumps(c['CERTS']), ANDROID_PACKAGE_NAME=c['ANDROID_PACKAGE_NAME'])
         def smoke():
             subprocess.run(['node', 'scripts/release-smoke.mjs'], env=smoke_env, check=True)
         smoke()
@@ -143,7 +149,7 @@ def deploy(c):
             save(f'observing-{percent}')
             time.sleep(c['HOLD'])
             smoke()
-            errors = run(['gcloud', 'logging', 'read', f'resource.type="cloud_run_revision" AND resource.labels.service_name="{service}" AND resource.labels.revision_name="{revision}" AND httpRequest.status>=500 AND timestamp>="{started}"', '--project', project, '--limit=1', '--format=value(insertId)'])
+            errors = run(['gcloud', 'logging', 'read', f'resource.type="cloud_run_revision" AND resource.labels.service_name="{service}" AND resource.labels.revision_name="{revision}" AND httpRequest.status>=500 AND NOT httpRequest.requestUrl=~"^https?://[^/?#]+/startup/?([?].*)?$" AND timestamp>="{started}"', '--project', project, '--limit=1', '--format=value(insertId)'])
             if errors:
                 raise RuntimeError('Candidate recorded HTTP 5xx during observation')
         save('promoted')
