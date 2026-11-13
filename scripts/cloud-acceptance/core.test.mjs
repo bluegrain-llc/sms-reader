@@ -81,7 +81,7 @@ test('cloud preflight binds delivery readiness to each serving revision and Sche
     await assert.rejects(preflight(cfg, inspect(mismatched)), /replay_delivery_configuration_mismatch/);
   }
 });
-test('delivery preflight failures retain serving revision and timing before credential access', { timeout: 30_000 }, async () => {
+test('delivery preflight failures retain serving revision and timing without credential access', { timeout: 30_000 }, async () => {
   const dir = await mkdtemp(join(tmpdir(), 'relay-preflight-evidence-'));
   try {
     const cfg = config({ ...base, ownerTokenFile: join(dir, 'missing-owner') });
@@ -96,13 +96,27 @@ test('delivery preflight failures retain serving revision and timing before cred
       tasks: { name: queue, state: 'RUNNING' },
       scheduler: { state: 'ENABLED', httpTarget: { httpMethod: 'POST', uri: `${cfg.serviceUrl}/internal/maintenance`, oidcToken: { audience: cfg.serviceUrl, serviceAccountEmail: signer } } },
     };
-    const fixturePath = join(dir, 'fixtures.json'), configPath = join(dir, 'config.json');
+    const fixturePath = join(dir, 'fixtures.json'), configPath = join(dir, 'config.json'), observePath = join(dir, 'observe-credentials.mjs');
     await writeFile(configPath, JSON.stringify(cfg), { mode: 0o600 });
+    await writeFile(observePath, `import fs from 'node:fs/promises';
+import { syncBuiltinESMExports } from 'node:module';
+const credentials = new Set(${JSON.stringify([cfg.ownerTokenFile, ...cfg.fcmTokenFiles])});
+for (const name of ['stat', 'readFile']) {
+  const original = fs[name];
+  fs[name] = async function (path, ...args) {
+    if (credentials.has(String(path))) await fs.writeFile(process.env.RELAY_TEST_CREDENTIAL_ACCESS, 'accessed');
+    return original.call(this, path, ...args);
+  };
+}
+syncBuiltinESMExports();
+`, { mode: 0o600 });
     await writeFile(join(dir, 'gcloud'), `#!${process.execPath}\nconst fs = require('node:fs'); const path = require('node:path'); const fixtures = JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures.json'), 'utf8')); const args = process.argv.slice(2); const key = args[0] === 'run' ? args[1] === 'services' ? 'service' : 'revision' : args[0]; if (!fixtures[key]) throw new Error('unexpected cloud command'); console.log(JSON.stringify(fixtures[key]));\n`, { mode: 0o700 });
-    for (const [name, patch] of [['queue', { tasks: { ...fixtures.tasks, state: 'PAUSED' } }], ['scheduler', { scheduler: { ...fixtures.scheduler, state: 'PAUSED' } }]]) {
+    for (const [name, patch, credentialAccess] of [['queue', { tasks: { ...fixtures.tasks, state: 'PAUSED' } }, false], ['scheduler', { scheduler: { ...fixtures.scheduler, state: 'PAUSED' } }, false], ['ready', {}, true]]) {
       await writeFile(fixturePath, JSON.stringify({ ...fixtures, ...patch }), { mode: 0o600 });
-      const evidencePath = join(dir, `${name}.json`);
-      await assert.rejects(promisify(execFile)(process.execPath, [new URL('./run.mjs', import.meta.url).pathname, '--config', configPath, '--evidence', evidencePath], { timeout: 10_000, env: { ...process.env, PATH: `${dir}:${process.env.PATH}`, FIRESTORE_EMULATOR_HOST: '', FIREBASE_AUTH_EMULATOR_HOST: '' } }), error => error.code === 1);
+      const evidencePath = join(dir, `${name}.json`), credentialAccessPath = join(dir, `${name}-credential-access`);
+      await assert.rejects(promisify(execFile)(process.execPath, ['--import', observePath, new URL('./run.mjs', import.meta.url).pathname, '--config', configPath, '--evidence', evidencePath], { timeout: 10_000, env: { ...process.env, PATH: `${dir}:${process.env.PATH}`, FIRESTORE_EMULATOR_HOST: '', FIREBASE_AUTH_EMULATOR_HOST: '', RELAY_TEST_CREDENTIAL_ACCESS: credentialAccessPath } }), error => error.code === 1);
+      if (credentialAccess) assert.equal(await readFile(credentialAccessPath, 'utf8'), 'accessed');
+      else await assert.rejects(readFile(credentialAccessPath), { code: 'ENOENT' });
       const evidence = JSON.parse(await readFile(evidencePath, 'utf8'));
       assert.equal(evidence.revision, 'current');
       assert.equal(evidence.projectId, cfg.projectId);
