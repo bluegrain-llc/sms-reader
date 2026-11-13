@@ -30,6 +30,13 @@ identity with no personal records. No production project is accepted.
    association and reads the actual active/tagged revision environments before
    forwarding caller credentials; a newer no-traffic template cannot satisfy
    these guards for an older serving revision.
+   Both relay revisions must use the canonical `SERVICE_URL`, the same
+   `SCHEDULER_EMAIL` service account in the selected staging project, and the same
+   `DELIVERY_QUEUE` in the selected staging project/region. Preflight inspects
+   that configured queue rather than assuming its name. It requires the queue
+   running and the maintenance Scheduler enabled, with POST, matching canonical
+   target/audience and that exact OIDC signer. These configuration checks do not
+   establish successful authenticated task delivery or replace the live drills.
    Provision a separate staging security ledger using [the recovery runbook](recovery/README.md)
    and configure its bucket as `securityLedgerBucket`. The runtime's
    `SECURITY_LEDGER_BUCKET` must match it; the bucket name must contain `staging`

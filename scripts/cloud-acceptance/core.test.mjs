@@ -26,10 +26,11 @@ test('owner guard rejects another identity/project/provider and expiring tokens 
 test('cloud preflight verifies actual active and tagged revisions rather than a candidate template', async () => {
   const cfg = config({ ...base, replayUrl: 'https://previous---relay.run.app' });
   const project = { projectId: cfg.projectId, lifecycleState: 'ACTIVE', labels: { environment: 'staging' } };
-  const env = [{ name: 'GOOGLE_CLOUD_PROJECT', value: cfg.projectId }, { name: 'SECURITY_LEDGER_BUCKET', value: cfg.securityLedgerBucket }];
+  const queue = `projects/${cfg.projectId}/locations/${cfg.region}/queues/relay-delivery`, schedulerEmail = `scheduler@${cfg.projectId}.iam.gserviceaccount.com`;
+  const env = [{ name: 'GOOGLE_CLOUD_PROJECT', value: cfg.projectId }, { name: 'SECURITY_LEDGER_BUCKET', value: cfg.securityLedgerBucket }, { name: 'SERVICE_URL', value: cfg.serviceUrl }, { name: 'DELIVERY_QUEUE', value: queue }, { name: 'SCHEDULER_EMAIL', value: schedulerEmail }];
   const service = { metadata: { labels: { environment: 'staging' } }, status: { url: cfg.serviceUrl, traffic: [{ revisionName: 'current', percent: 100 }, { revisionName: 'previous', url: cfg.replayUrl }] }, spec: { template: { spec: { containers: [{ env }] } } } };
   const revisions = Object.fromEntries(['current', 'previous'].map(name => [name, { metadata: { name }, spec: { containers: [{ env: structuredClone(env) }] } }]));
-  const inspect = (p = project, s = service, r = revisions, billing = true) => async (_cfg, args) => structuredClone(args[0] === 'projects' ? p : args[0] === 'run' ? args[1] === 'revisions' ? r[args[3]] : s : { billingEnabled: billing });
+  const inspect = (p = project, s = service, r = revisions, billing = true) => async (_cfg, args) => structuredClone(args[0] === 'projects' ? p : args[0] === 'run' ? args[1] === 'revisions' ? r[args[3]] : s : args[0] === 'tasks' ? { name: queue, state: 'RUNNING' } : args[0] === 'scheduler' ? { state: 'ENABLED', httpTarget: { httpMethod: 'POST', uri: `${cfg.serviceUrl}/internal/maintenance`, oidcToken: { audience: cfg.serviceUrl, serviceAccountEmail: schedulerEmail } } } : { billingEnabled: billing });
   assert.deepEqual(await preflight(cfg, inspect()), { revision: 'current', projectId: cfg.projectId });
   await assert.rejects(preflight(cfg, inspect({ ...project, labels: {} })));
   await assert.rejects(preflight(cfg, inspect(project, { ...service, metadata: { labels: { environment: 'production' } } })));
@@ -44,6 +45,36 @@ test('cloud preflight verifies actual active and tagged revisions rather than a 
   await assert.rejects(preflight(cfg, inspect(project, service, wrongLedger)), /staging_ledger_mismatch/);
   const emulator = structuredClone(revisions); emulator.current.spec.containers[0].env.push({ name: 'FIRESTORE_EMULATOR_HOST', value: 'localhost:8080' });
   await assert.rejects(preflight(cfg, inspect(project, service, emulator)));
+});
+test('cloud preflight binds delivery readiness to each serving revision and Scheduler signer', async () => {
+  const cfg = config({ ...base, replayUrl: 'https://previous---relay.run.app' });
+  const queueName = `projects/${cfg.projectId}/locations/${cfg.region}/queues/custom-delivery`;
+  const schedulerEmail = `scheduler@${cfg.projectId}.iam.gserviceaccount.com`;
+  const env = [{ name: 'GOOGLE_CLOUD_PROJECT', value: cfg.projectId }, { name: 'SECURITY_LEDGER_BUCKET', value: cfg.securityLedgerBucket }, { name: 'SERVICE_URL', value: cfg.serviceUrl }, { name: 'DELIVERY_QUEUE', value: queueName }, { name: 'SCHEDULER_EMAIL', value: schedulerEmail }];
+  const project = { projectId: cfg.projectId, lifecycleState: 'ACTIVE', labels: { environment: 'staging' } };
+  const service = { metadata: { labels: { environment: 'staging' } }, status: { url: cfg.serviceUrl, traffic: [{ revisionName: 'current', percent: 100 }, { revisionName: 'previous', url: cfg.replayUrl }] } };
+  const revisions = Object.fromEntries(['current', 'previous'].map(name => [name, { metadata: { name }, spec: { containers: [{ env: structuredClone(env) }] } }]));
+  const queue = { name: queueName, state: 'RUNNING' };
+  const scheduler = { state: 'ENABLED', httpTarget: { httpMethod: 'POST', uri: `${cfg.serviceUrl}/internal/maintenance`, oidcToken: { audience: cfg.serviceUrl, serviceAccountEmail: schedulerEmail } } };
+  const inspect = (r = revisions, q = queue, s = scheduler, calls = []) => async (_cfg, args) => {
+    calls.push(args);
+    return structuredClone(args[0] === 'projects' ? project : args[0] === 'run' ? args[1] === 'revisions' ? r[args[3]] : service : args[0] === 'tasks' ? q : args[0] === 'scheduler' ? s : { billingEnabled: true });
+  };
+  const calls = [];
+  await preflight(cfg, inspect(revisions, queue, scheduler, calls));
+  assert.ok(calls.some(args => args[0] === 'tasks' && args[3] === 'custom-delivery'), 'inspect the active runtime queue rather than relay-delivery');
+  await assert.rejects(preflight(cfg, inspect(revisions, { ...queue, state: 'PAUSED' })), /delivery_resources_disabled/);
+  await assert.rejects(preflight(cfg, inspect(revisions, { ...queue, name: queueName.replace('custom-delivery', 'relay-delivery') })), /delivery_queue_mismatch/);
+  for (const patch of [{ state: 'PAUSED' }, { httpTarget: { ...scheduler.httpTarget, httpMethod: 'GET' } }, { httpTarget: { ...scheduler.httpTarget, oidcToken: { ...scheduler.httpTarget.oidcToken, serviceAccountEmail: `other@${cfg.projectId}.iam.gserviceaccount.com` } } }]) {
+    await assert.rejects(preflight(cfg, inspect(revisions, queue, { ...scheduler, ...patch })));
+  }
+  for (const name of ['current', 'previous']) {
+    for (const [key, value] of [['SERVICE_URL', 'https://wrong.run.app'], ['DELIVERY_QUEUE', `projects/production-project/locations/${cfg.region}/queues/delivery`], ['SCHEDULER_EMAIL', undefined]]) {
+      const wrong = structuredClone(revisions);
+      wrong[name].spec.containers[0].env.find(v => v.name === key).value = value;
+      await assert.rejects(preflight(cfg, inspect(wrong)));
+    }
+  }
 });
 test('callback verification binds exact body and timestamp and refuses stale or malformed signatures', () => {
   const secret = 'private-test-secret', now = 1800000000000, timestamp = String(now / 1000), body = '{"id":"event"}';

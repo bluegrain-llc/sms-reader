@@ -85,10 +85,6 @@ try {
     for (const collection of collections) {
       requireThat(activeTtl(fields, collection), 'ttl_not_active');
     }
-    const queue = await cloud(cfg, ['tasks', 'queues', 'describe', 'relay-delivery', `--location=${cfg.region}`]);
-    const scheduler = await cloud(cfg, ['scheduler', 'jobs', 'describe', 'sms-relay-maintenance', `--location=${cfg.region}`]);
-    requireThat(queue.state === 'RUNNING' && scheduler.state === 'ENABLED', 'delivery_resources_disabled');
-    requireThat(scheduler.httpTarget?.oidcToken?.audience === cfg.serviceUrl && scheduler.httpTarget?.uri === `${cfg.serviceUrl}/internal/maintenance`, 'scheduler_target_mismatch');
     return { readyIndexes: indexes.length, activeTtlPolicies: fields.filter(f => f.ttlConfig?.state === 'ACTIVE').length };
   });
   await check('device-setup', async () => {

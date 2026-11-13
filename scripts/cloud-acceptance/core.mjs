@@ -183,11 +183,20 @@ export async function preflight(cfg, inspect = cloud) {
     requireThat(env.find(v => v.name === 'GOOGLE_CLOUD_PROJECT')?.value === cfg.projectId, 'runtime_project_mismatch');
     if (ledger) requireThat(env.find(v => v.name === 'SECURITY_LEDGER_BUCKET')?.value === cfg.securityLedgerBucket, 'staging_ledger_mismatch');
     requireThat(!env.some(v => /EMULATOR_HOST/.test(v.name)), 'deployed_emulators_forbidden');
+    if (!ledger) return;
+    requireThat(env.find(v => v.name === 'SERVICE_URL')?.value === cfg.serviceUrl, 'runtime_service_origin_mismatch');
+    const schedulerEmail = env.find(v => v.name === 'SCHEDULER_EMAIL')?.value;
+    requireThat(typeof schedulerEmail === 'string' && /^[a-zA-Z0-9_-]+@/.test(schedulerEmail) && schedulerEmail.endsWith(`@${cfg.projectId}.iam.gserviceaccount.com`), 'staging_scheduler_identity_required');
+    const queue = env.find(v => v.name === 'DELIVERY_QUEUE')?.value;
+    const prefix = `projects/${cfg.projectId}/locations/${cfg.region}/queues/`;
+    requireThat(typeof queue === 'string' && queue.startsWith(prefix) && /^[A-Za-z0-9_-]+$/.test(queue.slice(prefix.length)), 'staging_delivery_queue_required');
+    return { queue, queueId: queue.slice(prefix.length), schedulerEmail };
   };
-  await checkRevision(active.revisionName);
+  const delivery = await checkRevision(active.revisionName);
   if (cfg.replayUrl) {
     const replay = service.status.traffic.find(t => t.url === cfg.replayUrl && t.revisionName !== active.revisionName);
-    requireThat(replay, 'distinct_tagged_revision_required'); await checkRevision(replay.revisionName);
+    requireThat(replay, 'distinct_tagged_revision_required');
+    requireThat(isDeepStrictEqual(await checkRevision(replay.revisionName), delivery), 'replay_delivery_configuration_mismatch');
   }
   if (cfg.callbackUrl) {
     const receiver = await inspect(cfg, ['run', 'services', 'describe', cfg.callbackService, `--region=${cfg.region}`]);
@@ -198,6 +207,12 @@ export async function preflight(cfg, inspect = cloud) {
   }
   const billing = await inspect(cfg, ['billing', 'projects', 'describe', cfg.projectId]);
   requireThat(billing.billingEnabled === true, 'staging_billing_not_enabled');
+  const queue = await inspect(cfg, ['tasks', 'queues', 'describe', delivery.queueId, `--location=${cfg.region}`]);
+  const scheduler = await inspect(cfg, ['scheduler', 'jobs', 'describe', 'sms-relay-maintenance', `--location=${cfg.region}`]);
+  requireThat(queue.name === delivery.queue, 'delivery_queue_mismatch');
+  requireThat(queue.state === 'RUNNING' && scheduler.state === 'ENABLED', 'delivery_resources_disabled');
+  const target = scheduler.httpTarget;
+  requireThat(target?.httpMethod === 'POST' && target.uri === `${cfg.serviceUrl}/internal/maintenance` && target.oidcToken?.audience === cfg.serviceUrl && target.oidcToken.serviceAccountEmail === delivery.schedulerEmail, 'scheduler_target_mismatch');
   return { revision: active.revisionName, projectId: cfg.projectId };
 }
 export function verifySignature(secret, timestamp, rawBody, signature, now = Date.now()) {
