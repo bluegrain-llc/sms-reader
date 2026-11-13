@@ -8,7 +8,7 @@ import { mountOnboarding } from './onboarding-http.js';
 import { mountOnboardingPages } from './onboarding-pages.js';
 import { mountOAuth } from './oauth-http.js';
 import { mountForms } from './forms-http.js';
-import { signingFingerprints } from './signing.js';
+import { androidLinkTarget, signingFingerprints } from './signing.js';
 import { formSchema } from './forms-model.js';
 import { Relay } from './relay.js';
 import { connectionSchema, userCodeSchema } from './connections.js';
@@ -25,6 +25,7 @@ export interface HttpOptions {
   appleAppIds?: string[];
   androidCertSha256?: string;
   androidCertSha256s?: string[];
+  androidPackageName?: string;
   trustProxyHops?: number;
   sseDurationMs?: number;
   firebaseWebConfig?: WebConfig;
@@ -91,18 +92,20 @@ export function app(relay: Relay, options: HttpOptions) {
   });
   app.get('/.well-known/assetlinks.json', (_req, res) => {
     const fingerprints = signingFingerprints(options.androidCertSha256, options.androidCertSha256s);
+    const {packageName} = androidLinkTarget(options.androidPackageName);
     res.json([{ relation: ['delegate_permission/common.handle_all_urls'], target: {
-      namespace: 'android_app', package_name: 'com.bluegrain.smsrelay', sha256_cert_fingerprints: fingerprints,
+      namespace: 'android_app', package_name: packageName, sha256_cert_fingerprints: fingerprints,
     } }]);
   });
   app.get('/connect', (req, res) => {
     const code = userCodeSchema.parse(req.query.code), formatted = code.slice(0, 5) + '-' + code.slice(5);
+    const {scheme} = androidLinkTarget(options.androidPackageName);
     res.set('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'");
     res.set('Referrer-Policy', 'no-referrer');
     res.type('html').send(`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Connect SMS Code Relay</title>
       <style>body{margin:0;background:#f5f8f7;color:#142d29;font:18px/1.5 system-ui,sans-serif}main{max-width:480px;margin:12vh auto;padding:24px}small{color:#006b5e}h1{font-size:32px;line-height:1.15}code{display:block;font-size:28px;margin:24px 0}a{display:block;background:#006b5e;color:white;padding:16px;border-radius:12px;text-align:center;text-decoration:none}p{color:#4b625d}</style>
       <main><small>SMS CODE RELAY</small><h1>Connect your app.</h1><p>Open SMS Code Relay and review this connection in Admin. Compare the code with the one your app or bot shows.</p><code>${formatted}</code>
-      <a href="smsrelay://connect?code=${formatted}">Open SMS Code Relay</a><p>If the app does not open, enter this code in Admin → Access. No credential needs copying.</p></main></html>`);
+      <a href="${scheme}://connect?code=${formatted}">Open SMS Code Relay</a><p>If the app does not open, enter this code in Admin → Access. No credential needs copying.</p></main></html>`);
   });
   app.post('/v1/connections', async (req, res) => {
     ensure(options.publicUrl, 503, 'pairing_not_configured');

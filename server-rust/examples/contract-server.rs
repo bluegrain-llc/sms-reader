@@ -451,6 +451,7 @@ async fn start(State(h): State<Host>, Json(v): Json<Value>) -> Json<Value> {
             .unwrap_or_default(),
         android_cert: o["androidCertSha256"].as_str().map(str::to_owned),
         android_certs: o.get("androidCertSha256s").cloned(),
+        android_package: o["androidPackageName"].as_str().map(str::to_owned),
         firebase_web_config: o.get("firebaseWebConfig").cloned(),
         privacy_contact: o["privacyContact"].as_str().map(str::to_owned),
         origins: arr(o, "origins")

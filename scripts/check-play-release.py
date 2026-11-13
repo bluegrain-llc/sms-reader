@@ -20,6 +20,7 @@ import zlib
 from datetime import datetime, timedelta, timezone
 
 REPO = "bluegrain-llc/sms-reader"
+PRODUCTION_PACKAGE = "com.bluegrain.smsrelay"
 EVIDENCE = (
     "physicalAcceptance", "cloudAcceptance", "deploymentRollback", "monitoringDrill",
     "accountDeletion", "capacityCostRestore", "playInstalledSmoke", "pageSizeRuntime",
@@ -41,6 +42,20 @@ REQUIRED_CI = {
     "Android UI integration (API 26)", "Android UI integration (API 33)",
     "Android UI integration (API 36)", "Play release gate unit tests",
     "Staging callback probe container",
+}
+FORBIDDEN_PERMISSIONS = {
+    "android.permission." + name for name in (
+        "READ_SMS", "RECEIVE_SMS", "READ_CONTACTS", "WRITE_CONTACTS",
+        "BIND_ACCESSIBILITY_SERVICE", "BIND_NOTIFICATION_LISTENER_SERVICE",
+    )
+}
+ANDROID_NS = "{http://schemas.android.com/apk/res/android}"
+# Every Android attribute consumed below must retain this framework identity in
+# the protobuf manifest; bundletool's text dump omits resource IDs.
+ANDROID_ATTRIBUTE_IDS = {
+    "name": 0x01010003, "permission": 0x01010006, "debuggable": 0x0101000F,
+    "allowBackup": 0x01010280, "usesCleartextTraffic": 0x010104EC,
+    "versionCode": 0x0101021B, "targetSdkVersion": 0x01010270,
 }
 
 
@@ -117,6 +132,50 @@ def native_alignment(path, apk):
                     name_size, extra_size = struct.unpack_from("<HH", local, 26)
                     if (member.header_offset + 30 + name_size + extra_size) % 16384:
                         errors.append("uncompressed APK native library is not ZIP aligned to 16 KiB")
+    return errors
+
+
+def android_attribute(element, name):
+    if name not in ANDROID_ATTRIBUTE_IDS:
+        raise ValueError("unregistered Android manifest attribute")
+    value = element.get(ANDROID_NS + name)
+    if name in element.attrib:
+        if value is not None:
+            raise ValueError("ambiguous Android manifest attribute")
+        return element.get(name)
+    return value
+
+
+def local_name(element):
+    return element.tag.rsplit("}", 1)[-1]
+
+
+def bundle_manifest_errors(manifest, module):
+    errors = []
+    prefix = "AAB " + module + ": "
+    if any(re.fullmatch(r"_(?:0x[0-9a-fA-F]{8}|unknown)_", attribute.rsplit("}", 1)[-1])
+           for element in manifest.iter() for attribute in element.attrib):
+        errors.append(prefix + "unresolved manifest attribute name")
+    if any((local_name(element).startswith("uses-permission") and android_attribute(element, "name") in FORBIDDEN_PERMISSIONS) or
+           android_attribute(element, "permission") in FORBIDDEN_PERMISSIONS for element in manifest.iter()):
+        errors.append(prefix + "forbidden broad permissions")
+    for element in manifest.iter():
+        permission = android_attribute(element, "permission")
+        if permission and (permission.startswith(("@", "?")) or
+                           re.fullmatch(r"0x[0-9a-fA-F]{8}", permission)):
+            errors.append(prefix + "unresolved permission resource reference")
+            break
+    applications = [element for element in manifest if local_name(element) == "application"]
+    if module == "base" and not applications:
+        errors.append(prefix + "application missing")
+    for application in applications:
+        if android_attribute(application, "debuggable") not in (None, "false"):
+            errors.append(prefix + "debuggable application")
+        for attribute, description in (("allowBackup", "application backup"),
+                                       ("usesCleartextTraffic", "cleartext traffic")):
+            value = android_attribute(application, attribute)
+            if (module == "base" and value != "false") or value not in (None, "false"):
+                errors.append(prefix + description + " is not disabled")
     return errors
 
 
@@ -218,12 +277,25 @@ def check_record(record, base, offline=False, run=command, now=None):
                 require(bool(bundletool), "BUNDLETOOL_JAR required for AAB manifest/structure validation")
                 if bundletool:
                     run(["java", "-jar", bundletool, "validate", "--bundle=" + str(path)])
-                    manifest = ET.fromstring(run(["java", "-jar", bundletool, "dump", "manifest", "--bundle=" + str(path), "--module=base"]))
-                    ns = "{http://schemas.android.com/apk/res/android}"
-                    require(manifest.get("package") == "com.bluegrain.smsrelay", "AAB package mismatch")
-                    require(manifest.get(ns + "versionCode") == str(record.get("versionCode")), "AAB versionCode mismatch")
-                    sdk = manifest.find("uses-sdk")
-                    target = sdk.get(ns + "targetSdkVersion") if sdk is not None else None
+                    with zipfile.ZipFile(path) as archive:
+                        modules = sorted({match[1] for name in archive.namelist()
+                                          if (match := re.fullmatch(r"([^/]+)/manifest/AndroidManifest\.xml", name))})
+                    require("base" in modules, "AAB base manifest missing")
+                    run(["java", "--class-path", bundletool,
+                         str(Path(__file__).with_name("CheckBundleManifest.java")), str(path),
+                         str(len(ANDROID_ATTRIBUTE_IDS)),
+                         *[f"{name}={resource_id:08x}" for name, resource_id in ANDROID_ATTRIBUTE_IDS.items()],
+                         *modules])
+                    manifests = {}
+                    for module in modules:
+                        manifest = ET.fromstring(run(["java", "-jar", bundletool, "dump", "manifest", "--bundle=" + str(path), "--module=" + module]))
+                        manifests[module] = manifest
+                        blockers.extend(bundle_manifest_errors(manifest, module))
+                    manifest = manifests.get("base", ET.Element("manifest"))
+                    require(manifest.get("package") == PRODUCTION_PACKAGE, "AAB package mismatch")
+                    require(android_attribute(manifest, "versionCode") == str(record.get("versionCode")), "AAB versionCode mismatch")
+                    sdks = [element for element in manifest if local_name(element) == "uses-sdk"]
+                    target = android_attribute(sdks[0], "targetSdkVersion") if len(sdks) == 1 else None
                     require(target is not None and target.isdigit() and type(minimum) is int and int(target) >= minimum, "AAB target API below requirement")
             else:
                 cert = run(["apksigner", "verify", "--verbose", "--print-certs", str(path)])
@@ -232,13 +304,13 @@ def check_record(record, base, offline=False, run=command, now=None):
                     cert, re.MULTILINE)]
                 require(bool(digests) and all(value in signers for value in digests), "Play APK signer mismatch")
                 manifest = run(["aapt", "dump", "badging", str(path)])
-                require("package: name='com.bluegrain.smsrelay'" in manifest, "APK package mismatch")
+                require("package: name='" + PRODUCTION_PACKAGE + "'" in manifest, "APK package mismatch")
                 require("versionCode='" + str(record.get("versionCode")) + "'" in manifest, "APK versionCode mismatch")
                 if kind == "playApk":
                     target = re.search(r"targetSdkVersion:'(\d+)'", manifest)
                     require(target is not None and type(minimum) is int and int(target[1]) >= minimum, "APK target API below requirement")
                 require("application-debuggable" not in manifest, "APK is debuggable")
-                require(not re.search(r"android.permission.(READ_SMS|RECEIVE_SMS|READ_CONTACTS|WRITE_CONTACTS|BIND_ACCESSIBILITY_SERVICE|BIND_NOTIFICATION_LISTENER_SERVICE)", manifest), "APK requests forbidden broad permissions")
+                require(not any(permission in manifest for permission in FORBIDDEN_PERMISSIONS), "APK requests forbidden broad permissions")
         except (OSError, subprocess.SubprocessError, ValueError, RuntimeError, zipfile.BadZipFile,
                 zlib.error, lzma.LZMAError, struct.error, ET.ParseError):
             blockers.append(kind + ": required artifact tool or structural verification failed")
@@ -253,6 +325,9 @@ def check_record(record, base, offline=False, run=command, now=None):
                     evidence.get("aabSha256") == artifacts.get("aab", {}).get("sha256") and
                     evidence.get("apkSha256") == artifacts.get("playApk", {}).get("sha256") and
                     evidence.get("splitSha256") == [ref.get("sha256") for ref in splits], label + ": evidence does not attest to this exact candidate")
+            if label == "physicalAcceptance":
+                require(evidence.get("packageName") == PRODUCTION_PACKAGE,
+                        "physicalAcceptance: production package evidence required")
             if label == "finalCiAndReviews":
                 cycles = evidence.get("reviewCycles", [])
                 require(len(cycles) >= 5 and all(isinstance(cycle, dict) and cycle.get("findingsAddressed") is True and re.fullmatch(r"[0-9a-f]{40}", cycle.get("head") or "") for cycle in cycles), "five completed review/fix cycles missing")

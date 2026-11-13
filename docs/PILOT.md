@@ -10,12 +10,15 @@ record tool verifies APK signing and rejects debuggable or non-relay APKs. It
 collects physical device model, Android/API and Google Play-services version using
 fixed ADB metadata commands. Device-reported hardware serials are replaced with
 SHA-256 hashes, so USB and network aliases of one phone share an identity. Phones
-without a usable hardware serial are refused. The tool never reads SMS, app files,
-screen contents, account identities or credentials.
-The artifact hash identifies the APK selected by the operator; the tool does not
-prove that this exact APK is installed. Install that candidate on both phones
-before testing. Bind the record to the explicitly selected project, region and
-backend revision from the private deployment record.
+without a usable hardware serial are refused. For each selected phone it pulls
+only the installed relay package APK into a private temporary directory, compares
+its SHA-256 with the selected candidate and removes the temporary copy. Missing,
+different or split APK installations are refused. The tool never reads SMS, app
+data, screen contents, account identities or credentials, and does not install or
+modify the app. Install the standalone candidate on both phones before testing.
+This check records the installed artifact at initialization; keep that candidate
+installed throughout the run. Bind the record to the explicitly selected project,
+region and backend revision from the private deployment record.
 
 ```sh
 python3 scripts/phone-acceptance.py init \
@@ -32,6 +35,9 @@ The initial matrix is entirely pending. Use a new record for each new candidate;
 initialization refuses to overwrite records. Omitting serials can prepare a
 pending matrix, but passing observations then fail validation. Emulator devices
 are refused, and two-phone cases require two distinct physical device identities.
+Schema version 2 binds every device to the verified installed APK hash. Older
+version 1 records remain historical evidence and cannot pass this tool's gate;
+initialize a fresh record rather than copying old outcomes to a new candidate.
 
 After performing each case below, record the observed result explicitly:
 
@@ -67,6 +73,64 @@ Use the exact candidate APK and backend revision for final acceptance after the
 cloud delivery, release pipeline and deletion changes are deployed and verified.
 API 26/33/36 UI CI proves only the synthetic regression suite. Physical carrier,
 FCM, system-consent denial/approval and two-phone tests remain separate gates.
+
+## Isolated staging candidate
+
+Use the separate `staging` build type for acceptance against a dedicated staging
+Firebase project. It installs as `com.bluegrain.smsrelay.staging` alongside the
+production app, with **Inbox staging** and **Administration staging** launcher
+labels. Its HTTPS App Links use only the staging service host and its fallback
+scheme is `smsrelay-staging`; production retains `smsrelay`.
+
+Register that distinct package and the actual staging signer's SHA-1/SHA-256 in
+the staging Firebase project. A [package/SHA-1 OAuth registration is global](https://support.google.com/firebase/answer/6401008);
+registering the production package with the same certificate in another project
+can collide. Do not remove production OAuth registrations to work around this.
+Enable Google sign-in and use the staging project's OAuth **web** client ID.
+
+Supply the inputs in [staging.properties.example](../android/staging.properties.example)
+privately through environment variables or Gradle properties. The wrapper
+`bash scripts/build-staging.sh` requires `STAGING_RELAY_KEYSTORE`,
+`STAGING_RELAY_STORE_PASSWORD`, `STAGING_RELAY_KEY_PASSWORD` and
+`STAGING_RELAY_KEY_ALIAS` in its shell environment; other inputs may remain in
+Gradle properties. Invoke Gradle directly for a Gradle-properties-only setup.
+Staging never falls back to production Firebase, relay or signing inputs. The
+wrapper runs debug/staging unit tests, staging lint and a signed, shrunk APK/AAB build.
+Outputs are under ignored `artifacts/staging/`; production build tasks and paths
+are unchanged. A staging-only key can establish staging functionality, but cannot
+establish pilot upgrades, production signing continuity or Play acceptance.
+
+If the cloud baseline needs FCM registrations before owner sign-in, the explicit
+`--with-setup` build option also produces a **debuggable setup APK** with the same
+isolated staging package, Firebase project and staging signer. On a specifically
+selected phone, use that setup APK before Google sign-in; private ADB `run-as`
+capture can read Firebase's token preferences directly into an owner-only host
+file. Never print tokens, copy them into prompts, or add export controls to the
+ordinary app. Keep the disposable owner free of registered devices/grants until
+the cloud runner's own setup step. Then update in place to the non-debuggable
+staging candidate without clearing application storage, and verify its installed
+APK hash before physical acceptance. The setup APK is rejected by the acceptance
+recorder and cannot establish signed-release or production acceptance.
+
+Deploy backend support for `ANDROID_PACKAGE_NAME=com.bluegrain.smsrelay.staging`
+and configure `ANDROID_SIGNING_SHA256S` with the actual staging certificate before
+testing links. Both backend runtimes default to the production package when that
+setting is omitted. Deployment smoke checks verify both package and certificates.
+To check public client configuration against Firebase, normalize the staging inputs
+to the unprefixed names expected by `scripts/verify-cloud-config.py`, set
+`ANDROID_PACKAGE_NAME=com.bluegrain.smsrelay.staging`, and select the staging
+`SERVICE`/`REGION` and authorized `CLOUDSDK_CORE_ACCOUNT`. The Firebase request's
+quota project is bound to that selected project. This verification must never
+select production implicitly.
+
+Initialize a **separate** acceptance file using `--package-name
+com.bluegrain.smsrelay.staging` and the staging APK, project and backend revision.
+The recorder verifies that package's installed bytes and records `packageName`;
+omitting the option continues to require the production package. Staging records
+and artifacts do not satisfy production Play, signing-continuity or upgrade gates.
+One physical phone is enough to start carrier/consent/lifecycle cases; the cases
+explicitly marked for two phones remain pending until two distinct phones take
+part. No case becomes passed merely by building or installing this candidate.
 
 ## Optional injected-SMS check
 
