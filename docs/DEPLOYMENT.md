@@ -25,7 +25,6 @@ Environment variables:
 - `GCP_PROJECT_ID`, `GCP_REGION` (default `us-central1`), `GCP_SERVICE` (default `sms-code-relay`).
 - `GCP_WORKLOAD_IDENTITY_PROVIDER`, `GCP_RELEASE_SERVICE_ACCOUNT`.
 - `APPLE_APP_IDS`: optional comma-separated Apple team/bundle identifiers, for example `ABCDEFGHIJ.com.bluegrain.smsrelay`; configure before iOS Universal Link acceptance. See [Apple Universal Links](#apple-universal-links).
-- `ANDROID_PACKAGE_NAME`: defaults to `com.bluegrain.smsrelay`. Select `com.bluegrain.smsrelay.staging` only for an isolated staging service and its corresponding Firebase app/certificate; associations and fallback links then target the staging app. See [isolated staging candidate](PILOT.md#isolated-staging-candidate).
 - `ANDROID_SIGNING_SHA256S`: JSON array of public uppercase colon-separated app signing fingerprints, including pilot/Play identities currently supported.
 - `ANDROID_UPLOAD_SHA256`: public upload-key fingerprint used to verify the CI-signed APK/AAB. It may differ from Play's installed-app signer.
 - `RELAY_KEY_ALIAS`, `RELAY_URL`, `FIREBASE_APP_ID`, `FIREBASE_API_KEY`, `FIREBASE_SENDER_ID`, `GOOGLE_WEB_CLIENT_ID`.
@@ -40,6 +39,10 @@ For a local configuration check, export the same required settings and run `pyth
 Set the production GitHub environment variable `APPLE_APP_IDS` to the Apple team and bundle identifiers of the companion apps that may open relay links. The release workflow forwards this value to both backend runtimes. Leaving it unset preserves any existing Cloud Run value; on an unconfigured service, the association contains no app identifiers.
 
 After deployment, check the canonical relay origin's `/.well-known/apple-app-site-association` response for the configured `applinks.details[].appID` values. Configure the companion app's Associated Domains entitlement for that origin and verify on a physical iOS device that a public pairing or registration link opens the intended app before accepting Universal Links for release.
+
+## Isolated staging associations
+
+For an isolated staging deployment, export `ANDROID_PACKAGE_NAME=com.bluegrain.smsrelay.staging` when invoking local deployment tools and select that staging project's Firebase app and signing certificates. Associations and fallback links target the selected package. The protected production release workflow uses the default `com.bluegrain.smsrelay` package. See [isolated staging candidate](PILOT.md#isolated-staging-candidate).
 
 ## Release procedure
 

@@ -89,9 +89,13 @@ can collide. Do not remove production OAuth registrations to work around this.
 Enable Google sign-in and use the staging project's OAuth **web** client ID.
 
 Supply the inputs in [staging.properties.example](../android/staging.properties.example)
-privately through environment variables or Gradle properties. Staging never falls
-back to production Firebase, relay or signing inputs. `bash scripts/build-staging.sh`
-runs debug/staging unit tests, staging lint and a signed, shrunk APK/AAB build.
+privately through environment variables or Gradle properties. The wrapper
+`bash scripts/build-staging.sh` requires `STAGING_RELAY_KEYSTORE`,
+`STAGING_RELAY_STORE_PASSWORD`, `STAGING_RELAY_KEY_PASSWORD` and
+`STAGING_RELAY_KEY_ALIAS` in its shell environment; other inputs may remain in
+Gradle properties. Invoke Gradle directly for a Gradle-properties-only setup.
+Staging never falls back to production Firebase, relay or signing inputs. The
+wrapper runs debug/staging unit tests, staging lint and a signed, shrunk APK/AAB build.
 Outputs are under ignored `artifacts/staging/`; production build tasks and paths
 are unchanged. A staging-only key can establish staging functionality, but cannot
 establish pilot upgrades, production signing continuity or Play acceptance.
