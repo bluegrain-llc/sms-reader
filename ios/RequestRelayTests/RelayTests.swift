@@ -166,11 +166,13 @@ extension RelayTests {
                 default: load.cancel()
                 }
                 let acceptedObservations = observations
+                let previousError = model.error
+                XCTAssertEqual(previousError, transition == "submission" ? RelayFailure.unavailable.localizedDescription : nil)
                 let previousNotice = model.notice
                 gate.resume(.success(pending))
                 let cancelled = await load.value
                 XCTAssertTrue(cancelled, "\(form): \(transition)")
-                XCTAssertNil(model.error, "\(form): \(transition)")
+                XCTAssertEqual(model.error, previousError, "\(form): \(transition)")
                 XCTAssertEqual(model.notice, previousNotice, "\(form): \(transition)")
                 XCTAssertFalse(installed, "\(form): \(transition)")
                 XCTAssertEqual(observations, acceptedObservations)
