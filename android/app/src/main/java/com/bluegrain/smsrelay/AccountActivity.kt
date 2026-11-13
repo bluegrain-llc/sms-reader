@@ -52,7 +52,7 @@ abstract class AccountActivity : ComponentActivity() {
             else options += "Link Google account" to { confirmLink { authenticate(false, link = true) } }
             if (user.providerData.any { it.providerId == "apple.com" }) options += "Verify Apple account" to { authenticateApple() }
             else options += "Link Apple account" to { confirmLink { authenticateApple(link = true) } }
-            options += "Sign out" to { (application as RelayApplication).repository.signOut(); vm.refresh() }
+            options += "Sign out" to { vm.signOut(user.uid) }
         }
         android.app.AlertDialog.Builder(this).setTitle(if (user == null) "Sign in" else "Account sign-in methods")
             .setItems(options.map { it.first }.toTypedArray()) { _, index -> options[index].second() }.setNegativeButton("Cancel", null).show()
@@ -63,22 +63,28 @@ abstract class AccountActivity : ComponentActivity() {
             .setPositiveButton("Link account") { _, _ -> action() }.setNegativeButton("Cancel", null).show()
     }
     private fun authenticateApple(deleteAfter: Boolean = false, link: Boolean = false) {
+        val auth = com.google.firebase.auth.FirebaseAuth.getInstance()
+        val user = auth.currentUser
+        val owner = user?.uid
         lifecycleScope.launch {
             try {
-                val auth = com.google.firebase.auth.FirebaseAuth.getInstance()
-                val owner = auth.currentUser?.uid
                 val provider = com.google.firebase.auth.OAuthProvider.newBuilder("apple.com").setScopes(listOf("email", "name")).build()
-                val result = when {
-                    link -> auth.currentUser!!.startActivityForLinkWithProvider(this@AccountActivity, provider)
-                    auth.currentUser != null -> auth.currentUser!!.startActivityForReauthenticateWithProvider(this@AccountActivity, provider)
-                    else -> auth.startActivityForSignInWithProvider(this@AccountActivity, provider)
-                }.await()
-                check(owner == null || result.user?.uid == owner)
                 if (deleteAfter) {
-                    val accessToken = (result.credential as? com.google.firebase.auth.OAuthCredential)?.accessToken ?: error("apple_token_required")
-                    auth.revokeAccessToken(accessToken).await()
-                    vm.deleteAccount().join()
-                } else vm.refresh().join()
+                    var accessToken: String? = null
+                    vm.deleteAccountWithReauthentication(owner.orEmpty(), reauthenticate = {
+                        val result = checkNotNull(user).startActivityForReauthenticateWithProvider(this@AccountActivity, provider).await()
+                        accessToken = (result.credential as? com.google.firebase.auth.OAuthCredential)?.accessToken ?: error("apple_token_required")
+                        result.user?.uid.orEmpty()
+                    }, revoke = { auth.revokeAccessToken(checkNotNull(accessToken)).await() })
+                } else {
+                    val result = when {
+                        link -> checkNotNull(user).startActivityForLinkWithProvider(this@AccountActivity, provider)
+                        user != null -> user.startActivityForReauthenticateWithProvider(this@AccountActivity, provider)
+                        else -> auth.startActivityForSignInWithProvider(this@AccountActivity, provider)
+                    }.await()
+                    check(owner == null || result.user?.uid == owner)
+                    vm.refresh().join()
+                }
             } catch (e: CancellationException) { throw e }
             catch (_: Exception) { vm.error("Apple sign-in was not completed. Use the same account and retry. Link providers only through Link account.") }
         }

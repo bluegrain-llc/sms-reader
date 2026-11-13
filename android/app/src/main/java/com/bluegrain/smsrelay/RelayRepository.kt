@@ -65,8 +65,11 @@ class RelayRepository(private val context: Context) {
         else current.reauthenticate(credential).await()
         auth.currentUser?.getIdToken(true)?.await()
     }
-    private suspend fun call(method: String, path: String, body: JSONObject? = null): String {
-        val token = auth.currentUser?.getIdToken(false)?.await()?.token ?: throw ApiFailure("sign_in_required", 401)
+    private suspend fun call(method: String, path: String, body: JSONObject? = null, expectedOwner: String? = null): String {
+        val user = auth.currentUser ?: throw ApiFailure("sign_in_required", 401)
+        check(expectedOwner == null || user.uid == expectedOwner) { "The signed-in account changed." }
+        val token = user.getIdToken(false).await().token ?: throw ApiFailure("sign_in_required", 401)
+        check(expectedOwner == null || ownerId == expectedOwner) { "The signed-in account changed." }
         return withContext(Dispatchers.IO) {
             val payload = if (method in listOf("POST", "PUT", "PATCH")) (body ?: JSONObject()).toString().toRequestBody("application/json".toMediaType()) else null
             val request = Request.Builder().url(BuildConfig.RELAY_URL.trimEnd('/') + path)
@@ -107,8 +110,22 @@ class RelayRepository(private val context: Context) {
         return JSONObject(call("POST", "/v1/devices/$deviceId/requests/$id/events", b))
     }
     suspend fun unregister(id: String = deviceId) { call("DELETE", "/v1/devices/$id"); if (id == deviceId) { reset(); autoConnect = false } }
-    fun signOut() { auth.signOut(); reset() }
-    suspend fun deleteAccount() { call("DELETE", "/v1/account"); AgentTicket(context, ownerId).clearForDeletedAccount(); auth.signOut(); reset() }
+    suspend fun signOut(owner: String) {
+        check(owner.isNotBlank() && ownerId == owner) { "Sign in to the same account before signing out." }
+        disconnectBeforeSignOut(prefs.getString("id", null), unregister = { id ->
+            try { call("DELETE", "/v1/devices/$id", expectedOwner = owner) }
+            catch (e: ApiFailure) { if (e.status != 404) throw e }
+        }, finish = {
+            check(ownerId == owner) { "The signed-in account changed." }
+            auth.signOut(); reset(); autoConnect = false
+        })
+    }
+    suspend fun deleteAccount(expectedOwner: String) {
+        check(expectedOwner.isNotBlank()) { "Sign in before deleting." }
+        call("DELETE", "/v1/account", expectedOwner = expectedOwner)
+        AgentTicket(context, expectedOwner).clearForDeletedAccount()
+        if (ownerId == expectedOwner) { auth.signOut(); reset() }
+    }
     private fun reset() {
         val previousListenerDeadline = listenerUntil
         prefs.edit(commit = true) { clear(); putLong("listenerUntil", previousListenerDeadline) }

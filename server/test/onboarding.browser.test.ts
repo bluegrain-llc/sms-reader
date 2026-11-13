@@ -261,7 +261,7 @@ test('a delayed retained-ticket read cannot cross an account change',async({page
     const user=uid=>({uid,email:uid+'@example.test',getIdToken:async()=>uid});
     const auth={currentUser:user('owner-a')};let listener;
     window.switchRelayOwner=uid=>{auth.currentUser=user(uid);listener(auth.currentUser);};
-    export const getAuth=()=>auth;export const signOut=async()=>{};export class GoogleAuthProvider{};
+    export const getAuth=()=>auth;export const signOut=async()=>{};export class GoogleAuthProvider{};export class OAuthProvider{constructor(id){this.providerId=id;}};export const linkWithPopup=async()=>({user:auth.currentUser});
     export const signInWithPopup=async()=>({});export const signInWithRedirect=async()=>({});export const getRedirectResult=async()=>({});
     export const onAuthStateChanged=(a,fn)=>{listener=fn;queueMicrotask(()=>fn(a.currentUser));};export const setPersistence=async()=>{};export const browserLocalPersistence={};
   `}));

@@ -95,7 +95,7 @@ class RelayViewModel @JvmOverloads constructor(application: Application, private
             check(!deleteAfter || (expectedOwner.isNotBlank() && repo.signedIn && repo.ownerId == expectedOwner)) { "Sign in to the account again before deleting." }
             repo.signIn(token)
             if (deleteAfter) {
-                repo.deleteAccount(); clearLocal()
+                repo.deleteAccount(expectedOwner); clearLocal()
                 mutable.update { RelayUiState(configured = app.configured, foreground = it.foreground, error = "Deletion accepted. Account access is blocked while cleanup continues.") }
                 return@credentials
             }
@@ -193,9 +193,14 @@ class RelayViewModel @JvmOverloads constructor(application: Application, private
         refreshData()
     }
     fun unregister() = action { repo.unregister(); clearLocal(); refreshData() }
-    fun deleteAccount() = action {
-        repo.deleteAccount(); clearLocal()
-        mutable.update { RelayUiState(configured = app.configured, foreground = it.foreground) }
+    fun signOut(expectedOwner: String) = action(waitForIdle = true) { repo.signOut(expectedOwner); clearLocal(); refreshData() }
+    suspend fun deleteAccountWithReauthentication(
+        expectedOwner: String,
+        reauthenticate: suspend () -> String,
+        revoke: suspend () -> Unit,
+    ) = actions.reauthenticatedDeletion(expectedOwner, { repo.ownerId }, reauthenticate, revoke) { owner ->
+        repo.deleteAccount(owner); clearLocal()
+        mutable.update { RelayUiState(configured = app.configured, foreground = it.foreground, error = "Deletion accepted. Account access is blocked while cleanup continues.") }
     }
     fun foreground(value: Boolean) {
         mutable.update { it.copy(foreground = value) }
