@@ -13,6 +13,8 @@ RELEASE_TOOLS = (
     'scripts/verify-cloud-config.py',
     'scripts/release-config.py',
     'scripts/verify-release.py',
+    'scripts/check-play-release.py',
+    'scripts/CheckBundleManifest.java',
     'scripts/deploy.sh',
     'scripts/deploy.py',
     'scripts/check-security-ledger.ts',
