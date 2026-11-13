@@ -75,6 +75,7 @@ async fn run() -> Result<(), StartupFailure> {
                 .collect(),
             android_cert: std::env::var("ANDROID_SIGNING_SHA256").ok(),
             android_certs: json_option("ANDROID_SIGNING_SHA256S")?,
+            android_package: std::env::var("ANDROID_PACKAGE_NAME").ok(),
             firebase_web_config: json_option("FIREBASE_WEB_CONFIG")?,
             privacy_contact: std::env::var("PRIVACY_CONTACT").ok(),
             origins: std::env::var("ALLOWED_ORIGINS")

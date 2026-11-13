@@ -25,6 +25,7 @@ Environment variables:
 - `GCP_PROJECT_ID`, `GCP_REGION` (default `us-central1`), `GCP_SERVICE` (default `sms-code-relay`).
 - `GCP_WORKLOAD_IDENTITY_PROVIDER`, `GCP_RELEASE_SERVICE_ACCOUNT`.
 - `APPLE_APP_IDS`: optional comma-separated Apple team/bundle identifiers, for example `ABCDEFGHIJ.com.bluegrain.smsrelay`; configure before iOS Universal Link acceptance. See [Apple Universal Links](#apple-universal-links).
+- `ANDROID_PACKAGE_NAME`: defaults to `com.bluegrain.smsrelay`. Select `com.bluegrain.smsrelay.staging` only for an isolated staging service and its corresponding Firebase app/certificate; associations and fallback links then target the staging app. See [isolated staging candidate](PILOT.md#isolated-staging-candidate).
 - `ANDROID_SIGNING_SHA256S`: JSON array of public uppercase colon-separated app signing fingerprints, including pilot/Play identities currently supported.
 - `ANDROID_UPLOAD_SHA256`: public upload-key fingerprint used to verify the CI-signed APK/AAB. It may differ from Play's installed-app signer.
 - `RELAY_KEY_ALIAS`, `RELAY_URL`, `FIREBASE_APP_ID`, `FIREBASE_API_KEY`, `FIREBASE_SENDER_ID`, `GOOGLE_WEB_CLIENT_ID`.

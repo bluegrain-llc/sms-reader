@@ -14,7 +14,9 @@ assert.equal((await call('/internal/maintenance', { method: 'POST' })).status, 4
 assert.equal((await call('/mcp', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })).status, 401);
 const links = await call('/.well-known/assetlinks.json');
 assert.equal(links.status, 200);
-assert.deepEqual((await links.json())[0].target.sha256_cert_fingerprints.slice().sort(), expected.slice().sort());
+const target = (await links.json())[0].target;
+assert.equal(target.package_name, process.env.ANDROID_PACKAGE_NAME ?? 'com.bluegrain.smsrelay');
+assert.deepEqual(target.sha256_cert_fingerprints.slice().sort(), expected.slice().sort());
 // An impossible ID verifies caller auth without creating a phone notification.
 const absent = '/v1/requests/' + '0'.repeat(64);
 assert.equal((await call(absent)).status, 401);

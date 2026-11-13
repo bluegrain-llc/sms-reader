@@ -7,6 +7,7 @@ plugins {
 }
 fun setting(name: String) = providers.gradleProperty(name).orElse(providers.environmentVariable(name)).getOrElse("")
 fun quoted(value: String) = "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
+val publicKeys = listOf("RELAY_URL", "FIREBASE_APP_ID", "FIREBASE_API_KEY", "FIREBASE_PROJECT_ID", "FIREBASE_SENDER_ID", "GOOGLE_WEB_CLIENT_ID")
 android {
     namespace = "com.bluegrain.smsrelay"
     compileSdk = 36
@@ -17,8 +18,12 @@ android {
         versionCode = 11
         versionName = "0.7.2"
         manifestPlaceholders["relayHost"] = runCatching { URI(setting("RELAY_URL")).host }.getOrNull() ?: "relay.invalid"
+        manifestPlaceholders["relayScheme"] = "smsrelay"
+        manifestPlaceholders["relayLabel"] = "Inbox"
+        manifestPlaceholders["administrationLabel"] = "Administration"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-        for (key in listOf("RELAY_URL", "FIREBASE_APP_ID", "FIREBASE_API_KEY", "FIREBASE_PROJECT_ID", "FIREBASE_SENDER_ID", "GOOGLE_WEB_CLIENT_ID")) {
+        buildConfigField("String", "RELAY_LINK_SCHEME", quoted("smsrelay"))
+        for (key in publicKeys) {
             buildConfigField("String", key, quoted(setting(key)))
         }
     }
@@ -31,6 +36,14 @@ android {
                 keyPassword = setting("RELAY_KEY_PASSWORD")
             }
         }
+        create("staging") {
+            if (setting("STAGING_RELAY_KEYSTORE").isNotBlank()) {
+                storeFile = file(setting("STAGING_RELAY_KEYSTORE"))
+                storePassword = setting("STAGING_RELAY_STORE_PASSWORD")
+                keyAlias = setting("STAGING_RELAY_KEY_ALIAS")
+                keyPassword = setting("STAGING_RELAY_KEY_PASSWORD")
+            }
+        }
     }
     buildTypes {
         release {
@@ -38,6 +51,29 @@ android {
             isShrinkResources = true
             signingConfig = signingConfigs.getByName("pilot")
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+        }
+        create("staging") {
+            initWith(getByName("release"))
+            applicationIdSuffix = ".staging"
+            versionNameSuffix = "-staging"
+            signingConfig = signingConfigs.getByName("staging")
+            matchingFallbacks += listOf("release")
+            manifestPlaceholders["relayHost"] = runCatching { URI(setting("STAGING_RELAY_URL")).host }.getOrNull() ?: "staging.relay.invalid"
+            manifestPlaceholders["relayScheme"] = "smsrelay-staging"
+            manifestPlaceholders["relayLabel"] = "Inbox staging"
+            manifestPlaceholders["administrationLabel"] = "Administration staging"
+            buildConfigField("String", "RELAY_LINK_SCHEME", quoted("smsrelay-staging"))
+            for (key in publicKeys) buildConfigField("String", key, quoted(setting("STAGING_$key")))
+        }
+        create("stagingSetup") {
+            initWith(getByName("staging"))
+            isDebuggable = true
+            isMinifyEnabled = false
+            isShrinkResources = false
+            versionNameSuffix = "-staging-setup"
+            matchingFallbacks += listOf("staging", "release")
+            manifestPlaceholders["relayLabel"] = "Inbox staging setup"
+            manifestPlaceholders["administrationLabel"] = "Administration staging setup"
         }
     }
     buildFeatures { compose = true; buildConfig = true }
@@ -47,16 +83,19 @@ android {
 }
 // Release builds cannot silently ship placeholders or an unsigned artifact.
 tasks.configureEach {
-    if (name == "preReleaseBuild") doFirst {
+    if (name in listOf("preReleaseBuild", "preStagingBuild", "preStagingSetupBuild")) doFirst {
+        val prefix = if (name == "preReleaseBuild") "" else "STAGING_"
         // Validate the exact property-preferred values that BuildConfig will embed.
-        val publicKeys = listOf("RELAY_URL", "FIREBASE_APP_ID", "FIREBASE_API_KEY", "FIREBASE_PROJECT_ID", "FIREBASE_SENDER_ID", "GOOGLE_WEB_CLIENT_ID")
         val validation = ProcessBuilder("python3", rootProject.file("../scripts/release-config.py").absolutePath)
-            .inheritIO().also { process -> publicKeys.forEach { process.environment()[it] = setting(it) } }.start()
+            .inheritIO().also { process ->
+                publicKeys.forEach { process.environment()[it] = setting("$prefix$it") }
+                process.environment()["ANDROID_PACKAGE_NAME"] = "com.bluegrain.smsrelay" + if (prefix.isEmpty()) "" else ".staging"
+            }.start()
         require(validation.waitFor() == 0) { "Release configuration validation failed" }
 
-        require(setting("RELAY_URL").startsWith("https://")) { "Set HTTPS RELAY_URL" }
+        require(setting("${prefix}RELAY_URL").startsWith("https://")) { "Set HTTPS ${prefix}RELAY_URL" }
         for (key in listOf("FIREBASE_APP_ID", "FIREBASE_API_KEY", "FIREBASE_PROJECT_ID", "FIREBASE_SENDER_ID", "GOOGLE_WEB_CLIENT_ID", "RELAY_KEYSTORE", "RELAY_STORE_PASSWORD", "RELAY_KEY_ALIAS", "RELAY_KEY_PASSWORD")) {
-            require(setting(key).isNotBlank()) { "Missing release setting: $key" }
+            require(setting("$prefix$key").isNotBlank()) { "Missing release setting: $prefix$key" }
         }
     }
 }

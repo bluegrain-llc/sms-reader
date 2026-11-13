@@ -74,6 +74,35 @@ before(async () => {
   for (const server of servers) { if (!server.listening) await once(server, 'listening', {signal:AbortSignal.timeout(10000)}); bases.push(`http://127.0.0.1:${(server.address() as { port: number }).port}`); }
 });
 after(async () => { for (const s of servers) { s.closeAllConnections(); await new Promise<void>(resolve => s.close(() => resolve())); } await deleteApp(firebase); });
+test('both runtimes isolate staging Android associations and fallback links', {timeout:30000}, async () => {
+  const certificate = Array(32).fill('AA').join(':');
+  for (const packageName of [undefined, 'com.bluegrain.smsrelay.staging', 'invalid.package']) {
+    const configured = {...options,androidPackageName:packageName,androidCertSha256:certificate};
+    const selected = [app(relay, configured).listen(0, '127.0.0.1'), rustApp(native as unknown as Relay, configured).listen() as unknown as Server];
+    try {
+      for (const server of selected) {
+        if (!server.listening) await once(server, 'listening', {signal:AbortSignal.timeout(10000)});
+        const base = `http://127.0.0.1:${(server.address() as {port:number}).port}`;
+        const links = await contractFetch(base + '/.well-known/assetlinks.json');
+        const page = await contractFetch(base + '/connect?code=ABCDE-FG234');
+        if (packageName === 'invalid.package') {
+          assert.equal(links.status,503); assert.equal(page.status,503);
+          continue;
+        }
+        assert.equal(links.status,200); assert.equal(page.status,200);
+        assert.deepEqual((await links.json())[0].target, {namespace:'android_app',package_name:packageName ?? 'com.bluegrain.smsrelay',sha256_cert_fingerprints:[certificate]});
+        const html = await page.text();
+        assert.ok(html.includes(`href="${packageName ? 'smsrelay-staging' : 'smsrelay'}://connect?code=ABCDE-FG234"`));
+        assert.ok(!html.includes(`href="${packageName ? 'smsrelay' : 'smsrelay-staging'}://connect`));
+      }
+    } finally {
+      for (const server of selected) {
+        server.closeAllConnections();
+        await new Promise<void>((resolve,reject) => server.close(error => error ? reject(error) : resolve()));
+      }
+    }
+  }
+});
 test('contract HTTP deadline aborts an unfinished response body', {timeout:15000}, async () => {
   const stalled = createServer((_request, response) => { response.writeHead(200, {'Content-Type':'application/json'}); response.write('{'); });
   stalled.listen(0, '127.0.0.1');

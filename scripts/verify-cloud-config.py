@@ -22,7 +22,7 @@ def matches(env, sdk, canonical):
     if project['project_id'] != env['FIREBASE_PROJECT_ID'] or str(project['project_number']) != env['FIREBASE_SENDER_ID']:
         raise ValueError('Firebase project mismatch')
     client = next(c for c in sdk['client'] if c['client_info']['mobilesdk_app_id'] == env['FIREBASE_APP_ID'])
-    if client['client_info']['android_client_info']['package_name'] != 'com.bluegrain.smsrelay':
+    if client['client_info']['android_client_info']['package_name'] != env.get('ANDROID_PACKAGE_NAME', 'com.bluegrain.smsrelay'):
         raise ValueError('Android package mismatch')
     if env['FIREBASE_API_KEY'] not in [k['current_key'] for k in client['api_key']]:
         raise ValueError('API key is not registered for this Android app')
@@ -35,9 +35,9 @@ if __name__ == '__main__':
         env = os.environ
         config.validate(env)
         project = env['FIREBASE_PROJECT_ID']
-        token = subprocess.run(['gcloud', 'auth', 'print-access-token'], check=True, capture_output=True, text=True).stdout.strip()
+        token = subprocess.run(['gcloud', 'auth', 'print-access-token', '--project', project], check=True, capture_output=True, text=True).stdout.strip()
         url = 'https://firebase.googleapis.com/v1beta1/projects/' + quote(project, safe='') + '/androidApps/' + quote(env['FIREBASE_APP_ID'], safe='') + '/config'
-        with urlopen(Request(url, headers={'Authorization': 'Bearer ' + token}), timeout=30) as response:
+        with urlopen(Request(url, headers={'Authorization': 'Bearer ' + token, 'x-goog-user-project': project}), timeout=30) as response:
             sdk = json.loads(base64.b64decode(json.load(response)['configFileContents']))
         canonical = subprocess.run(['gcloud', 'run', 'services', 'describe', env['SERVICE'], '--project', project, '--region', env['REGION'], '--format=value(status.url)'], check=True, capture_output=True, text=True).stdout.strip()
         matches(env, sdk, canonical)

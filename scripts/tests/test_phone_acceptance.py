@@ -16,7 +16,7 @@ spec.loader.exec_module(acceptance)
 
 class PhoneAcceptanceTest(unittest.TestCase):
     def pending(self, devices=0):
-        return {'schemaVersion': 2, 'createdAt': acceptance.now(), 'commit': 'a' * 40,
+        return {'schemaVersion': 2, 'createdAt': acceptance.now(), 'commit': 'a' * 40, 'packageName': 'com.bluegrain.smsrelay',
                 'project': 'relay-staging', 'region': 'us-central1', 'backendRevision': 'relay-00001-abc',
                 'apkSha256': 'b' * 64, 'signerSha256': ['c' * 64],
                 'devices': [{'deviceHash': str(index) * 64, 'model': 'Test device',
@@ -292,6 +292,30 @@ class PhoneAcceptanceTest(unittest.TestCase):
                     value['devices'][1]['installedApkSha256'] = 'd' * 64
                 with self.assertRaises(ValueError):
                     acceptance.validate(value)
+
+    def test_staging_artifact_requires_explicit_package_selection(self):
+        with tempfile.TemporaryDirectory() as directory:
+            apk = Path(directory) / 'staging.apk'
+            apk.write_bytes(b'staging fixture')
+            signer = 'Signer #1 certificate SHA-256 digest: ' + 'c' * 64
+            badging = "package: name='com.bluegrain.smsrelay.staging' versionCode='11'"
+            with patch.object(acceptance, 'run', side_effect=[badging, signer]):
+                with self.assertRaises(ValueError):
+                    acceptance.initial_record(apk, 'a' * 40, 'signer', 'aapt', [], 'relay-staging', 'us-central1', 'relay-00001-abc')
+            with patch.object(acceptance, 'run', side_effect=[badging, signer]):
+                value = acceptance.initial_record(apk, 'a' * 40, 'signer', 'aapt', [], 'relay-staging', 'us-central1', 'relay-00001-abc', 'com.bluegrain.smsrelay.staging')
+            acceptance.validate(value)
+            self.assertEqual(value['packageName'], 'com.bluegrain.smsrelay.staging')
+            with patch.object(acceptance, 'run', return_value=badging + '\napplication-debuggable'):
+                with self.assertRaises(ValueError):
+                    acceptance.initial_record(apk, 'a' * 40, 'signer', 'aapt', [], 'relay-staging', 'us-central1', 'relay-00001-abc', 'com.bluegrain.smsrelay.staging')
+            with patch.object(acceptance, 'run', return_value='') as run:
+                with self.assertRaises(ValueError):
+                    acceptance.installed_apk_hash('adb', 'phone', value['packageName'])
+            self.assertEqual(run.call_args.args[0][-1], 'com.bluegrain.smsrelay.staging')
+            value['packageName'] = 'other.package'
+            with self.assertRaises(ValueError):
+                acceptance.validate(value)
 
     def test_debug_or_unsigned_artifact_is_refused(self):
         with tempfile.TemporaryDirectory() as directory:

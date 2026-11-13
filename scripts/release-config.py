@@ -6,6 +6,8 @@ from urllib.parse import urlparse
 
 
 def validate(env):
+    if env.get('ANDROID_PACKAGE_NAME', 'com.bluegrain.smsrelay') not in ('com.bluegrain.smsrelay', 'com.bluegrain.smsrelay.staging'):
+        raise ValueError('Unsupported Android package')
     values = {k: env.get(k, '') for k in ['RELAY_URL', 'FIREBASE_APP_ID', 'FIREBASE_API_KEY', 'FIREBASE_PROJECT_ID', 'FIREBASE_SENDER_ID', 'GOOGLE_WEB_CLIENT_ID']}
     if any(not v or re.search(r'your[-_]|example|placeholder|changeme|localhost|\.invalid', v, re.I) for v in values.values()):
         raise ValueError('Release configuration contains missing or placeholder values')

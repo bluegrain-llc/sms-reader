@@ -52,7 +52,7 @@ class AdministrationActivity : AccountActivity() {
         connectionCode(intent)?.let { pendingConnectionCode = it; linkVersion++ }
     }
     private fun connectionCode(intent: Intent): String? = if (intent.action == Intent.ACTION_VIEW)
-        intent.dataString?.let { ConnectionLinks.code(it, BuildConfig.RELAY_URL) } else null
+        intent.dataString?.let { ConnectionLinks.code(it, BuildConfig.RELAY_URL, BuildConfig.RELAY_LINK_SCHEME) } else null
 
     override fun onResume() { super.onResume(); vm.foreground(true) }
     override fun onStop() { vm.foreground(false); super.onStop() }

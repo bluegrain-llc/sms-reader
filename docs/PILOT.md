@@ -74,6 +74,60 @@ cloud delivery, release pipeline and deletion changes are deployed and verified.
 API 26/33/36 UI CI proves only the synthetic regression suite. Physical carrier,
 FCM, system-consent denial/approval and two-phone tests remain separate gates.
 
+## Isolated staging candidate
+
+Use the separate `staging` build type for acceptance against a dedicated staging
+Firebase project. It installs as `com.bluegrain.smsrelay.staging` alongside the
+production app, with **Inbox staging** and **Administration staging** launcher
+labels. Its HTTPS App Links use only the staging service host and its fallback
+scheme is `smsrelay-staging`; production retains `smsrelay`.
+
+Register that distinct package and the actual staging signer's SHA-1/SHA-256 in
+the staging Firebase project. A [package/SHA-1 OAuth registration is global](https://support.google.com/firebase/answer/6401008);
+registering the production package with the same certificate in another project
+can collide. Do not remove production OAuth registrations to work around this.
+Enable Google sign-in and use the staging project's OAuth **web** client ID.
+
+Supply the inputs in [staging.properties.example](../android/staging.properties.example)
+privately through environment variables or Gradle properties. Staging never falls
+back to production Firebase, relay or signing inputs. `bash scripts/build-staging.sh`
+runs debug/staging unit tests, staging lint and a signed, shrunk APK/AAB build.
+Outputs are under ignored `artifacts/staging/`; production build tasks and paths
+are unchanged. A staging-only key can establish staging functionality, but cannot
+establish pilot upgrades, production signing continuity or Play acceptance.
+
+If the cloud baseline needs FCM registrations before owner sign-in, the explicit
+`--with-setup` build option also produces a **debuggable setup APK** with the same
+isolated staging package, Firebase project and staging signer. On a specifically
+selected phone, use that setup APK before Google sign-in; private ADB `run-as`
+capture can read Firebase's token preferences directly into an owner-only host
+file. Never print tokens, copy them into prompts, or add export controls to the
+ordinary app. Keep the disposable owner free of registered devices/grants until
+the cloud runner's own setup step. Then update in place to the non-debuggable
+staging candidate without clearing application storage, and verify its installed
+APK hash before physical acceptance. The setup APK is rejected by the acceptance
+recorder and cannot establish signed-release or production acceptance.
+
+Deploy backend support for `ANDROID_PACKAGE_NAME=com.bluegrain.smsrelay.staging`
+and configure `ANDROID_SIGNING_SHA256S` with the actual staging certificate before
+testing links. Both backend runtimes default to the production package when that
+setting is omitted. Deployment smoke checks verify both package and certificates.
+To check public client configuration against Firebase, normalize the staging inputs
+to the unprefixed names expected by `scripts/verify-cloud-config.py`, set
+`ANDROID_PACKAGE_NAME=com.bluegrain.smsrelay.staging`, and select the staging
+`SERVICE`/`REGION` and authorized `CLOUDSDK_CORE_ACCOUNT`. The Firebase request's
+quota project is bound to that selected project. This verification must never
+select production implicitly.
+
+Initialize a **separate** acceptance file using `--package-name
+com.bluegrain.smsrelay.staging` and the staging APK, project and backend revision.
+The recorder verifies that package's installed bytes and records `packageName`;
+omitting the option continues to require the production package. Staging records
+and artifacts do not satisfy production Play, signing-continuity or upgrade gates.
+One physical phone is enough to start carrier/consent/lifecycle cases; the cases
+explicitly marked for two phones remain pending until two distinct phones take
+part. No case becomes passed merely by building or installing this candidate.
+
 ## Optional injected-SMS check
 
 An isolated Google APIs emulator can exercise simulated SMS reception and the real Google Play services consent dialog without a sender account or another phone. This is a separate instrumentation probe: it uses the production `ConsentGate` and `CodeExtractor`, but does not sign in, contact the production relay, receive FCM, or upload a result. It does not establish carrier delivery or consent behavior on a physical phone.

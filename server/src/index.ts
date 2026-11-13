@@ -40,6 +40,7 @@ const server = app(relay, {
   appleAppIds: (process.env.APPLE_APP_IDS ?? '').split(',').filter(Boolean),
   androidCertSha256: process.env.ANDROID_SIGNING_SHA256,
   androidCertSha256s: process.env.ANDROID_SIGNING_SHA256S ? JSON.parse(process.env.ANDROID_SIGNING_SHA256S) as string[] : undefined,
+  androidPackageName: process.env.ANDROID_PACKAGE_NAME,
   trustProxyHops: 1,
   origins: (process.env.ALLOWED_ORIGINS ?? '').split(',').filter(Boolean),
 }).listen(Number(process.env.PORT ?? 8080), '0.0.0.0', () => console.info('sms_relay_listening'));
