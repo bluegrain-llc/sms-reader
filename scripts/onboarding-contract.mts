@@ -20,6 +20,8 @@ const methods: [string,string,string,string,string?][] = [
  ['get','/v3/registration-sessions/{id}','reviewRegistration','OwnerSession'],
  ['post','/v3/registration-sessions/{id}/decision','decideRegistration','OwnerSession','RegistrationDecision'],
  ['get','/v3/services','listServices','OwnerSession'],
+ ['post','/v3/services','provisionService','OwnerSession','ServiceRegistration'],
+ ['get','/v3/service','validateTicket','ServiceCredential'],
  ['get','/v3/services/{id}','getService','OwnerSession'],
  ['patch','/v3/services/{id}','manageService','OwnerSession','ServiceUpdate'],
  ['delete','/v3/services/{id}','deleteService','OwnerSession'],
@@ -51,11 +53,11 @@ const methods: [string,string,string,string,string?][] = [
 const schemaRef = (name: string) => ({ $ref: `#/components/schemas/${name}` });
 const paths: Record<string,Record<string,unknown>> = {};
 for (const [verb,path,name,auth,body] of methods) {
-  const parameters: unknown[] = path.includes('{id}') ? [{ name: 'id', in: 'path', required: true, schema: { type:'string', pattern:'^[a-zA-Z0-9_-]{1,128}$' } }] : [];
+  const parameters: unknown[] = [...path.matchAll(/\{([^}]+)\}/g)].map(match => ({ name: match[1], in: 'path', required: true, schema: { type:'string', pattern:'^[a-zA-Z0-9_-]{1,128}$' } }));
   if (name === 'pollEvents') parameters.push({ name:'cursor',in:'query',required:false,schema:{type:'string',maxLength:128} });
   (paths[path] ??= {})[verb] = { operationId: name, security:[{[auth]:[]}], parameters,
     ...(body ? { requestBody: { required:true,content:{'application/json':{schema:schemaRef(body)}} } } : {}),
-    responses: Object.fromEntries([(verb==='post'&&['startRegistration','startPairing','startReusableConnection','requestSms','requestForm','registerWebhook'].includes(name))?'201':'200','400','401','403','404','409','410','429','503'].map(code=>[code,{description: code[0]==='2'?'Success':'Relay error; never log authentication headers or payloads',content:{'application/json':{schema:code[0]==='2'?{type: name === 'listServices' || name === 'listWebhooks' ? 'array' : 'object', ...(name === 'listServices' || name === 'listWebhooks' ? { items: {type:'object',additionalProperties:true} } : {additionalProperties:true})}:schemaRef('Error')}}}])) };
+    responses: Object.fromEntries([(verb==='post'&&['startRegistration','provisionService','startPairing','startReusableConnection','requestSms','requestForm','registerWebhook'].includes(name))?'201':'200','400','401','403','404','409','410','429','503'].map(code=>[code,{description: code[0]==='2'?'Success':'Relay error; never log authentication headers or payloads',content:{'application/json':{schema:code[0]==='2'?{type: name === 'listServices' || name === 'listWebhooks' ? 'array' : 'object', ...(name === 'listServices' || name === 'listWebhooks' ? { items: {type:'object',additionalProperties:true} } : {additionalProperties:true})}:schemaRef('Error')}}}])) };
 }
 paths['/oauth/register'] = { post: {operationId:'registerOAuthClient',security:[],requestBody:{required:true,content:{'application/json':{schema:schemaRef('OAuthClient')}}},responses:{'201':{description:'Client registered; confidential client secret is returned once.'},'400':{description:'Invalid client metadata'},'429':{description:'Registration limit'}}} };
 paths['/oauth/authorize'] = {get:{operationId:'startHostedAuthorization',security:[],parameters:Object.entries((schemas.OAuthAuthorization as any).properties).map(([name,schema])=>({name,in:'query',required:name!=='state',schema})),responses:{'303':{description:'Redirect to focused sign-in and consent; no access is granted.'},'400':{description:'Invalid authorization request'},'503':{description:'OAuth is not configured'}}}};

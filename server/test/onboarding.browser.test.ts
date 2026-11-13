@@ -19,7 +19,7 @@ test.beforeEach(async ({ page }) => {
   await page.route('https://www.gstatic.com/firebasejs/**/firebase-auth.js',r=>r.fulfill({contentType:'application/javascript',body:`const user={email:'my-own-account@example.test',getIdToken:async()=> 'owner-session'}; const auth={currentUser:user};export const getAuth=()=>auth;export class GoogleAuthProvider{};export const signInWithPopup=async()=>({});export const signInWithRedirect=async()=>({});export const getRedirectResult=async()=>({});export const onAuthStateChanged=(a,fn)=>{queueMicrotask(()=>fn(user));};export const setPersistence=async()=>{};export const browserLocalPersistence={};`}));
 });
 const review = { sessionId:'public-session', serviceId:'public-service', name:'My personal agent', purpose:'Ask for decisions', capabilities:['forms','sms'], status:'pending', expiresAt:Date.now()+600000, expiresInDays:null, comparisonCode:'123456',connectionId:null };
-test('registration defaults owner access off, needs one confirmation, no phone setup', async ({page})=>{
+test('registration offers no owner-access control, needs one confirmation, no phone setup', async ({page})=>{
   let approvals=0;
   await page.route('**/v3/**',async r=>{
     if(r.request().url().endsWith('/decision')){approvals++;const body=r.request().postDataJSON();expect(body.selfAccess).toBe(false);await r.fulfill({json:{...review,status:'approved',connectionId:null}});}
@@ -28,7 +28,7 @@ test('registration defaults owner access off, needs one confirmation, no phone s
   await page.goto(origin+'/register/public-session'); await expect(page.locator('#review')).toBeVisible();
   await expect(page.locator('#operator')).toBeVisible();
   await page.screenshot({path:'artifacts/onboarding-desktop.png',fullPage:true});
-  await expect(page.locator('#self')).not.toBeChecked();await expect(page.locator('#permissions')).toBeHidden();
+  await expect(page.locator('#self')).toHaveCount(0);await expect(page.locator('#permissions')).toBeHidden();
   await page.locator('#confirm').click();await expect(page.locator('#status')).toContainText('Service registered');await expect(page.locator('#phone')).toBeHidden();expect(approvals).toBe(1);
 });
 test('recipient can narrow permissions; failed decisions preserve selection and retry safely',async({page})=>{
@@ -44,15 +44,25 @@ test('recipient can narrow permissions; failed decisions preserve selection and 
   await expect(page.locator('#status')).toContainText('Setup complete');expect(approvals).toBe(2);
   expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
 });
-test('owner self access and phone handoff occur after explicit approval',async({page})=>{
-  let approvals=0;
+test('owner connects separately after registration before phone handoff',async({page})=>{
+  const approvals:string[]=[];
   await page.route('**/v3/**',async r=>{
-    if(r.request().url().endsWith('/decision')){approvals++;expect(r.request().postDataJSON().selfAccess).toBe(true);await r.fulfill({json:{...review,status:'approved',connectionId:'connection'}});}
-    else if(r.request().url().endsWith('/connections/connection'))await r.fulfill({json:{setup:'phone_setup_needed',receivingDeviceAvailable:false,revoked:false}});
+    const url=r.request().url();
+    if(url.endsWith('/decision')){
+      const registering=url.includes('/registration-sessions/');
+      approvals.push(registering?'register':'pair');
+      expect(r.request().postDataJSON().selfAccess).toBe(registering?false:undefined);
+      await r.fulfill({json:{...review,status:'approved',connectionId:registering?null:'connection'}});
+    } else if(url.endsWith('/connections/connection'))await r.fulfill({json:{setup:'phone_setup_needed',receivingDeviceAvailable:false,revoked:false}});
     else await r.fulfill({json:review});
   });
-  await page.goto(origin+'/register/public-session');await expect(page.locator('#review')).toBeVisible();await page.locator('#self').check();await expect(page.locator('#permissions')).toBeVisible();expect(approvals).toBe(0);
-  await page.locator('#confirm').click();await expect(page.locator('#phone')).toBeVisible();expect(approvals).toBe(1);
+  await page.goto(origin+'/register/public-session');await expect(page.locator('#review')).toBeVisible();
+  await expect(page.getByText('Also allow this service to send requests to me')).toHaveCount(0);
+  await page.locator('#confirm').click();await expect(page.locator('#status')).toContainText('Service registered');
+  await expect(page.locator('#phone')).toBeHidden();expect(approvals).toEqual(['register']);
+  await page.goto(origin+'/pair/public-session');await expect(page.locator('#permissions')).toBeVisible();
+  expect(approvals).toEqual(['register']);await page.locator('#confirm').click();
+  await expect(page.locator('#phone')).toBeVisible();expect(approvals).toEqual(['register','pair']);
 });
 test('permanent link resumes one approval attempt through reopening',async({page})=>{
   const attempts:string[]=[];let approvals=0;

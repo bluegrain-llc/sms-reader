@@ -32,7 +32,7 @@ class OnboardingScreenTest {
         compose.waitForIdle()
     }
 
-    @Test fun registrationDefaultsToNoOwnerAccessAndNeedsOneConfirmation() {
+    @Test fun registrationOffersNoOwnerAccessAndNeedsOneConfirmation() {
         val decisions = mutableListOf<JSONObject>()
         screen("register") { method, _, body ->
             if (method == "GET") review() else {
@@ -40,7 +40,7 @@ class OnboardingScreenTest {
                 review("approved")
             }
         }
-        compose.onNodeWithText("Also allow this service to send requests to me").assertIsOff()
+        compose.onNodeWithText("Also allow this service to send requests to me").assertDoesNotExist()
         compose.onNodeWithText("Information and decisions through forms").assertDoesNotExist()
         assertTrue(decisions.isEmpty())
         compose.onNode(hasText("Register service") and hasClickAction()).performScrollTo().performClick()
@@ -49,23 +49,23 @@ class OnboardingScreenTest {
         assertFalse(decisions.single().getBoolean("selfAccess"))
     }
 
-    @Test fun ownerAccessAndSelectedCapabilitiesAreApprovedAtomically() {
+    @Test fun separateConnectionApprovesSelectedCapabilities() {
         val decisions = mutableListOf<JSONObject>()
-        screen("register") { method, _, body ->
-            if (method == "GET") review() else {
+        screen("pair") { method, path, body ->
+            if (path.startsWith("/v3/connections/")) JSONObject().put("setup", "setup_complete")
+            else if (method == "GET") review() else {
                 decisions.add(JSONObject(body.toString()))
-                review("approved")
+                review("approved").put("connectionId", "connection")
             }
         }
-        compose.onNodeWithText("Also allow this service to send requests to me").performClick().assertIsOn()
         compose.onNodeWithText("Upcoming SMS codes, shared with your approval").assertIsOn().performClick().assertIsOff()
         compose.onNodeWithText("Until disconnected").assertIsSelected()
         compose.onNodeWithText("7 days").performScrollTo().performClick().assertIsSelected()
         assertTrue(decisions.isEmpty())
-        compose.onNode(hasText("Register service") and hasClickAction()).performScrollTo().performClick()
+        compose.onNode(hasText("Connect") and hasClickAction()).performScrollTo().performClick()
         compose.waitForIdle()
         assertEquals(1, decisions.size)
-        assertTrue(decisions.single().getBoolean("selfAccess"))
+        assertFalse(decisions.single().has("selfAccess"))
         assertEquals("[\"forms\"]", decisions.single().getJSONArray("capabilities").toString())
         assertEquals(7, decisions.single().getInt("expiresInDays"))
     }

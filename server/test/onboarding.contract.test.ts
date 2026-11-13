@@ -45,7 +45,12 @@ async function register(runtime = 0, self = false, capabilities = ['forms']) {
   const credential = secrets('smss'), pending = secrets('smsreg');
   const input = { name: 'Personal agent', purpose: 'Ask for decisions', deliveryPublicKey: publicKey, credentialHash: hash(credential), capabilities };
   const session = await call(runtime, '/v3/registration-sessions', pending, input, 'POST', 201);
-  const approved = await call(1 - runtime, `/v3/registration-sessions/${session.sessionId}/decision`, owner(uid), decision(self, capabilities));
+  const approved = await call(1 - runtime, `/v3/registration-sessions/${session.sessionId}/decision`, owner(uid), decision(false, capabilities));
+  if (self) {
+    const pairing = await call(runtime, '/v3/service/pairing-sessions', credential, {capabilities,expiresInDays:null,idempotencyKey:randomUUID()}, 'POST', 201);
+    const connected = await call(1-runtime, `/v3/pairing-sessions/${pairing.sessionId}/decision`, owner(uid), {decision:'approved',capabilities,expiresInDays:null});
+    approved.connectionId = connected.connectionId;
+  }
   return { credential, pending, publicKey, privateKey, session, approved, input };
 }
 async function connect(s: Awaited<ReturnType<typeof register>>, runtime = 0, capabilities = ['forms'], externalAccountRef?: string) {
@@ -87,7 +92,7 @@ for (const runtime of [0, 1]) {
       await call(runtime, '/v3/registration-sessions', secrets('smsreg'), s.input, 'POST', 409);
       const recovered = await call(runtime, '/v3/registration-sessions', s.pending, s.input, 'POST', 201);
       assert.equal(recovered.status, 'approved'); assert.equal(recovered.serviceId, s.session.serviceId);
-      assert.equal(recovered.connectionId, s.approved.connectionId);
+      assert.equal(recovered.connectionId, null);
       assert.equal((await call(1-runtime, '/v3/registration-sessions/current', s.pending)).serviceId, s.session.serviceId);
       await call(runtime, '/v3/registration-sessions', s.pending, {...s.input,name:'Changed'}, 'POST', 409);
       await db.collection('registrationSessions').doc(s.session.sessionId).delete();
@@ -107,7 +112,7 @@ for (const runtime of [0, 1]) {
     await call(runtime, '/v3/registration-sessions/current', s.pending, undefined, 'GET', 429);
     time += 5001;
   });
-  test(`runtime ${runtime}: owner access is atomic and offline credential delivery interoperates`, async () => {
+  test(`runtime ${runtime}: owner pairing is separately approved and offline credential delivery interoperates`, async () => {
     const s = await register(runtime, true);
     assert.ok(s.approved.connectionId);
     const { d, payload } = await consume(s, runtime);
@@ -220,11 +225,14 @@ test('all SDK broker bindings share durable registration, approval and credentia
     const common={directory,profile:'sdk-conformance',relayUrl:bases[0],allowHttpLoopback:true};
     const start=await broker({...common,operation:'startRegistration',input:{name:'SDK agent',purpose:'Decisions'}});
     assert.ok(start.link.startsWith(bases[0]));assert.ok(!JSON.stringify(start).includes('Token'));
-    await call(1,`/v3/registration-sessions/${start.sessionId}/decision`,owner(uid),decision(true));
+    await call(1,`/v3/registration-sessions/${start.sessionId}/decision`,owner(uid),decision(false));
+    const approved=await broker({...common,operation:'pollRegistration'});assert.equal(approved.status,'approved');
+    const pairing=await broker({...common,operation:'startPairing'});
+    await call(1,`/v3/pairing-sessions/${pairing.sessionId}/decision`,owner(uid),{decision:'approved',capabilities:['forms'],expiresInDays:null});
     const invalid=db.batch();
     for(let i=0;i<100;i++) {const id=`000-invalid-${String(i).padStart(3,'0')}`;invalid.set(db.collection('credentialDeliveries').doc(id),{id,serviceId:start.serviceId,ownerId:uid,connectionId:'missing',grantId:'missing',keyId:'missing',envelope:'discarded',expiresAt:time+HISTORY,acknowledged:false,purgeAt:new Date(time+HISTORY)});}
     await invalid.commit();
-    const approved=await broker({...common,operation:'pollRegistration'});assert.equal(approved.status,'approved');
+    await broker({...common,operation:'pollPairing'});
     const ids=await broker({...common,operation:'listConnections'});assert.equal(ids.length,1);
     const status=await broker({...common,operation:'status',connectionId:ids[0]});assert.deepEqual(status.capabilities,['forms']);
     const resumed=await broker({...common,operation:'resume'});assert.equal(resumed.status,'registered');
@@ -574,8 +582,12 @@ for(const runtime of [0,1]) for(const [family,command] of Object.entries(sdkComm
       failSave=true;await invoke('startRegistration',{name:'SDK '+family,purpose:'Synthetic decisions'},undefined,false);failSave=false;
       const start=await invoke('startRegistration',{name:'SDK '+family,purpose:'Synthetic decisions',capabilities:['forms','sms']});
       assert.ok(start.link.startsWith(bases[runtime]));
-      const approved=await call(1-runtime,`/v3/registration-sessions/${start.sessionId}/decision`,owner(uid),decision(true,['forms']));
+      await call(1-runtime,`/v3/registration-sessions/${start.sessionId}/decision`,owner(uid),decision(false,['forms']));
       await invoke('pollRegistration');
+      assert.deepEqual(await invoke('listConnections'),[]);
+      const pairing=await invoke('startPairing',{capabilities:['forms'],expiresInDays:null});
+      const approved=await call(1-runtime,`/v3/pairing-sessions/${pairing.sessionId}/decision`,owner(uid),{decision:'approved',capabilities:['forms'],expiresInDays:null});
+      await invoke('pollPairing');
       const ids=await invoke('listConnections');assert.deepEqual(ids,[approved.connectionId]);
       const connection=ids[0];
       assert.deepEqual((await invoke('status',{},connection)).capabilities,['forms']);
@@ -682,5 +694,43 @@ for (const runtime of [0, 1]) {
       await call(runtime,`/v3/connections/${paired.approved.connectionId}`,owner(recipient),undefined,'DELETE');
       await assert.rejects(adapter.executeToolUse({toolUseId:'disconnected',name:'inspect_request',input:{requestId}}));
     } finally {await client.close();}
+  });
+}
+
+for (const runtime of [0,1]) {
+  test(`runtime ${runtime}: manual provisioning is idempotent, validates tickets, and never grants access`,async()=>{
+    const key=await generateKeyPair('ECDH-ES',{crv:'P-256',extractable:true});
+    const publicKey=await exportJWK(key.publicKey), credential=secrets('smss'), operator='manual-'+randomUUID();
+    const input={name:'Manual agent',purpose:'Portable ticket',capabilities:['forms','sms'],credentialHash:hash(credential),deliveryPublicKey:publicKey};
+    const service=await call(runtime,'/v3/services',owner(operator),input,'POST',201);
+    const expectedKeyId=createHash('sha256').update(JSON.stringify({kty:publicKey.kty,crv:publicKey.crv,x:publicKey.x,y:publicKey.y})).digest('hex');
+    assert.equal(service.deliveryKeyId,expectedKeyId);
+    assert.equal((await call(1-runtime,'/v3/services',owner(operator),input,'POST',201)).serviceId,service.serviceId);
+    assert.equal((await call(1-runtime,'/v3/service',credential)).deliveryKeyId,expectedKeyId);
+    assert.deepEqual((await call(runtime,'/v3/service/deliveries',credential)).deliveries,[]);
+    await call(runtime,'/v1/requests',credential,{purpose:'No access',idempotencyKey:randomUUID()},'POST',401);
+    await call(runtime,'/v3/services',owner('different-owner'),input,'POST',409);
+    await call(runtime,'/v3/services',owner(operator),{...input,purpose:'Conflicting declaration'},'POST',409);
+    const serviceRecord=(await db.collection('services').doc(service.serviceId).get()).data();
+    assert.ok(!JSON.stringify(serviceRecord).includes(credential));assert.ok(!JSON.stringify(serviceRecord).includes('privateKey'));
+    const rotatedKey=await exportJWK((await generateKeyPair('ECDH-ES',{crv:'P-256',extractable:true})).publicKey);
+    const rotatedKeyId=createHash('sha256').update(JSON.stringify({kty:rotatedKey.kty,crv:rotatedKey.crv,x:rotatedKey.x,y:rotatedKey.y})).digest('hex');
+    await call(runtime,'/v3/service',credential,{deliveryPublicKey:rotatedKey,retireKeyId:expectedKeyId},'PATCH');
+    assert.equal((await call(1-runtime,'/v3/service',credential)).deliveryKeyId,rotatedKeyId);
+    const next=secrets('smss');await call(runtime,'/v3/service',credential,{credentialHash:hash(next)},'PATCH');
+    await call(1-runtime,'/v3/service',credential,undefined,'GET',401);
+    assert.equal((await call(1-runtime,'/v3/service',next)).serviceId,service.serviceId);
+    await call(runtime,`/v3/services/${service.serviceId}`,owner(operator),{active:false},'PATCH');
+    await call(1-runtime,'/v3/service',next,undefined,'GET',404);
+    await call(runtime,`/v3/services/${service.serviceId}`,owner(operator),{active:true},'PATCH');
+    await db.collection('accounts').doc(operator).set({deleting:true});
+    await call(1-runtime,'/v3/service',next,undefined,'GET',403);
+  });
+  test(`runtime ${runtime}: combined registration access is rejected before creating a grant`,async()=>{
+    const pair=await generateKeyPair('ECDH-ES',{crv:'P-256',extractable:true}),credential=secrets('smss');
+    const session=await call(runtime,'/v3/registration-sessions',secrets('smsreg'),{name:'Separate approval',purpose:'Register only',capabilities:['forms'],credentialHash:hash(credential),deliveryPublicKey:await exportJWK(pair.publicKey)},'POST',201);
+    await call(1-runtime,`/v3/registration-sessions/${session.sessionId}/decision`,owner(uid),decision(true),'POST',400);
+    const approved=await call(runtime,`/v3/registration-sessions/${session.sessionId}/decision`,owner(uid),decision(false));
+    assert.equal(approved.connectionId,null);assert.deepEqual((await call(runtime,'/v3/service/deliveries',credential)).deliveries,[]);
   });
 }

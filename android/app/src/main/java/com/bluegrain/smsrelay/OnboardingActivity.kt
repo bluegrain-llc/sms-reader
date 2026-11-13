@@ -76,7 +76,6 @@ private fun OnboardingContent(target: OnboardingLink, attempt: String, account: 
     var retry by remember { mutableIntStateOf(0) }
     var statusText by remember { mutableStateOf("") }
     var needsPhone by remember { mutableStateOf(false) }
-    var self by rememberSaveable(target, attempt) { mutableStateOf(false) }
     var forms by rememberSaveable(target, attempt) { mutableStateOf(true) }
     var sms by rememberSaveable(target, attempt) { mutableStateOf(true) }
     var duration by rememberSaveable(target, attempt) { mutableStateOf<Int?>(null) }
@@ -133,13 +132,13 @@ private fun OnboardingContent(target: OnboardingLink, attempt: String, account: 
     fun decide(approved: Boolean) {
         if (busy || session == null) return
         val chosen = caps.filter { (it == "forms" && forms) || (it == "sms" && sms) }
-        if (approved && (!registration || self) && chosen.isEmpty()) { error = "Select at least one permission."; return }
+        if (approved && !registration && chosen.isEmpty()) { error = "Select at least one permission."; return }
         scope.launch {
             busy = true; error = null
             try {
                 val body = JSONObject().put("decision", if (approved) "approved" else "denied")
                     .put("capabilities", JSONArray(chosen.ifEmpty { caps })).put("expiresInDays", duration ?: JSONObject.NULL)
-                if (registration) body.put("selfAccess", approved && self)
+                if (registration) body.put("selfAccess", false)
                 if (management) {
                     if (approved) {
                         val updated = request("PATCH", "/v3/connections/${target.id}", JSONObject().put("capabilities", JSONArray(chosen)).put("expiresAt", duration?.let { System.currentTimeMillis() + it * 86_400_000L } ?: JSONObject.NULL))
@@ -168,8 +167,7 @@ private fun OnboardingContent(target: OnboardingLink, attempt: String, account: 
                 if (oauth && session != null) Text("Requested by ${session.optString("clientName")} (${session.optString("clientOrigin")}). These app details are supplied by the app operator.")
                 session?.nullString("comparisonCode")?.let { Text("Compare code $it", style = MaterialTheme.typography.titleLarge) }
                 if (pending) {
-                    if (registration) { Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).toggleable(self, enabled = !busy, role = Role.Switch, onValueChange = { self = it })) { Switch(checked = self, onCheckedChange = null, enabled = !busy); Spacer(Modifier.width(12.dp)); Text("Also allow this service to send requests to me") } }
-                    if (!registration || self) {
+                    if (!registration) {
                         Text("Allow requests for", style = MaterialTheme.typography.titleMedium)
                         if ("forms" in caps) Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).toggleable(forms, enabled = !busy, role = Role.Checkbox, onValueChange = { forms = it })) { Checkbox(checked = forms, onCheckedChange = null, enabled = !busy); Text("Information and decisions through forms", Modifier.padding(top = 12.dp)) }
                         if ("sms" in caps) Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).toggleable(sms, enabled = !busy, role = Role.Checkbox, onValueChange = { sms = it })) { Checkbox(checked = sms, onCheckedChange = null, enabled = !busy); Text("Upcoming SMS codes, shared with your approval", Modifier.padding(top = 12.dp)) }

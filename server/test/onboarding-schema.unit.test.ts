@@ -9,3 +9,9 @@ test('published input schemas preserve runtime defaults and explicit capability 
   assert.ok(!schemas.FormRequest.required.includes('fields'));
   assert.equal(schemas.OAuthDecision.properties.capabilities.uniqueItems,true);
 });
+test('published provisioning response matches the created status required by the HTTP contract',()=>{
+  const contract=JSON.parse(readFileSync(new URL('../../contracts/onboarding.openapi.json',import.meta.url),'utf8'));
+  const responses=contract.paths['/v3/services'].post.responses;
+  assert.ok(responses['201']);
+  assert.ok(!responses['200']);
+});

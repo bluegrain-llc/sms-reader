@@ -28,7 +28,7 @@ try {
   } else if(operation==='pollPairing') {
     if(!service.state.pairing)throw Error('pairing_required');
     value=await service.client.request(`/v3/service/pairing-sessions/${service.state.pairing.sessionId}`,service.state.serviceToken);
-    if(value.status==='approved')await service.consumeDeliveries();
+    if(value.status==='approved'){await service.consumeDeliveries();if(service.state.connections[value.connectionId]){service.state.pairing=null;service.state.pairingInput=null;await service.save();}}
   } else if(operation==='listConnections') value=Object.keys(service.state.connections);
   else if(operation==='restartRegistration') {
     if(service.state.registered)throw Error('service_already_registered');

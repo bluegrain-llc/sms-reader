@@ -19,11 +19,11 @@ function fail(error) {
   status(expired ? 'This session expired. Start again and review access again.' : error.code === 'service_unavailable' ? 'This service is unavailable.' : 'Could not complete this step. Try again to check the current state.');
   $('retry').hidden = expired; $('restart').hidden = kind !== 'services' || !expired;
 }
-function lock(value) { busy = value; for (const id of ['confirm', 'cancel', 'self', 'forms', 'sms', 'duration', 'retry', 'restart', 'continue-to-app', 'check-phone']) $(id).disabled = value; }
+function lock(value) { busy = value; for (const id of ['confirm', 'cancel', 'forms', 'sms', 'duration', 'retry', 'restart', 'continue-to-app', 'check-phone']) $(id).disabled = value; }
 async function run(fn) { if (busy) return; lock(true); $('retry').hidden = true; try { await fn(); } catch (e) { retry = fn; fail(e); } finally { lock(false); } }
 const days = () => $('duration').value === '' ? null : Number($('duration').value);
 const selection = () => ['forms', 'sms'].filter(c => $(c).checked && (session.availableCapabilities || session.capabilities).includes(c));
-function permissions() { $('permissions').hidden = registration && !$('self').checked; }
+function permissions() { $('permissions').hidden = registration; }
 async function completed() {
   $('review').hidden = true;
   if (kind === 'services') { localStorage.removeItem(`relay-onboarding:${auth.currentUser.uid}:${destination}`); $('restart').hidden = false; }
@@ -77,7 +77,7 @@ async function load() {
   if (oauth) $('client').textContent = `Requested by ${session.clientName} (${session.clientOrigin}). These app details are supplied by the app operator.`;
   $('open-app').href = `intent://${location.host}${location.pathname}#Intent;scheme=https;package=com.bluegrain.smsrelay;end`;
   if (session.status !== 'pending') { await completed(); return; }
-  $('review').hidden = false; $('self-label').hidden = !registration; $('confirm').textContent = registration ? 'Register service' : management ? 'Save permissions' : 'Connect'; $('cancel').textContent = management ? 'Disconnect' : 'Cancel';
+  $('review').hidden = false; $('confirm').textContent = registration ? 'Register service' : management ? 'Save permissions' : 'Connect'; $('cancel').textContent = management ? 'Disconnect' : 'Cancel';
   for (const cap of ['forms', 'sms']) { $(cap).checked = session.capabilities.includes(cap); $(cap).disabled = !(session.availableCapabilities || session.capabilities).includes(cap); $(cap).parentElement.hidden = !(session.availableCapabilities || session.capabilities).includes(cap); }
   for (const option of [...$('duration').options]) option.hidden = !management && session.expiresInDays != null && (option.value === '' || Number(option.value) > session.expiresInDays);
   if (session.expiresInDays != null && ![...$('duration').options].some(o => Number(o.value) === session.expiresInDays && o.value !== '')) $('duration').add(new Option(`${session.expiresInDays} days`, String(session.expiresInDays)));
@@ -102,10 +102,9 @@ async function returnToClient() {
   catch (error) { returning = false; throw error; }
 }
 $('continue-to-app').onclick = () => run(returnToClient);
-$('self').onchange = permissions;
 $('confirm').onclick = () => run(async () => {
   const capabilities = selection();
-  if ((!registration || $('self').checked) && !capabilities.length) { status('Select at least one permission.'); return; }
+  if (!registration && !capabilities.length) { status('Select at least one permission.'); return; }
   if (management) {
     await api(`/v3/connections/${destination}`, { capabilities, expiresAt: days() === null ? null : Date.now() + days() * 86400000 }, 'PATCH'); status('Permissions saved.'); return;
   }
@@ -113,7 +112,7 @@ $('confirm').onclick = () => run(async () => {
     const result = await api(`/v3/oauth/sessions/${destination}/decision`, { decision: 'approved', capabilities, expiresInDays: days() });
     clearTimeout(monitor); session = { ...session, ...result }; await completed(); return;
   }
-  session = await api(`/v3/${registration ? 'registration' : 'pairing'}-sessions/${session.sessionId}/decision`, { decision: 'approved', ...(registration ? { selfAccess: $('self').checked } : {}), capabilities: capabilities.length ? capabilities : session.capabilities, expiresInDays: days() });
+  session = await api(`/v3/${registration ? 'registration' : 'pairing'}-sessions/${session.sessionId}/decision`, { decision: 'approved', ...(registration ? { selfAccess: false } : {}), capabilities: capabilities.length ? capabilities : session.capabilities, expiresInDays: days() });
   await completed();
 });
 $('cancel').onclick = () => run(async () => { if (oauth) { const result = await api(`/v3/oauth/sessions/${destination}/decision`, { decision: 'denied', capabilities: session.capabilities, expiresInDays: null }); clearTimeout(monitor); session = {...session,...result}; await returnToClient(); return; } if (management) { await api(`/v3/connections/${destination}`, undefined, 'DELETE'); $('review').hidden = true; status('Disconnected.'); return; } session = await api(`/v3/${registration ? 'registration' : 'pairing'}-sessions/${session.sessionId}/decision`, { decision: 'denied', ...(registration ? { selfAccess: false } : {}), capabilities: session.capabilities, expiresInDays: session.expiresInDays ?? null }); await completed(); });

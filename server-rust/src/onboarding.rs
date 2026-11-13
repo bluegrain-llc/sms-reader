@@ -86,7 +86,7 @@ fn select(
     )
 }
 fn service_view(s: &Value) -> Value {
-    json!({"serviceId":s["id"],"name":s["name"],"purpose":s["purpose"],"capabilities":s["capabilities"],"active":flag(s,"active")&&!flag(s,"deleted"),"nameIsOperatorSupplied":true,"servicePath":format!("/services/{}",text(s,"id"))})
+    json!({"serviceId":s["id"],"name":s["name"],"purpose":s["purpose"],"capabilities":s["capabilities"],"active":flag(s,"active")&&!flag(s,"deleted"),"deliveryKeyId":s["deliveryKeyId"],"nameIsOperatorSupplied":true,"servicePath":format!("/services/{}",text(s,"id"))})
 }
 fn status(p: &Value, now: i64) -> Value {
     if p["status"] == "pending" && num(p, "expiresAt") <= now {
@@ -234,7 +234,7 @@ impl Relay {
     ) -> Result<Value> {
         // Validate at the boundary; defaults and decoded Unicode code-point lengths match the TS input schemas.
         match method.as_str() {
-            "register" => {
+            "register" | "provision" => {
                 strict(
                     &input,
                     &[
@@ -258,7 +258,7 @@ impl Relay {
                     "invalid_input",
                 )?;
                 ensure(
-                    regex(r"^smsreg_[A-Za-z0-9_-]{43}$", &auth),
+                    method == "provision" || regex(r"^smsreg_[A-Za-z0-9_-]{43}$", &auth),
                     401,
                     "invalid_registration_credential",
                 )?;
@@ -294,7 +294,11 @@ impl Relay {
                 let mut fields = vec!["decision", "capabilities", "expiresInDays"];
                 if method == "registrationDecide" {
                     fields.push("selfAccess");
-                    ensure(input["selfAccess"].is_boolean(), 400, "invalid_input")?;
+                    ensure(
+                        input.get("selfAccess").is_none() || input["selfAccess"] == false,
+                        400,
+                        "invalid_input",
+                    )?;
                 }
                 strict(&input, &fields)?;
                 ensure(
@@ -409,6 +413,22 @@ impl Relay {
         self.store.tx(move|tx|{let(s,method,auth,id,input,random_service_id)=(s.clone(),method.clone(),auth.clone(),id.clone(),input.clone(),random_service_id.clone());Box::pin(async move{
             let now=s.now();
             match method.as_str() {
+                "ticketService"=>Ok(service_view(&s.service_auth(tx,&auth).await?)),
+                "provision"=>{
+                    s.account(tx,&auth).await?;
+                    let receipt=tx.get("serviceCredentials",text(&input,"credentialHash")).await?;
+                    if !receipt.is_null(){
+                        let service=tx.get("services",text(&receipt,"serviceId")).await?;
+                        ensure(!service.is_null()&&text(&service,"ownerId")==auth&&!flag(&service,"deleted")&&service["credentialHash"]==input["credentialHash"]&&service["name"]==input["name"]&&service["purpose"]==input["purpose"]&&text(&service,"deliveryKeyId")==key_id(&input["deliveryPublicKey"])&&same_caps(&service["capabilities"],&input["capabilities"]),409,"idempotency_conflict")?;
+                        return Ok(service_view(&service));
+                    }
+                    let owned=tx.query(Query::new("services").eq("ownerId",auth.clone()).eq("deleted",false).limit(100)).await?;ensure(owned.len()<100,409,"service_limit_reached")?;
+                    let service=json!({"id":random_service_id,"ownerId":auth,"name":input["name"],"purpose":input["purpose"],"capabilities":input["capabilities"],"active":true,"deleted":false,"credentialHash":input["credentialHash"],"deliveryKeyId":key_id(&input["deliveryPublicKey"]),"createdAt":now});
+                    tx.create("services",text(&service,"id"),service.clone())?;
+                    tx.create("serviceCredentials",text(&service,"credentialHash"),json!({"ownerId":auth,"serviceId":service["id"]}))?;
+                    tx.create("serviceDeliveryKeys",&format!("{}_{}",text(&service,"id"),text(&service,"deliveryKeyId")),json!({"id":service["deliveryKeyId"],"serviceId":service["id"],"ownerId":auth,"publicKey":input["deliveryPublicKey"],"retired":false}))?;
+                    Ok(service_view(&service))
+                },
                 "register"=>{
                     let session_id=hash(&auth);let old=tx.get("registrationSessions",&session_id).await?;
                     if !old.is_null(){for p in ["name","purpose","credentialHash"]{ensure(old[p]==input[p],409,"idempotency_conflict")?;}ensure(key_id(&old["deliveryPublicKey"])==key_id(&input["deliveryPublicKey"])&&same_caps(&old["capabilities"],&input["capabilities"]),409,"idempotency_conflict")?;return Ok(registration_view(&old,now));}
@@ -433,11 +453,9 @@ impl Relay {
                     ensure(text(&p,"ownerId").is_empty()||text(&p,"ownerId")==auth,404,"registration_not_found")?;
                     if method=="registrationReview"||p["status"]!="pending"{return Ok(registration_view(&p,now));}
                     ensure(num(&p,"expiresAt")>now,410,"session_expired")?;select(&p["capabilities"],&input["capabilities"],&Value::Null,&input["expiresInDays"])?;
-                    if input["decision"]=="approved"{let owned=tx.query(Query::new("services").eq("ownerId",auth.clone()).eq("deleted",false).limit(100)).await?;ensure(owned.len()<100,409,"service_limit_reached")?;}
+                    if input["decision"]=="approved"{ensure(tx.get("serviceCredentials",text(&p,"credentialHash")).await?.is_null(),409,"credential_already_used")?;let owned=tx.query(Query::new("services").eq("ownerId",auth.clone()).eq("deleted",false).limit(100)).await?;ensure(owned.len()<100,409,"service_limit_reached")?;}
                     let service=json!({"id":p["serviceId"],"ownerId":auth,"name":p["name"],"purpose":p["purpose"],"capabilities":p["capabilities"],"active":true,"deleted":false,"credentialHash":p["credentialHash"],"deliveryKeyId":key_id(&p["deliveryPublicKey"]),"createdAt":now});
-                    let grant=if input["decision"]=="approved"&&flag(&input,"selfAccess"){Some(s.prepare_connection(tx,&auth,&service,&p["deliveryPublicKey"],&input["capabilities"],(&input["expiresInDays"],&Value::Null)).await?)}else{None};
-                    if input["decision"]=="approved"{tx.create("services",text(&service,"id"),service.clone())?;tx.create("serviceCredentials",text(&service,"credentialHash"),json!({"serviceId":service["id"],"ownerId":auth,"registrationId":p["id"],"registrationKeyId":service["deliveryKeyId"],"registrationConnectionId":grant.as_ref().map(|g|json!(g.0)).unwrap_or(Value::Null)}))?;tx.create("serviceDeliveryKeys",&format!("{}_{}",text(&service,"id"),text(&service,"deliveryKeyId")),json!({"id":service["deliveryKeyId"],"serviceId":service["id"],"ownerId":auth,"publicKey":p["deliveryPublicKey"],"retired":false}))?;}
-                    if let Some((id,writes))=grant{p["connectionId"]=json!(id);for(c,id,value)in writes{tx.set(c,&id,value)?;}}
+                    if input["decision"]=="approved"{tx.create("services",text(&service,"id"),service.clone())?;tx.create("serviceCredentials",text(&service,"credentialHash"),json!({"serviceId":service["id"],"ownerId":auth,"registrationId":p["id"],"registrationKeyId":service["deliveryKeyId"],"registrationConnectionId":null}))?;tx.create("serviceDeliveryKeys",&format!("{}_{}",text(&service,"id"),text(&service,"deliveryKeyId")),json!({"id":service["deliveryKeyId"],"serviceId":service["id"],"ownerId":auth,"publicKey":p["deliveryPublicKey"],"retired":false}))?;}
                     p["status"]=input["decision"].clone();p["ownerId"]=json!(auth);tx.set("registrationSessions",&session_id,p.clone())?;Ok(registration_view(&p,now))
                 },
                 "publicService"=>Ok(service_view(&s.active_service(tx,&id).await?)),
