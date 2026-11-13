@@ -52,21 +52,48 @@ export async function fixtureCredentials(cfg) {
 export function callbackOutcome(mode, attempt) {
   return { status: attempt === 1 && mode === 'fail-once' ? 503 : 204, timeout: attempt === 1 && mode === 'timeout-once' };
 }
-export async function clientDisconnectedBeforeResponse(response, deadlineMs = 11_000) {
-  return new Promise(resolve => {
-    const done = closed => { clearTimeout(timer); response.removeListener('close', close); resolve(closed); };
-    const close = () => done(!response.writableFinished);
-    const timer = setTimeout(() => done(false), deadlineMs);
-    response.once('close', close);
-    if (response.destroyed) close();
-  });
+export async function withholdCallbackResponse(delayMs = 11_000) {
+  const start = performance.now();
+  while (performance.now() - start < delayMs) {
+    await new Promise(resolve => setTimeout(resolve, Math.max(1, delayMs - (performance.now() - start))));
+  }
+  return Math.floor(performance.now() - start);
 }
-export function callbackReceipts(mode, receipts) {
+export function callbackReceipts(mode, receipts, sender) {
   const first = receipts.find(r => r.attempt === 1);
   const retry = receipts.find(r => r.attempt >= 2 && r.status === 204 && r.responseFinished === true);
   requireThat(first && retry && new Set(receipts.map(r => r.id)).size === 1, 'callback_retry_contract');
-  if (mode === 'timeout-once') requireThat(first.status === 204 && first.clientClosedBeforeResponse === true, 'callback_timeout_not_observed');
-  else requireThat(first.status === 503 && first.responseFinished === true, 'callback_rejection_not_observed');
+  if (mode === 'timeout-once') {
+    requireThat(first.status === 204 && Number.isFinite(first.withheldResponseMs) && first.withheldResponseMs >= 11_000 && sender?.senderTimeoutObserved === true, 'callback_timeout_not_observed');
+  } else requireThat(first.status === 503 && first.responseFinished === true, 'callback_rejection_not_observed');
+}
+const callbackFactTypes = { callbackReceiptCount: 'number', firstResponseWithheldMs: 'number', senderLeaseFailureObserved: 'boolean', senderTimeoutObserved: 'boolean' };
+export function callbackFacts(receipts, witness = {}) {
+  return { callbackReceiptCount: receipts.length, firstResponseWithheldMs: Math.max(0, Math.floor(receipts.find(r => r.attempt === 1)?.withheldResponseMs ?? 0)), senderLeaseFailureObserved: witness.failed === true, senderTimeoutObserved: witness.senderTimeoutObserved === true };
+}
+export function observeWebhookJob(documents, expected, witness, now = Date.now()) {
+  requireThat(documents.length <= 1, 'ambiguous_webhook_jobs');
+  if (!documents.length) return;
+  const document = documents[0], fields = document.fields ?? {};
+  const value = key => fields[key]?.stringValue;
+  requireThat(document.name?.endsWith('/deliveryOutbox/' + expected.id) && ['id', 'requestId', 'ownerId', 'eventId', 'hookId'].every(key => value(key) === expected[key]) && value('kind') === 'webhook', 'unrelated_webhook_job');
+  const attempts = Number(fields.attempts?.integerValue);
+  requireThat(Number.isSafeInteger(attempts) && attempts >= 0, 'invalid_webhook_attempt');
+  if (attempts === 1 && typeof value('lease') === 'string' && value('lease').length > 0) witness.claimed = true;
+  if (attempts === 1 && fields.lease?.nullValue === null && witness.claimed && !witness.failed) {
+    requireThat(Number.isSafeInteger(Number(fields.nextAt?.integerValue)), 'invalid_webhook_retry');
+    witness.failed = true; witness.failedAt = now;
+  }
+}
+export function proveWebhookTimeout(receipts, witness, logs, cfg, revision, startedAt) {
+  const first = receipts.find(r => r.attempt === 1);
+  requireThat(witness.claimed && witness.failed && Number.isFinite(witness.failedAt), 'sender_failure_transition_missing');
+  requireThat(first && first.at >= startedAt && first.at < witness.failedAt, 'sender_receipt_window_mismatch');
+  requireThat(logs.length === 1, 'ambiguous_sender_timeout');
+  const entry = logs[0], payload = entry.jsonPayload, resource = entry.resource;
+  const at = Date.parse(entry.timestamp);
+  requireThat(resource?.type === 'cloud_run_revision' && resource.labels?.project_id === cfg.projectId && resource.labels.service_name === cfg.service && resource.labels.revision_name === revision && payload?.event === 'delivery_attempt' && payload.kind === 'webhook' && payload.outcome === 'failed' && payload.category === 'timeout' && at >= first.at && at <= witness.failedAt && at < first.at + first.withheldResponseMs, 'sender_timeout_not_observed');
+  return { ...witness, senderTimeoutObserved: true };
 }
 export function readyIndexes(actual, required) {
   const fields = rows => rows.filter(field => field.fieldPath !== '__name__').map(({ fieldPath, order, arrayConfig }) => ({ fieldPath, ...(order ? { order } : {}), ...(arrayConfig ? { arrayConfig } : {}) }));
@@ -108,16 +135,24 @@ export async function settlePairings(userCodes, decide) {
   }
   return complete;
 }
-export async function stagingDocumentReader(cfg) {
-  const { stdout } = await execute('gcloud', ['auth', 'print-access-token', `--account=${cfg.account}`, `--project=${cfg.projectId}`, '--quiet'], { timeout: 30_000, maxBuffer: 64 * 1024, signal: cfg.signal });
+export async function stagingDocumentReader(cfg, { executeCommand = execute, fetchDocument = fetch } = {}) {
+  const { stdout } = await executeCommand('gcloud', ['auth', 'print-access-token', `--account=${cfg.account}`, `--project=${cfg.projectId}`, '--quiet'], { timeout: 30_000, maxBuffer: 64 * 1024, signal: cfg.signal });
   const token = stdout.trim();
-  return async (collection, id) => {
+  const read = async (collection, id) => {
     requireThat(['results', 'deliveryOutbox'].includes(collection) && /^[a-f0-9]{64}$/.test(id), 'invalid_fixture_document');
     const endpoint = `https://firestore.googleapis.com/v1/projects/${cfg.projectId}/databases/(default)/documents/${collection}/${id}`;
-    const response = await fetch(endpoint, { headers: { authorization: `Bearer ${token}` }, signal: deadline(20_000, cfg.signal), redirect: 'error' });
+    const response = await fetchDocument(endpoint, { headers: { authorization: `Bearer ${token}` }, signal: deadline(20_000, cfg.signal), redirect: 'error' });
     if (response.status === 404) return null;
     requireThat(response.ok, 'fixture_read_failed'); return response.json();
   };
+  read.webhookJobs = async () => {
+    const endpoint = `https://firestore.googleapis.com/v1/projects/${cfg.projectId}/databases/(default)/documents:runQuery`;
+    const fields = ['id', 'requestId', 'ownerId', 'eventId', 'hookId', 'kind', 'attempts', 'lease', 'nextAt'];
+    const response = await fetchDocument(endpoint, { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, signal: deadline(20_000, cfg.signal), redirect: 'error', body: JSON.stringify({ structuredQuery: { from: [{ collectionId: 'deliveryOutbox' }], select: { fields: fields.map(fieldPath => ({ fieldPath })) }, where: { fieldFilter: { field: { fieldPath: 'kind' }, op: 'EQUAL', value: { stringValue: 'webhook' } } }, limit: 2 } }) });
+    requireThat(response.ok, 'webhook_inventory_failed');
+    return (await response.json()).filter(row => row.document).map(row => row.document);
+  };
+  return read;
 }
 export function callbackJobId(eventId, hookId) { return createHash('sha256').update(`${eventId}:webhook:${hookId}`).digest('hex'); }
 export function winnerAgreement(responses, devices) {
@@ -134,7 +169,16 @@ export function expiryFixtureState(document, cfg, expired, now = Date.now()) {
 export async function checkedScenario(results, scenario, fn) {
   const begin = Date.now();
   try { const facts = await fn(); results.push({ scenario, status: 'passed', durationMs: Date.now() - begin, ...facts }); }
-  catch { results.push({ scenario, status: 'failed', durationMs: Date.now() - begin }); throw new Error('scenario_failed'); }
+  catch (error) {
+    const facts = {};
+    if (['webhook-tls-retry', 'webhook-timeout'].includes(scenario)) {
+      for (const [key, type] of Object.entries(callbackFactTypes)) {
+        const value = error?.callbackFacts?.[key];
+        if (typeof value === type && (type !== 'number' || Number.isFinite(value) && value >= 0)) facts[key] = value;
+      }
+    }
+    results.push({ scenario, status: 'failed', durationMs: Date.now() - begin, ...facts }); throw new Error('scenario_failed');
+  }
 }
 export async function preserveExpiryFixture(cfg, requestId) {
   requireThat(/^[a-f0-9]{64}$/.test(requestId), 'invalid_fixture_id');

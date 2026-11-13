@@ -4,7 +4,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-import { activeTtl, callbackJobId, callbackReceipts, checkedScenario, cloud, config, fixtureCredentials, ownerClaims, preflight, preserveExpiryFixture, privateValue, proveCancellation, readyIndexes, replayProgress, report, request, requireThat, runInterrupts, scenarios, settlePairings, stagingDocumentReader, winnerAgreement, writeReport } from './core.mjs';
+import { activeTtl, callbackFacts, callbackJobId, callbackReceipts, observeWebhookJob, proveWebhookTimeout, checkedScenario, cloud, config, fixtureCredentials, ownerClaims, preflight, preserveExpiryFixture, privateValue, proveCancellation, readyIndexes, replayProgress, report, request, requireThat, runInterrupts, scenarios, settlePairings, stagingDocumentReader, winnerAgreement, writeReport } from './core.mjs';
 
 const args = process.argv.slice(2);
 const option = name => { const i = args.indexOf(name); return i < 0 ? undefined : args[i + 1]; };
@@ -37,33 +37,63 @@ async function startPairing(callerName, purpose) {
   pairingCodes.push(connection.userCode); pairingCreationUncertain = false;
   return connection;
 }
-async function until(fn, timeoutMs = 150_000) {
+async function until(fn, timeoutMs = 150_000, intervalMs = 2_000) {
   const end = Date.now() + timeoutMs;
-  while (Date.now() < end) { cfg.signal?.throwIfAborted(); const value = await fn(); cfg.signal?.throwIfAborted(); if (value) return value; await wait(2_000); }
+  while (Date.now() < end) { cfg.signal?.throwIfAborted(); const value = await fn(); cfg.signal?.throwIfAborted(); if (value) return value; await wait(intervalMs); }
   throw new Error('acceptance_deadline');
 }
 async function callbackProbe(mode) {
   requireThat(cfg.callbackUrl && cfg.callbackAdminTokenFile, 'callback_receiver_required');
   const admin = credentials.callbackAdmin, id = randomUUID(); collectorIds.push(id);
   const hook = await ok('/v2/webhooks', caller, { url: `${cfg.callbackUrl}/hooks/${id}`, events: ['request.created'] }); hookIds.push(hook.id);
-  const configured = await request(cfg.callbackUrl, `/admin/${id}`, admin, { secret: hook.secret, mode }, 'POST', cfg.signal);
-  requireThat(configured.status === 201, 'receiver_configuration_failed');
-  const form = await ok('/v2/requests', caller, { title: 'Cloud callback probe', body: 'Synthetic staging fixture.', idempotencyKey: randomUUID(), fields: [], actions: [{ id: 'ok', label: 'OK', type: 'acknowledge' }] });
+  let form, receipts = [], witness = {}, expected, retired = false;
   try {
-    const receipts = await until(async () => {
+    const configured = await request(cfg.callbackUrl, `/admin/${id}`, admin, { secret: hook.secret, mode }, 'POST', cfg.signal);
+    requireThat(configured.status === 201 && configured.value?.proofSchemaVersion === 2, 'receiver_proof_schema_required');
+    const read = await stagingDocumentReader(cfg);
+    requireThat((await read.webhookJobs()).length === 0, 'exclusive_callback_fixture_required');
+    const startedAt = Date.now();
+    form = await ok('/v2/requests', caller, { title: 'Cloud callback probe', body: 'Synthetic staging fixture.', idempotencyKey: randomUUID(), fields: [], actions: [{ id: 'ok', label: 'OK', type: 'acknowledge' }] });
+    receipts = await until(async () => {
+      if (mode === 'timeout-once') {
+        const jobs = await read.webhookJobs();
+        if (!expected && jobs.length === 1) {
+          const eventId = jobs[0].fields?.eventId?.stringValue;
+          requireThat(typeof eventId === 'string' && eventId.length <= 256, 'invalid_callback_event');
+          expected = { id: callbackJobId(eventId, hook.id), requestId: form.requestId, ownerId: cfg.disposableOwnerUid, eventId, hookId: hook.id };
+        }
+        if (expected) observeWebhookJob(jobs, expected, witness);
+        else requireThat(jobs.length === 0, 'ambiguous_webhook_jobs');
+      }
       const response = await request(cfg.callbackUrl, `/admin/${id}`, admin, undefined, 'GET', cfg.signal);
       requireThat(response.status === 200, 'receiver_unavailable');
-      const values = response.value.receipts.filter(r => r.requestId === form.requestId);
-      return values.some(r => r.attempt >= 2 && r.status === 204 && r.responseFinished === true) && (mode !== 'timeout-once' || values.some(r => r.attempt === 1 && r.clientClosedBeforeResponse !== undefined)) ? values : null;
-    });
-    callbackReceipts(mode, receipts);
-    const read = await stagingDocumentReader(cfg), jobId = callbackJobId(receipts[0].id, hook.id);
+      receipts = response.value.receipts.filter(r => r.requestId === form.requestId);
+      return receipts.some(r => r.attempt >= 2 && r.status === 204 && r.responseFinished === true) && (mode !== 'timeout-once' || receipts.some(r => r.attempt === 1 && Number.isFinite(r.withheldResponseMs))) ? receipts : null;
+    }, 150_000, mode === 'timeout-once' ? 250 : 2_000);
+    if (mode === 'timeout-once') {
+      requireThat(expected && expected.eventId === receipts[0]?.id && witness.failed, 'sender_event_or_failure_missing');
+      const filter = `resource.type="cloud_run_revision" AND resource.labels.service_name="${cfg.service}" AND resource.labels.revision_name="${context.revision}" AND jsonPayload.event="delivery_attempt" AND jsonPayload.kind="webhook" AND timestamp>="${new Date(startedAt).toISOString()}" AND timestamp<="${new Date(witness.failedAt).toISOString()}"`;
+      const logs = await cloud(cfg, ['logging', 'read', filter, '--limit=2', '--order=asc']);
+      witness = proveWebhookTimeout(receipts, witness, logs, cfg, context.revision, startedAt);
+    }
+    callbackReceipts(mode, receipts, witness);
+    const jobId = callbackJobId(receipts[0].id, hook.id);
     await until(async () => (await read('deliveryOutbox', jobId)) === null);
+    requireThat((await read.webhookJobs()).length === 0, 'unrelated_webhook_jobs');
     requireThat((await ok(`/v2/requests/${form.requestId}`, caller)).status === 'pending', 'callback_fixture_not_active');
     requireThat((await ok('/v2/webhooks', caller)).some(h => h.id === hook.id), 'callback_hook_removed');
     requireThat((await ok('/v2/events', caller)).events.some(e => e.id === receipts[0].id), 'callback_event_removed');
-    return { attempts: receipts.length, verifiedPublicTls: true, verifiedSignedEvent: true, senderOutboxRetired: true };
-  } finally { await ok(`/v2/requests/${form.requestId}/cancel`, caller, {}); }
+    retired = true;
+    return { attempts: receipts.length, verifiedPublicTls: true, verifiedSignedEvent: true, senderOutboxRetired: true, ...callbackFacts(receipts, witness) };
+  } catch (error) { error.callbackFacts = callbackFacts(receipts, witness); throw error; }
+  finally {
+    // Retire this registration before the next probe creates another request.
+    // Leave failed cleanup in the outer owner-deletion cleanup inventory.
+    try {
+      if (retired) { await ok(`/v2/webhooks/${hook.id}`, caller, undefined, 'DELETE'); hookIds = hookIds.filter(value => value !== hook.id); }
+      if (form) await ok(`/v2/requests/${form.requestId}/cancel`, caller, {});
+    } catch (error) { error.callbackFacts = callbackFacts(receipts, witness); throw error; }
+  }
 }
 
 try {
