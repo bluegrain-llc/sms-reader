@@ -110,8 +110,8 @@ struct AgentsScreen: View {
                     Button("Save session ticket") { provision(ticket) }
                     Button("Clear retained ticket", role: .destructive) { clear = true }
                 } else {
-                    TextField("Name", text: $name).onChange(of: name) { _, value in name = String(value.prefix(80)) }
-                    TextField("Description", text: $purpose, axis: .vertical).onChange(of: purpose) { _, value in purpose = String(value.prefix(240)) }
+                    TextField("Name", text: $name).onChange(of: name) { _, value in name = AgentDeclaration.boundedText(value, limit: 80) }
+                    TextField("Description", text: $purpose, axis: .vertical).onChange(of: purpose) { _, value in purpose = AgentDeclaration.boundedText(value, limit: 240) }
                     Toggle("Forms and decisions", isOn: $forms); Toggle("SMS codes", isOn: $sms)
                     Button("Create agent and save ticket") {
                         Task { await model.perform {

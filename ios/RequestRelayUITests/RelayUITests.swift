@@ -36,7 +36,9 @@ extension RelayUITests {
         let details = app.textFields["Details"]; XCTAssertTrue(details.waitForExistence(timeout: 5))
         details.tap(); details.typeText("Synthetic response")
         app.buttons["review-response"].tap()
-        XCTAssertTrue(app.staticTexts["Review your response"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["form-review-heading"].waitForExistence(timeout: 5))
+        let privateAnswer = app.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", "Synthetic response")).firstMatch
+        XCTAssertTrue(privateAnswer.exists)
         XCTAssertTrue(app.buttons["Send response"].exists)
         XCTAssertFalse(app.alerts.firstMatch.exists)
         app.buttons["Edit response"].tap(); app.buttons["Previous"].tap()
@@ -45,11 +47,35 @@ extension RelayUITests {
         XCTAssertEqual(XCTWaiter.wait(for: [deselected], timeout: 5), .completed)
         XCTAssertTrue(app.buttons["review-response"].exists)
         app.buttons["review-response"].tap()
-        XCTAssertFalse(app.staticTexts["Synthetic response"].exists)
+        XCTAssertTrue(app.staticTexts["form-review-heading"].waitForExistence(timeout: 5))
+        XCTAssertFalse(privateAnswer.exists)
     }
 }
 
 extension RelayUITests {
+    func testTerminalCodeSubmissionClosesEditorWithoutPolling() {
+        continueAfterFailure = false
+        let app = XCUIApplication(); app.launchArguments = ["--ui-contract"]; app.launch()
+        app.buttons["Code submission without polling"].tap()
+        let input = app.textFields["code-input"]
+        XCTAssertTrue(input.waitForExistence(timeout: 5)); input.tap(); input.typeText("123456")
+        app.buttons["send-code"].tap()
+        XCTAssertTrue(app.staticTexts["This request is completed."].waitForExistence(timeout: 5))
+        XCTAssertFalse(input.exists); XCTAssertFalse(app.buttons["send-code"].exists); XCTAssertFalse(app.buttons["Decline"].exists)
+    }
+    func testTerminalFormSubmissionClosesEditorWithoutPolling() {
+        continueAfterFailure = false
+        let app = XCUIApplication(); app.launchArguments = ["--ui-contract"]; app.launch()
+        app.buttons["Form submission without polling"].tap()
+        let input = app.textFields["Answer"]
+        XCTAssertTrue(input.waitForExistence(timeout: 5)); input.tap(); input.typeText("Synthetic answer")
+        app.buttons["review-response"].tap(); app.buttons["Send response"].tap()
+        let confirm = app.sheets.buttons["Send response"]
+        XCTAssertTrue(confirm.waitForExistence(timeout: 5)); confirm.tap()
+        XCTAssertTrue(app.staticTexts["This request is submitted."].waitForExistence(timeout: 5))
+        XCTAssertFalse(input.exists); XCTAssertFalse(app.buttons["Edit response"].exists); XCTAssertFalse(app.buttons["review-response"].exists)
+        XCTAssertFalse(app.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", "Synthetic answer")).firstMatch.exists)
+    }
     func testExpiredSMSCannotAcceptAnotherPrivateCode() {
         let app = XCUIApplication(); app.launchArguments = ["--ui-contract"]; app.launch()
         app.buttons["Manual code"].tap()

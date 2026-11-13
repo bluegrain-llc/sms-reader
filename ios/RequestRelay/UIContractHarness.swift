@@ -14,6 +14,8 @@ struct UIContractHarness: View {
         NavigationStack {
             List {
                 Button("Private modal") { previewPhase = .active; privacySheet = true }
+                NavigationLink("Code submission without polling") { TerminalSubmissionHarness(form: false) }
+                NavigationLink("Form submission without polling") { TerminalSubmissionHarness(form: true) }
                 NavigationLink("Manual code") {
                     VStack {
                         CodeEditor(request: SMSRequest(requestId: "fixture-code", callerName: "Synthetic agent", title: "Test sign-in", purpose: "Share only by tapping Send.", status: "ready", expiresAt: expiry, manualEntryDeadline: codeExpiry), draft: codeDraft)
@@ -39,6 +41,38 @@ struct UIContractHarness: View {
                 Button("Hide preview") { previewPhase = .inactive }
             }.modifier(ResponsePrivacyCover(phase: previewPhase))
         }
+    }
+}
+
+struct TerminalSubmissionHarness: View {
+    let form: Bool
+    @StateObject private var model = RelayModel(api: TerminalSubmissionAPI())
+    @StateObject private var draft = ResponseDraft()
+    private let expiry = (Date().timeIntervalSince1970 + 300) * 1000
+    var body: some View {
+        Group {
+            if form {
+                FormEditor(request: FormRequest(requestId: "fixture-form", callerName: "Synthetic agent", title: "Response", body: "Test terminal submission.", status: "pending", expiresAt: expiry,
+                    fields: [.init(id: "answer", label: "Answer", type: "text", required: true)], actions: [.init(id: "send", label: "Send response", type: "submit")]), draft: draft)
+            } else {
+                CodeEditor(request: SMSRequest(requestId: "fixture-code", callerName: "Synthetic agent", title: "Code", purpose: "Test terminal submission.", status: "ready", expiresAt: expiry), draft: draft)
+            }
+        }.environmentObject(model)
+    }
+}
+
+@MainActor
+private final class TerminalSubmissionAPI: RelayCalling {
+    let origin = URL(string: "https://relay.example")!
+    func call<T: Decodable>(_ path: String, method: String, body: [String: Any]?) async throws -> T {
+        guard method == "POST" else { throw RelayFailure.unavailable }
+        let response: [String: Any]
+        if path.hasSuffix("/submissions") {
+            response = ["requestId":"fixture-form", "callerName":"Synthetic agent", "title":"Response", "body":"Test terminal submission.", "status":"submitted", "expiresAt":2000000000000, "fields":[], "actions":[]]
+        } else if path.hasSuffix("/events") {
+            response = ["requestId":"fixture-code", "callerName":"Synthetic agent", "title":"Code", "purpose":"Test terminal submission.", "status":"completed", "expiresAt":2000000000000]
+        } else { throw RelayFailure.unavailable }
+        return try JSONDecoder().decode(T.self, from: JSONSerialization.data(withJSONObject: response))
     }
 }
 #endif

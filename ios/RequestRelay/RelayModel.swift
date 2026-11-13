@@ -307,7 +307,8 @@ final class RelayModel: ObservableObject {
         receiveSMS(request)
         return request
     }
-    func submitSMS(_ request: SMSRequest, code: String, deny: Bool = false) async throws {
+    @discardableResult
+    func submitSMS(_ request: SMSRequest, code: String, deny: Bool = false) async throws -> SMSRequest {
         guard deny || validCode(code) else { throw RelayFailure.rejected("invalid_code") }
         let body: [String: Any] = deny ? ["status":"denied"] : ["status":"completed","source":"manual","code":code]
         let state: SMSRequest = try await api.call("/v1/devices/\(deviceID)/requests/\(request.id)/events", method: "POST", body: body)
@@ -318,7 +319,7 @@ final class RelayModel: ObservableObject {
             else if state.status == "denied" { notice = "Request declined." }
             else { notice = "This request is \(state.status). Your code was not sent." }
         }
-        receiveSMS(state); await refresh()
+        receiveSMS(state); await refresh(); return state
     }
     func submitForm(_ request: FormRequest, action: FormAction, draft: ResponseDraft) async throws -> FormRequest {
         let fields = request.visibleFields(draft.values), ids = Set(fields.map(\.id))

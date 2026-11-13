@@ -31,10 +31,23 @@ enum PrivateStorage {
 }
 struct JWK: Codable { let kty: String; let crv: String; let x: String; let y: String; var d: String? }
 struct TicketKey: Codable { let id: String; let publicKey: JWK; let privateKey: JWK }
-struct AgentDeclaration: Codable { let name: String; let purpose: String; let capabilities: [String] }
+struct AgentDeclaration: Codable {
+    let name: String; let purpose: String; let capabilities: [String]
+    var validText: Bool { !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && name.utf16.count <= 80 && !purpose.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && purpose.utf16.count <= 240 }
+    static func boundedText(_ value: String, limit: Int) -> String {
+        var result = "", count = 0
+        for character in value {
+            let text = String(character), size = text.utf16.count
+            guard count + size <= limit else { break }
+            result += text; count += size
+        }
+        return result
+    }
+}
 struct SessionTicket: Codable {
     let version: Int; let relayOrigin: String; let agent: AgentDeclaration; let serviceCredential: String; let deliveryKeys: [TicketKey]
     static func create(origin: URL, agent: AgentDeclaration) throws -> SessionTicket {
+        guard agent.validText else { throw RelayFailure.rejected("invalid_agent") }
         let key = P256.KeyAgreement.PrivateKey(), raw = key.publicKey.x963Representation
         let x = raw.subdata(in: 1..<33).base64url, y = raw.subdata(in: 33..<65).base64url
         let pub = JWK(kty: "EC", crv: "P-256", x: x, y: y)

@@ -65,25 +65,32 @@ struct CodeEditor: View {
     @EnvironmentObject var model: RelayModel
     let request: SMSRequest
     @ObservedObject var draft: ResponseDraft
+    @State private var terminalStatus: String?
     var body: some View {
         TimelineView(.periodic(from: .now, by: 1)) { context in
             let deadline = request.manualEntryDeadline ?? request.expiresAt
-            let available = request.status == "ready" && deadline > context.date.timeIntervalSince1970 * 1000
+            let available = terminalStatus == nil && request.status == "ready" && deadline > context.date.timeIntervalSince1970 * 1000
             Form {
                 Section { Text(request.callerName).font(.title2.weight(.semibold)); Text(request.title).font(.headline); RequestMessage(source: request.purpose) }
-                if request.active && deadline > context.date.timeIntervalSince1970 * 1000 {
+                if terminalStatus == nil && request.active && deadline > context.date.timeIntervalSince1970 * 1000 {
                     Section("Enter the code you want to share") {
                         TextField("SMS code", text: Binding(get: { draft.code }, set: { draft.code = available ? String($0.prefix(10)) : "" })).textContentType(.oneTimeCode)
                             .textInputAutocapitalization(.never).autocorrectionDisabled().privacySensitive().accessibilityIdentifier("code-input")
                         Text("Type or deliberately paste a code. AutoFill is offered only when iOS allows it. Nothing is sent until you tap Send.").font(.footnote).foregroundStyle(.secondary)
                         Text(available ? "Entry closes \(Date(timeIntervalSince1970: deadline / 1000).formatted(date: .omitted, time: .standard))." : "The entry window has closed.")
-                        Button("Send") { Task { await model.perform { try await model.submitSMS(request, code: draft.code) } } }
+                        Button("Send") { submit() }
                             .disabled(!available || !validCode(draft.code) || model.busy).accessibilityIdentifier("send-code")
-                        Button("Decline", role: .destructive) { Task { await model.perform { try await model.submitSMS(request, code: "", deny: true) } } }.disabled(model.busy)
+                        Button("Decline", role: .destructive) { submit(deny: true) }.disabled(model.busy)
                     }
-                } else { Text(request.active ? "The entry window has closed." : request.reason == "handled_on_another_device" ? "Handled on another device." : "This request is \(request.status).") }
+                } else { Text(terminalStatus.map { "This request is \($0)." } ?? (request.active ? "The entry window has closed." : request.reason == "handled_on_another_device" ? "Handled on another device." : "This request is \(request.status).")) }
             }.onChange(of: available, initial: true) { _, active in if !active { draft.code = "" } }
-        }
+        }.onChange(of: request.id) { _, _ in terminalStatus = nil }
+    }
+    private func submit(deny: Bool = false) {
+        Task { await model.perform {
+            let result = try await model.submitSMS(request, code: deny ? "" : draft.code, deny: deny)
+            if !result.active { terminalStatus = result.status }
+        } }
     }
 }
 struct FormResponse: View {
@@ -122,6 +129,7 @@ struct FormEditor: View {
     @ObservedObject var draft: ResponseDraft
     @State private var validation: [String] = []
     @State private var confirmation: FormAction?
+    @State private var terminalStatus: String?
     private var steps: [FormStep] { request.visibleSteps(draft.values) }
     private var current: Int { steps.firstIndex(where: { $0.id == draft.stepID }) ?? 0 }
     private var fields: [FormField] {
@@ -130,17 +138,17 @@ struct FormEditor: View {
     }
     var body: some View {
         TimelineView(.periodic(from: .now, by: 1)) { context in
-            let active = request.status == "pending" && request.expiresAt > context.date.timeIntervalSince1970 * 1000
+            let active = terminalStatus == nil && request.status == "pending" && request.expiresAt > context.date.timeIntervalSince1970 * 1000
             Form {
                 Section { Text(request.callerName).font(.title2.weight(.semibold)); RequestMessage(source: request.body) }
                 if active {
                     if draft.review {
-                        Section("Review your response") {
+                        Section {
                             ForEach(request.visibleFields(draft.values)) { field in
                                 LabeledContent(field.label, value: display(field)).privacySensitive()
                             }
                             Button("Edit response") { draft.review = false }
-                        }
+                        } header: { Text("Review your response").accessibilityIdentifier("form-review-heading") }
                         Section("Send to \(request.callerName)") {
                             ForEach(request.actions) { action in
                                 Button(action.label, role: action.type == "decline" ? .destructive : nil) { validateAndConfirm(action) }.disabled(model.busy)
@@ -164,7 +172,7 @@ struct FormEditor: View {
                         }
                     }
                     ForEach(validation, id: \.self) { Text($0).foregroundStyle(.red) }
-                } else { Text(request.status == "pending" ? "This request expired." : "This request is \(request.status).") }
+                } else { Text(terminalStatus.map { "This request is \($0)." } ?? (request.status == "pending" ? "This request expired." : "This request is \(request.status).")) }
             }
             .onChange(of: active) { _, active in if !active { draft.clear() } }
             .onChange(of: draft.values) { _, _ in
@@ -172,9 +180,12 @@ struct FormEditor: View {
                 if let id = draft.stepID, !steps.contains(where: { $0.id == id }) { draft.stepID = steps.first?.id; draft.review = false }
             }
             .confirmationDialog("Send this response to \(request.callerName)?", isPresented: Binding(get: { confirmation != nil }, set: { if !$0 { confirmation = nil } }), titleVisibility: .visible) {
-                if let action = confirmation { Button(action.label, role: action.type == "decline" ? .destructive : nil) { Task { await model.perform { _ = try await model.submitForm(request, action: action, draft: draft) } }; confirmation = nil } }
+                if let action = confirmation { Button(action.label, role: action.type == "decline" ? .destructive : nil) { Task { await model.perform {
+                    let result = try await model.submitForm(request, action: action, draft: draft)
+                    if result.status != "pending" { terminalStatus = result.status }
+                } }; confirmation = nil } }
             }
-        }
+        }.onChange(of: request.id) { _, _ in terminalStatus = nil }
     }
     private func validateAndConfirm(_ action: FormAction) {
         validation = action.type == "decline" ? [] : request.errors(draft.values)

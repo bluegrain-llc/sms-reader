@@ -24,6 +24,17 @@ final class RelayTests: XCTestCase {
         let object = try JSONSerialization.jsonObject(with: JSONEncoder().encode(ticket)) as! [String: Any]
         XCTAssertEqual(Set(object.keys), Set(["version","relayOrigin","agent","serviceCredential","deliveryKeys"]))
     }
+    func testAgentTicketRejectsBackendIncompatibleUnicodeBeforeRetention() throws {
+        let origin = URL(string: "https://relay.example")!
+        let tooLongName = String(repeating: "🚀", count: 41), tooLongPurpose = String(repeating: "🚀", count: 121)
+        for agent in [AgentDeclaration(name: tooLongName, purpose: "Test", capabilities: ["forms"]), AgentDeclaration(name: "Agent", purpose: tooLongPurpose, capabilities: ["forms"])] {
+            XCTAssertThrowsError(try SessionTicket.create(origin: origin, agent: agent))
+        }
+        let name = AgentDeclaration.boundedText(tooLongName, limit: 80), purpose = AgentDeclaration.boundedText(tooLongPurpose, limit: 240)
+        XCTAssertEqual(name, String(repeating: "🚀", count: 40)); XCTAssertEqual(purpose, String(repeating: "🚀", count: 120))
+        XCTAssertNoThrow(try SessionTicket.create(origin: origin, agent: .init(name: name, purpose: purpose, capabilities: ["forms"])))
+        XCTAssertEqual(AgentDeclaration.boundedText("A👨‍👩‍👧‍👦B", limit: 10), "A")
+    }
     func testConditionalWizardPrunesDependentStepsAndRequiresReviewValues() throws {
         let data = Data(#"{"requestId":"form","callerName":"Agent","title":"Choose","body":"Review","status":"pending","expiresAt":2000000000000,"fields":[{"id":"agree","label":"Agree","type":"checkbox","required":false},{"id":"detail","label":"Details","type":"text","required":true}],"actions":[{"id":"send","label":"Send","type":"submit"}],"steps":[{"id":"first","title":"Choice","fieldIds":["agree"]},{"id":"details","title":"Details","fieldIds":["detail"],"when":{"fieldId":"agree","equals":true}}]}"#.utf8)
         let form = try JSONDecoder().decode(FormRequest.self, from: data)
@@ -84,7 +95,8 @@ extension RelayTests {
                 XCTAssertEqual(body?["code"] as? String, "123456")
                 return try JSONEncoder().encode(SMSRequest(requestId: request.id, callerName: request.callerName, title: request.title, purpose: request.purpose, status: status, expiresAt: request.expiresAt, reason: reason))
             }
-            try await subject.submitSMS(request, code: draft.code)
+            let result = try await subject.submitSMS(request, code: draft.code)
+            XCTAssertEqual(result.status, status); XCTAssertEqual(result.reason, reason)
             XCTAssertEqual(subject.notice, expected, status); XCTAssertTrue(draft.code.isEmpty, status)
         }
     }
