@@ -686,7 +686,8 @@ async fn route(s: App, request: Request) -> Result<Response> {
         .collect::<Vec<_>>();
     let segments = parts_of_path.iter().map(String::as_str).collect::<Vec<_>>();
     let p = segments.as_slice();
-    let health = method == axum::http::Method::GET && matches!(p, ["health" | "healthz"]);
+    let health =
+        method == axum::http::Method::GET && matches!(p, ["health" | "healthz" | "startup"]);
     if !health
         && (headers
             .get("authorization")
@@ -1063,6 +1064,16 @@ async fn route(s: App, request: Request) -> Result<Response> {
                 .await?
         }
         ("GET", ["health" | "healthz"]) => json!({"ok":true}),
+        ("GET", ["startup"]) => {
+            let ready = match &s.options.serving {
+                Some(gate) => gate.assert_serving().await.is_ok(),
+                None => true,
+            };
+            return Ok(json_response(
+                json!({"ok":ready}),
+                if ready { 200 } else { 503 },
+            ));
+        }
         ("GET", ["privacy"] | ["account", "delete"]) => {
             return Ok(
                 crate::account_pages::account_page(&path.to_ascii_lowercase(), &s.options)
@@ -1792,7 +1803,80 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    struct ProbeGate(AtomicBool);
+    impl Serving for ProbeGate {
+        fn assert_serving(&self) -> futures::future::BoxFuture<'_, Result<()>> {
+            Box::pin(async { ensure(!self.0.load(Ordering::SeqCst), 503, "recovery_in_progress") })
+        }
+    }
+    struct ProbeAuth;
+    impl Authentication for ProbeAuth {
+        fn owner<'a>(&'a self, _: &'a str) -> futures::future::BoxFuture<'a, Result<Identity>> {
+            Box::pin(async { panic!("probes must not authenticate an owner") })
+        }
+        fn worker<'a>(&'a self, _: &'a str) -> futures::future::BoxFuture<'a, Result<()>> {
+            Box::pin(async { panic!("probes must not authenticate a worker") })
+        }
+        fn delete<'a>(&'a self, _: &'a str) -> futures::future::BoxFuture<'a, Result<()>> {
+            Box::pin(async { panic!("probes must not delete an identity") })
+        }
+    }
+
+    #[tokio::test]
+    async fn startup_probe_waits_for_serving_gate_while_liveness_stays_available() {
+        use tower::ServiceExt;
+        let gate = Arc::new(ProbeGate(AtomicBool::new(true)));
+        let (logger, _events) = tokio::sync::mpsc::unbounded_channel();
+        let relay = Relay {
+            store: crate::store::Store::new("demo-startup-probe")
+                .await
+                .unwrap(),
+            clock: Arc::new(crate::model::now),
+            delivery: Arc::new(Capture(logger)),
+        };
+        let router = app(
+            relay,
+            Options {
+                auth: Arc::new(ProbeAuth),
+                serving: Some(gate.clone()),
+                public_url: None,
+                apple_app_ids: vec![],
+                android_cert: None,
+                android_certs: None,
+                android_package: None,
+                firebase_web_config: None,
+                privacy_contact: None,
+                origins: vec![],
+                trust_proxy_hops: 0,
+                sse_duration: Duration::from_secs(100),
+            },
+        );
+        for (blocked, path, status, ok) in [
+            (true, "/health", 200, true),
+            (true, "/healthz", 200, true),
+            (true, "/startup", 503, false),
+            (false, "/startup", 200, true),
+            (true, "/startup", 503, false),
+            (true, "/health", 200, true),
+        ] {
+            gate.0.store(blocked, Ordering::SeqCst);
+            let response = router
+                .clone()
+                .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status().as_u16(), status, "{path}");
+            let bytes = axum::body::to_bytes(response.into_body(), 1024)
+                .await
+                .unwrap();
+            assert_eq!(
+                serde_json::from_slice::<Value>(&bytes).unwrap(),
+                json!({"ok":ok})
+            );
+        }
+    }
 
     #[derive(Default)]
     struct ScriptedFeed {

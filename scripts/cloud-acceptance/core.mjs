@@ -184,6 +184,8 @@ export async function preflight(cfg, inspect = cloud, recordContext = () => {}) 
     if (ledger) requireThat(env.find(v => v.name === 'SECURITY_LEDGER_BUCKET')?.value === cfg.securityLedgerBucket, 'staging_ledger_mismatch');
     requireThat(!env.some(v => /EMULATOR_HOST/.test(v.name)), 'deployed_emulators_forbidden');
     if (!ledger) return;
+    const startup = revision.spec?.containers?.[0]?.startupProbe;
+    requireThat(startup?.httpGet?.path === '/startup' && startup.httpGet.port === 8080 && !startup.tcpSocket && !startup.grpc, 'runtime_startup_probe_required');
     requireThat(env.find(v => v.name === 'SERVICE_URL')?.value === cfg.serviceUrl, 'runtime_service_origin_mismatch');
     const schedulerEmail = env.find(v => v.name === 'SCHEDULER_EMAIL')?.value;
     requireThat(typeof schedulerEmail === 'string' && /^[a-zA-Z0-9_-]+@/.test(schedulerEmail) && schedulerEmail.endsWith(`@${cfg.projectId}.iam.gserviceaccount.com`), 'staging_scheduler_identity_required');

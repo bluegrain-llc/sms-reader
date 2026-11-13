@@ -10,6 +10,7 @@ import { promisify } from 'node:util';
 import { activeTtl, callbackOutcome, callbackReceipts, checkedScenario, clientDisconnectedBeforeResponse, config, eventMetadata, expiryFixtureState, fixtureCredentials, httpsOrigin, ownerClaims, preflight, privateValue, proveCancellation, readyIndexes, replayProgress, report, scenarios, settlePairings, verifySignature, winnerAgreement, writeReport } from './core.mjs';
 
 const base = { projectId: 'relay-staging-123', productionProjectId: 'relay-production-123', securityLedgerBucket: 'relay-staging-ledger', account: 'operator@example.com', region: 'us-central1', service: 'relay-service', serviceUrl: 'https://relay.run.app', ownerTokenFile: '/private/owner', disposableOwnerUid: 'disposable', fcmTokenFiles: ['/private/one', '/private/two'], budgetUsd: 10 };
+const startupProbe = { httpGet: { path: '/startup', port: 8080 } };
 test('destructive staging guard rejects production, implicit account, unsafe URLs and missing budget', () => {
   assert.equal(config(base).projectId, base.projectId);
   for (const patch of [{ projectId: base.productionProjectId }, { productionProjectId: undefined }, { projectId: 'live-relay-project' }, { securityLedgerBucket: undefined }, { securityLedgerBucket: 'prod-ledger' }, { account: '' }, { budgetUsd: 0 }, { budgetUsd: 101 }, { serviceUrl: 'http://relay.run.app' }, { serviceUrl: 'https://private@relay.run.app' }, { serviceUrl: 'https://relay.run.app/?credential=secret' }, { fcmTokenFiles: [] }, { callbackUrl: 'https://receiver.run.app' }]) assert.throws(() => config({ ...base, ...patch }));
@@ -29,7 +30,7 @@ test('cloud preflight verifies actual active and tagged revisions rather than a 
   const queue = `projects/${cfg.projectId}/locations/${cfg.region}/queues/relay-delivery`, schedulerEmail = `scheduler@${cfg.projectId}.iam.gserviceaccount.com`;
   const env = [{ name: 'GOOGLE_CLOUD_PROJECT', value: cfg.projectId }, { name: 'SECURITY_LEDGER_BUCKET', value: cfg.securityLedgerBucket }, { name: 'SERVICE_URL', value: cfg.serviceUrl }, { name: 'DELIVERY_QUEUE', value: queue }, { name: 'SCHEDULER_EMAIL', value: schedulerEmail }];
   const service = { metadata: { labels: { environment: 'staging' } }, status: { url: cfg.serviceUrl, traffic: [{ revisionName: 'current', percent: 100 }, { revisionName: 'previous', url: cfg.replayUrl }] }, spec: { template: { spec: { containers: [{ env }] } } } };
-  const revisions = Object.fromEntries(['current', 'previous'].map(name => [name, { metadata: { name }, spec: { containers: [{ env: structuredClone(env) }] } }]));
+  const revisions = Object.fromEntries(['current', 'previous'].map(name => [name, { metadata: { name }, spec: { containers: [{ env: structuredClone(env), startupProbe }] } }]));
   const inspect = (p = project, s = service, r = revisions, billing = true) => async (_cfg, args) => structuredClone(args[0] === 'projects' ? p : args[0] === 'run' ? args[1] === 'revisions' ? r[args[3]] : s : args[0] === 'tasks' ? { name: queue, state: 'RUNNING' } : args[0] === 'scheduler' ? { state: 'ENABLED', httpTarget: { httpMethod: 'POST', uri: `${cfg.serviceUrl}/internal/maintenance`, oidcToken: { audience: cfg.serviceUrl, serviceAccountEmail: schedulerEmail } } } : { billingEnabled: billing });
   assert.deepEqual(await preflight(cfg, inspect()), { revision: 'current', projectId: cfg.projectId });
   await assert.rejects(preflight(cfg, inspect({ ...project, labels: {} })));
@@ -45,6 +46,22 @@ test('cloud preflight verifies actual active and tagged revisions rather than a 
   await assert.rejects(preflight(cfg, inspect(project, service, wrongLedger)), /staging_ledger_mismatch/);
   const emulator = structuredClone(revisions); emulator.current.spec.containers[0].env.push({ name: 'FIRESTORE_EMULATOR_HOST', value: 'localhost:8080' });
   await assert.rejects(preflight(cfg, inspect(project, service, emulator)));
+  for (const name of ['current', 'previous']) {
+    for (const probe of [undefined, { tcpSocket: { port: 8080 } }, { httpGet: { path: '/health', port: 8080 } }, { httpGet: { path: '/startup', port: 9090 } }]) {
+      const wrong = structuredClone(revisions); wrong[name].spec.containers[0].startupProbe = probe;
+      await assert.rejects(preflight(cfg, inspect(project, service, wrong)), /runtime_startup_probe_required/);
+    }
+  }
+  const withCallback = config({ ...cfg, callbackService: 'callback-probe', callbackUrl: 'https://callback.run.app' });
+  await preflight(withCallback, async (selected, args) => {
+    if (args[0] === 'run' && args[1] === 'services' && args[3] === withCallback.callbackService) return {
+      metadata: { labels: { environment: 'staging' } }, status: { url: withCallback.callbackUrl, traffic: [{ revisionName: 'callback', percent: 100 }] },
+    };
+    if (args[0] === 'run' && args[1] === 'revisions' && args[3] === 'callback') return {
+      metadata: { name: 'callback' }, spec: { containers: [{ env: [{ name: 'GOOGLE_CLOUD_PROJECT', value: cfg.projectId }] }] },
+    };
+    return inspect()(selected, args);
+  });
 });
 test('cloud preflight binds delivery readiness to each serving revision and Scheduler signer', async () => {
   const cfg = config({ ...base, replayUrl: 'https://previous---relay.run.app' });
@@ -53,7 +70,7 @@ test('cloud preflight binds delivery readiness to each serving revision and Sche
   const env = [{ name: 'GOOGLE_CLOUD_PROJECT', value: cfg.projectId }, { name: 'SECURITY_LEDGER_BUCKET', value: cfg.securityLedgerBucket }, { name: 'SERVICE_URL', value: cfg.serviceUrl }, { name: 'DELIVERY_QUEUE', value: queueName }, { name: 'SCHEDULER_EMAIL', value: schedulerEmail }];
   const project = { projectId: cfg.projectId, lifecycleState: 'ACTIVE', labels: { environment: 'staging' } };
   const service = { metadata: { labels: { environment: 'staging' } }, status: { url: cfg.serviceUrl, traffic: [{ revisionName: 'current', percent: 100 }, { revisionName: 'previous', url: cfg.replayUrl }] } };
-  const revisions = Object.fromEntries(['current', 'previous'].map(name => [name, { metadata: { name }, spec: { containers: [{ env: structuredClone(env) }] } }]));
+  const revisions = Object.fromEntries(['current', 'previous'].map(name => [name, { metadata: { name }, spec: { containers: [{ env: structuredClone(env), startupProbe }] } }]));
   const queue = { name: queueName, state: 'RUNNING' };
   const scheduler = { state: 'ENABLED', httpTarget: { httpMethod: 'POST', uri: `${cfg.serviceUrl}/internal/maintenance`, oidcToken: { audience: cfg.serviceUrl, serviceAccountEmail: schedulerEmail } } };
   const inspect = (r = revisions, q = queue, s = scheduler, calls = []) => async (_cfg, args) => {
@@ -91,7 +108,7 @@ test('delivery preflight failures retain serving revision and timing without cre
     const fixtures = {
       projects: { projectId: cfg.projectId, lifecycleState: 'ACTIVE', labels: { environment: 'staging' } },
       service: { metadata: { labels: { environment: 'staging' } }, status: { url: cfg.serviceUrl, traffic: [{ revisionName: 'current', percent: 100 }] } },
-      revision: { metadata: { name: 'current' }, spec: { containers: [{ env }] } },
+      revision: { metadata: { name: 'current' }, spec: { containers: [{ env, startupProbe }] } },
       billing: { billingEnabled: true },
       tasks: { name: queue, state: 'RUNNING' },
       scheduler: { state: 'ENABLED', httpTarget: { httpMethod: 'POST', uri: `${cfg.serviceUrl}/internal/maintenance`, oidcToken: { audience: cfg.serviceUrl, serviceAccountEmail: signer } } },

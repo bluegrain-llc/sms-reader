@@ -14,6 +14,7 @@ pub fn route_template(path: &str) -> &'static str {
     let parts = path.split('/').collect::<Vec<_>>();
     match parts.as_slice() {
         ["", "health" | "healthz"] => "/health",
+        ["", "startup"] => "/startup",
         ["", ".well-known", "assetlinks.json"] => "/.well-known/assetlinks.json",
         ["", "connect"] => "/connect",
         ["", "privacy"] => "/privacy",
@@ -452,6 +453,7 @@ mod tests {
         assert_eq!(event["method"], "OTHER");
         assert!(!event.to_string().contains("private"));
         assert_eq!(route_template("/unknown?token=private-token"), "unmatched");
+        assert_eq!(route_template("/startup"), "/startup");
     }
 
     #[test]
