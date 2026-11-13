@@ -44,8 +44,8 @@ class AgentsActivity : AccountActivity() {
             var services by remember { mutableStateOf<List<JSONObject>>(emptyList()) }
             var name by remember { mutableStateOf("") }; var purpose by remember { mutableStateOf("") }
             var forms by remember { mutableStateOf(true) }; var sms by remember { mutableStateOf(false) }
-            var pending by remember(account.email) { mutableStateOf<JSONObject?>(null) }; var busy by remember { mutableStateOf(false) }
-            suspend fun refresh() { services = repository.services().objects(); pending = AgentTicket(this@AgentsActivity, repository.ownerId).load() }
+            var pending by remember(account.email) { mutableStateOf<JSONObject?>(null) }; var ticketLoaded by remember(account.email) { mutableStateOf(false) }; var busy by remember { mutableStateOf(false) }
+            suspend fun refresh() { pending = AgentTicket(this@AgentsActivity, repository.ownerId).load(); ticketLoaded = true; services = repository.services().objects() }
             fun work(action: suspend () -> Unit) { if (!busy) scope.launch { busy = true; try { action() } catch (e: CancellationException) { throw e } catch (_: Exception) { message = "Could not complete this step. Retained ticket state is available for retry." } finally { busy = false } } }
             LaunchedEffect(account.signedIn, account.email) { if (account.signedIn) work { refresh() } }
             RelayTheme { Surface(Modifier.fillMaxSize()) { Column(Modifier.safeDrawingPadding().verticalScroll(rememberScrollState()).padding(24.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
@@ -58,9 +58,9 @@ class AgentsActivity : AccountActivity() {
                         OutlinedTextField(name, { name = it.take(80) }, label = { Text("Name") }, modifier = Modifier.fillMaxWidth())
                         OutlinedTextField(purpose, { purpose = it.take(240) }, label = { Text("Description") }, modifier = Modifier.fillMaxWidth())
                         SwitchRow("Forms and decisions", forms, !busy) { forms = !forms }; SwitchRow("SMS codes", sms, !busy) { sms = !sms }
-                        Button(enabled = !busy && name.isNotBlank() && purpose.isNotBlank() && (forms || sms), onClick = { work {
+                        Button(enabled = ticketLoaded && !busy && name.isNotBlank() && purpose.isNotBlank() && (forms || sms), onClick = { work {
                             val ticket = AgentTicket.create(name.trim(), purpose.trim(), listOfNotNull(if (forms) "forms" else null, if (sms) "sms" else null))
-                            AgentTicket(this@AgentsActivity, repository.ownerId).save(ticket); pending = ticket
+                            AgentTicket(this@AgentsActivity, repository.ownerId).saveNew(ticket); pending = ticket
                             repository.onboarding("POST", "/v3/services", AgentTicket.declaration(ticket)); refresh(); exportTicket()
                         } }) { Text("Create agent and save ticket") }
                     } else {

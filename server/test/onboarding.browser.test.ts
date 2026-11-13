@@ -15,9 +15,9 @@ test.beforeAll(async () => {
   }).listen(0,'127.0.0.1'); await once(server,'listening'); origin = `http://127.0.0.1:${(server.address() as {port:number}).port}`;
 });
 test.afterAll(async () => { server.closeAllConnections(); await new Promise<void>(resolve=>server.close(()=>resolve())); });
-test.beforeEach(async ({ page }) => {
-  await page.route('https://www.gstatic.com/firebasejs/**/firebase-app.js',r=>r.fulfill({contentType:'application/javascript',body:'export const initializeApp=()=>({});'}));
-  await page.route('https://www.gstatic.com/firebasejs/**/firebase-auth.js',r=>r.fulfill({contentType:'application/javascript',body:`const user={uid:'browser-owner',email:'my-own-account@example.test',getIdToken:async()=> 'owner-session'}; const auth={currentUser:user};export const getAuth=()=>auth;export const signOut=async()=>{};export class GoogleAuthProvider{};export class OAuthProvider{constructor(id){this.providerId=id;}};export const linkWithPopup=async()=>({user});export const signInWithPopup=async()=>({});export const signInWithRedirect=async()=>({});export const getRedirectResult=async()=>({});export const onAuthStateChanged=(a,fn)=>{queueMicrotask(()=>fn(user));};export const setPersistence=async()=>{};export const browserLocalPersistence={};`}));
+test.beforeEach(async ({ context }) => {
+  await context.route('https://www.gstatic.com/firebasejs/**/firebase-app.js',r=>r.fulfill({contentType:'application/javascript',body:'export const initializeApp=()=>({});'}));
+  await context.route('https://www.gstatic.com/firebasejs/**/firebase-auth.js',r=>r.fulfill({contentType:'application/javascript',body:`const user={uid:'browser-owner',email:'my-own-account@example.test',getIdToken:async()=> 'owner-session'}; const auth={currentUser:user};export const getAuth=()=>auth;export const signOut=async()=>{};export class GoogleAuthProvider{};export class OAuthProvider{constructor(id){this.providerId=id;}};export const linkWithPopup=async()=>({user});export const signInWithPopup=async()=>({});export const signInWithRedirect=async()=>({});export const getRedirectResult=async()=>({});export const onAuthStateChanged=(a,fn)=>{queueMicrotask(()=>fn(user));};export const setPersistence=async()=>{};export const browserLocalPersistence={};`}));
 });
 const review = { sessionId:'public-session', serviceId:'public-service', name:'My personal agent', purpose:'Ask for decisions', capabilities:['forms','sms'], status:'pending', expiresAt:Date.now()+600000, expiresInDays:null, comparisonCode:'123456',connectionId:null };
 test('registration offers no owner-access control, needs one confirmation, no phone setup', async ({page})=>{
@@ -208,4 +208,28 @@ test('a failed private storage write is retried before any provisioning request'
   const submit=page.getByRole('button',{name:'Create agent and save ticket',exact:true});
   await submit.click();await expect(page.locator('#retry')).toBeVisible();expect(provisions).toBe(0);
   const download=page.waitForEvent('download');await submit.click();await download;expect(provisions).toBe(1);
+});
+
+
+test('two already-open tabs cannot replace another retained private ticket',async({page,context})=>{
+  const declarations:any[]=[];
+  await context.route('**/v3/services',async r=>{
+    if(r.request().method()==='POST'){
+      declarations.push(r.request().postDataJSON());
+      await r.fulfill({status:503,json:{error:'interrupted'}});
+    }else await r.fulfill({json:[]});
+  });
+  const other=await context.newPage();
+  await Promise.all([page.goto(origin+'/owned-services'),other.goto(origin+'/owned-services')]);
+  for(const tab of [page,other])await expect(tab.locator('#list')).toBeVisible();
+  async function create(tab:typeof page,name:string){
+    await tab.locator('#create-agent').click();await tab.locator('#agent-name').fill(name);await tab.locator('#agent-purpose').fill('Decisions');
+    await tab.getByRole('button',{name:'Create agent and save ticket',exact:true}).click();await expect(tab.locator('#retry')).toBeVisible();
+  }
+  await create(page,'First agent');await create(other,'Second agent');
+  expect(declarations).toHaveLength(1);
+  await other.reload();await expect(other.locator('#ticket-state')).toBeVisible();
+  await other.locator('#save-ticket').click();
+  await expect.poll(()=>declarations.length).toBe(2);
+  expect(declarations[1]).toEqual(declarations[0]);
 });

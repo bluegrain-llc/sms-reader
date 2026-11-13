@@ -127,3 +127,33 @@ except ValueError:pass
   const result=spawnSync('python3',['-c',program],{env:{...process.env,PYTHONPATH:new URL('../../sdks/python',import.meta.url).pathname},input:JSON.stringify(ticket),timeout:10000,encoding:'utf8'});
   assert.equal(result.status,0,result.stderr);assert.equal(result.stdout,'');
 });
+
+test('Python exports legacy whitespace declarations and more than 100 completed rotations',()=>{
+  const program=`import copy
+import request_relay as relay
+class Store:
+ state=None
+ def load(self):return copy.deepcopy(self.state)
+ def save(self,state):self.state=copy.deepcopy(state)
+store=Store()
+s=relay.ServiceSession.create('https://relay.example','Agent','Decisions',store)
+s.state.update(registered=True,serviceId='agent',servicePath='/services/agent',name=' Agent ',purpose=' Decisions ')
+active=s.state['keys'][0]['id']
+def request(path,token,body=None,method=None):
+ global active
+ if method=='PATCH':
+  active=relay._hash(relay._json(body['deliveryPublicKey']))
+  return {}
+ return {'serviceId':'agent','servicePath':'/services/agent','name':'Agent','purpose':'Decisions','capabilities':['forms'],'active':True,'deliveryKeyId':active}
+s.client.request=request
+assert s.export_ticket()['agent']=={'name':'Agent','purpose':'Decisions','capabilities':['forms']}
+for _ in range(100):s.rotate_key()
+assert len(s.state['keys'])==101
+ticket=s.export_ticket()
+assert len(ticket['deliveryKeys'])==101
+assert len(relay._verify_ticket(s.client,ticket))>0
+assert s.state['name']==' Agent '
+`;
+  const result=spawnSync('python3',['-c',program],{env:{...process.env,PYTHONPATH:new URL('../../sdks/python',import.meta.url).pathname},timeout:15000,encoding:'utf8'});
+  assert.equal(result.status,0,result.stderr);assert.equal(result.stdout,'');
+});

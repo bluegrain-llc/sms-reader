@@ -127,7 +127,7 @@ def _validate_ticket(ticket):
     if not isinstance(caps, list) or not 1 <= len(caps) <= 2 or any(c not in ("forms", "sms") for c in caps) or len(set(caps)) != len(caps) or not re.fullmatch(r"smss_[A-Za-z0-9_-]{43}", ticket["serviceCredential"]):
         raise ValueError("Invalid ticket authority")
     keys = ticket["deliveryKeys"]
-    if not isinstance(keys, list) or not 1 <= len(keys) <= 100:
+    if not isinstance(keys, list) or not keys:
         raise ValueError("Missing delivery keys")
     ids = set()
     for key in keys:
@@ -183,7 +183,7 @@ class ServiceSession:
         s = self.state
         if not s.get("registered") or s.get("nextServiceToken") or s.get("nextKey"):
             raise ValueError("Complete registration or pending rotation before exporting")
-        ticket = {"version": 1, "relayOrigin": s["baseUrl"], "agent": {k: s[k] for k in ("name", "purpose", "capabilities")}, "serviceCredential": s["serviceToken"], "deliveryKeys": s["keys"]}
+        ticket = {"version": 1, "relayOrigin": s["baseUrl"], "agent": {"name": s["name"].strip(), "purpose": s["purpose"].strip(), "capabilities": s["capabilities"]}, "serviceCredential": s["serviceToken"], "deliveryKeys": s["keys"]}
         _verify_ticket(self.client, ticket)
         return copy.deepcopy(ticket)
 

@@ -22,7 +22,7 @@ export class ServiceSession {
   async exportTicket() {
     const s = this.state;
     if (!s.registered || s.nextServiceToken || s.nextKey) throw Error('Complete registration or pending rotation before exporting.');
-    const ticket = {version:1,relayOrigin:s.baseUrl,agent:{name:s.name,purpose:s.purpose,capabilities:s.capabilities},
+    const ticket = {version:1,relayOrigin:s.baseUrl,agent:{name:s.name.trim(),purpose:s.purpose.trim(),capabilities:s.capabilities},
       serviceCredential:s.serviceToken,deliveryKeys:s.keys};
     await verifyTicket(ticket, {fetch:this.client.fetch,signal:this.client.signal,allowHttpLoopback:this.client.baseUrl.startsWith('http:')});
     return structuredClone(ticket);

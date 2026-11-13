@@ -51,3 +51,33 @@ test('ticket export is private, complete, retryable and cannot overwrite other f
     await assert.rejects(exportPrivateFile(other,ticket),/occupied/);assert.equal(await readFile(other,'utf8'),'unrelated');
   } finally {await rm(directory,{recursive:true,force:true});}
 });
+
+test('ticket export supports registered legacy declarations with surrounding whitespace',async()=>{
+  const {ticket,options}=await fixture(),store=memory();
+  const imported=await ServiceSession.importTicket(ticket,store,options);
+  imported.state.name=' Agent ';imported.state.purpose=' Decisions ';
+  await imported.save();
+  const resumed=await ServiceSession.resume(store,options);
+  assert.deepEqual((await resumed.exportTicket()).agent,ticket.agent);
+  assert.equal(store.value.name,' Agent ');
+});
+
+test('ticket export and import retain every key after 100 completed rotations',async()=>{
+  const {ticket,service,options}=await fixture(),store=memory();
+  const session=await ServiceSession.importTicket(ticket,store,options);
+  const {hash}=await import('../client.mjs');
+  const fetch=options.fetch;
+  session.client.fetch=async(url,init)=>{
+    if(init.method==='PATCH'){
+      const {kty,crv,x,y}=JSON.parse(init.body).deliveryPublicKey;service.deliveryKeyId=hash(JSON.stringify({kty,crv,x,y}));
+      return Response.json({ok:true});
+    }
+    return fetch(url,init);
+  };
+  for(let i=0;i<100;i++)await session.rotateKey();
+  assert.equal(session.state.keys.length,101);
+  const exported=await session.exportTicket();
+  assert.equal(exported.deliveryKeys.length,101);
+  const restored=await ServiceSession.importTicket(exported,memory(),options);
+  assert.equal(restored.state.keys.length,101);
+});

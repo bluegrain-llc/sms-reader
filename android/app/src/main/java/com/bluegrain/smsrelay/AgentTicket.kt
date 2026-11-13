@@ -44,8 +44,13 @@ class AgentTicket(private val context: Context, ownerId: String) {
         try { stream.write(cipher.iv + cipher.doFinal(ticket.toString().toByteArray(Charsets.UTF_8))); file.finishWrite(stream) }
         catch (e: Exception) { file.failWrite(stream); throw e }
     }
+    fun saveNew(ticket: JSONObject) = synchronized(retentionLock) {
+        check(load() == null) { "Save or clear the retained ticket before creating another agent." }
+        save(ticket)
+    }
     fun clear() = file.delete()
     companion object {
+        private val retentionLock = Any()
         private fun encode(bytes: ByteArray) = Base64.getUrlEncoder().withoutPadding().encodeToString(bytes)
         fun digest(value: String) = MessageDigest.getInstance("SHA-256").digest(value.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
         private fun coordinate(n: BigInteger) = n.toByteArray().let { if (it.size > 32) it.takeLast(32).toByteArray() else ByteArray(32 - it.size) + it }

@@ -10,7 +10,7 @@ export function validateTicket(ticket, options) {
       typeof ticket.agent.purpose !== 'string' || !ticket.agent.purpose.trim() || ticket.agent.purpose.length > 240 ||
       !Array.isArray(ticket.agent.capabilities) || !ticket.agent.capabilities.length || ticket.agent.capabilities.length > 2 ||
       new Set(ticket.agent.capabilities).size !== ticket.agent.capabilities.length || ticket.agent.capabilities.some(c => !['forms','sms'].includes(c)) ||
-      !Array.isArray(ticket.deliveryKeys) || !ticket.deliveryKeys.length || ticket.deliveryKeys.length > 100) throw Error('Invalid session ticket.');
+      !Array.isArray(ticket.deliveryKeys) || !ticket.deliveryKeys.length) throw Error('Invalid session ticket.');
   const client = new RelayClient(ticket.relayOrigin, options);
   const ids = new Set();
   for (const key of ticket.deliveryKeys) {

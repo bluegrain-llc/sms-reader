@@ -52,7 +52,7 @@ $('create-form').onsubmit=e=>{e.preventDefault();void run(async()=>{
   downloadTicket(pendingTicket);$('create-form').hidden=true;await load();status('Agent created. Save its private ticket. Connecting requires a separate approval.');
 });};
 $('save-ticket').onclick=()=>run(async()=>{if(!pendingTicket)return;await retained(auth.currentUser.uid,pendingTicket);await api('/v3/services','POST',await declaration(pendingTicket));downloadTicket(pendingTicket);});
-$('forget-ticket').onclick=()=>run(async()=>{if(!confirm('Confirm the ticket is safely saved or the agent is no longer needed. Clear this browser’s retained ticket?'))return;await retained(auth.currentUser.uid,null);pendingTicket=null;$('ticket-state').hidden=true;});
+$('forget-ticket').onclick=()=>run(async()=>{if(!confirm('Confirm the ticket is safely saved or the agent is no longer needed. Clear this browser’s retained ticket?'))return;await retained(auth.currentUser.uid,null,pendingTicket?.serviceCredential);pendingTicket=null;$('ticket-state').hidden=true;});
 $('back').onclick=()=>run(()=>choose(null));$('retry').onclick=()=>run(load);
 $('toggle').onclick=()=>run(async()=>{const s=services.find(s=>s.serviceId===selected());if(!s)return;await api(`/v3/services/${s.serviceId}`,'PATCH',{active:!s.active});await load();});
 $('delete').onclick=()=>run(async()=>{const s=services.find(s=>s.serviceId===selected());if(!s||!confirm(`Delete ${s.name}? Every connection to this service will lose access. Recipients keep their unrelated history.`))return;await api(`/v3/services/${s.serviceId}`,'DELETE');await choose(null);await load();status('Service deleted. Its connections no longer have access.');});
