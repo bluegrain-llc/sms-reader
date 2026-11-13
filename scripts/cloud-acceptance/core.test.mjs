@@ -101,14 +101,15 @@ test('cloud preflight binds delivery readiness to each serving revision and Sche
 test('delivery preflight failures retain serving revision and timing without credential access', { timeout: 30_000 }, async () => {
   const dir = await mkdtemp(join(tmpdir(), 'relay-preflight-evidence-'));
   try {
-    const cfg = config({ ...base, ownerTokenFile: join(dir, 'missing-owner') });
+    const cfg = config({ ...base, ownerTokenFile: join(dir, 'missing-owner'), replayUrl: 'https://previous---relay.run.app' });
     const queue = `projects/${cfg.projectId}/locations/${cfg.region}/queues/relay-delivery`;
     const signer = `scheduler@${cfg.projectId}.iam.gserviceaccount.com`;
     const env = Object.entries({ GOOGLE_CLOUD_PROJECT: cfg.projectId, SECURITY_LEDGER_BUCKET: cfg.securityLedgerBucket, SERVICE_URL: cfg.serviceUrl, DELIVERY_QUEUE: queue, SCHEDULER_EMAIL: signer }).map(([name, value]) => ({ name, value }));
     const fixtures = {
       projects: { projectId: cfg.projectId, lifecycleState: 'ACTIVE', labels: { environment: 'staging' } },
-      service: { metadata: { labels: { environment: 'staging' } }, status: { url: cfg.serviceUrl, traffic: [{ revisionName: 'current', percent: 100 }] } },
+      service: { metadata: { labels: { environment: 'staging' } }, status: { url: cfg.serviceUrl, traffic: [{ revisionName: 'current', percent: 100 }, { revisionName: 'previous', url: cfg.replayUrl }] } },
       revision: { metadata: { name: 'current' }, spec: { containers: [{ env, startupProbe }] } },
+      replayRevision: { metadata: { name: 'previous' }, spec: { containers: [{ env, startupProbe }] } },
       billing: { billingEnabled: true },
       tasks: { name: queue, state: 'RUNNING' },
       scheduler: { state: 'ENABLED', httpTarget: { httpMethod: 'POST', uri: `${cfg.serviceUrl}/internal/maintenance`, oidcToken: { audience: cfg.serviceUrl, serviceAccountEmail: signer } } },
@@ -127,8 +128,19 @@ for (const name of ['stat', 'readFile']) {
 }
 syncBuiltinESMExports();
 `, { mode: 0o600 });
-    await writeFile(join(dir, 'gcloud'), `#!${process.execPath}\nconst fs = require('node:fs'); const path = require('node:path'); const fixtures = JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures.json'), 'utf8')); const args = process.argv.slice(2); const key = args[0] === 'run' ? args[1] === 'services' ? 'service' : 'revision' : args[0]; if (!fixtures[key]) throw new Error('unexpected cloud command'); console.log(JSON.stringify(fixtures[key]));\n`, { mode: 0o700 });
-    for (const [name, patch, credentialAccess] of [['queue', { tasks: { ...fixtures.tasks, state: 'PAUSED' } }, false], ['scheduler', { scheduler: { ...fixtures.scheduler, state: 'PAUSED' } }, false], ['ready', {}, true]]) {
+    await writeFile(join(dir, 'gcloud'), `#!${process.execPath}\nconst fs = require('node:fs'); const path = require('node:path'); const fixtures = JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures.json'), 'utf8')); const args = process.argv.slice(2); const key = args[0] === 'run' ? args[1] === 'services' ? 'service' : args[3] === 'previous' ? 'replayRevision' : 'revision' : args[0]; if (!fixtures[key]) throw new Error('unexpected cloud command'); console.log(JSON.stringify(fixtures[key]));\n`, { mode: 0o700 });
+    const revisionEnv = (revision, key, value) => ({ ...revision, spec: { containers: [{ ...revision.spec.containers[0], env: env.map(entry => entry.name === key ? { ...entry, value } : entry) }] } });
+    for (const [name, patch, credentialAccess] of [
+      ['startup', { revision: { ...fixtures.revision, spec: { containers: [{ env }] } } }, false],
+      ['runtime-url', { revision: revisionEnv(fixtures.revision, 'SERVICE_URL', 'https://wrong.run.app') }, false],
+      ['runtime-queue', { revision: revisionEnv(fixtures.revision, 'DELIVERY_QUEUE', `projects/production-project/locations/${cfg.region}/queues/delivery`) }, false],
+      ['runtime-signer', { revision: revisionEnv(fixtures.revision, 'SCHEDULER_EMAIL', undefined) }, false],
+      ['replay-queue', { replayRevision: revisionEnv(fixtures.replayRevision, 'DELIVERY_QUEUE', `projects/${cfg.projectId}/locations/${cfg.region}/queues/replay-delivery`) }, false],
+      ['replay-signer', { replayRevision: revisionEnv(fixtures.replayRevision, 'SCHEDULER_EMAIL', `replay@${cfg.projectId}.iam.gserviceaccount.com`) }, false],
+      ['queue', { tasks: { ...fixtures.tasks, state: 'PAUSED' } }, false],
+      ['scheduler', { scheduler: { ...fixtures.scheduler, state: 'PAUSED' } }, false],
+      ['ready', {}, true],
+    ]) {
       await writeFile(fixturePath, JSON.stringify({ ...fixtures, ...patch }), { mode: 0o600 });
       const evidencePath = join(dir, `${name}.json`), credentialAccessPath = join(dir, `${name}-credential-access`);
       await assert.rejects(promisify(execFile)(process.execPath, ['--import', observePath, new URL('./run.mjs', import.meta.url).pathname, '--config', configPath, '--evidence', evidencePath], { timeout: 10_000, env: { ...process.env, PATH: `${dir}:${process.env.PATH}`, FIRESTORE_EMULATOR_HOST: '', FIREBASE_AUTH_EMULATOR_HOST: '', RELAY_TEST_CREDENTIAL_ACCESS: credentialAccessPath } }), error => error.code === 1);

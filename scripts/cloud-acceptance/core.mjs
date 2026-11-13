@@ -176,6 +176,7 @@ export async function preflight(cfg, inspect = cloud, recordContext = () => {}) 
   requireThat(service.status?.url === cfg.serviceUrl, 'service_origin_mismatch');
   const active = service.status.traffic?.find(t => t.percent === 100);
   requireThat(active?.revisionName && service.status.traffic.filter(t => t.percent > 0).length === 1, 'single_active_revision_required');
+  const context = { revision: active.revisionName, projectId: cfg.projectId };
   const checkRevision = async (name, ledger = true) => {
     const revision = await inspect(cfg, ['run', 'revisions', 'describe', name, `--region=${cfg.region}`]);
     requireThat(revision.metadata?.name === name, 'revision_mismatch');
@@ -184,6 +185,7 @@ export async function preflight(cfg, inspect = cloud, recordContext = () => {}) 
     if (ledger) requireThat(env.find(v => v.name === 'SECURITY_LEDGER_BUCKET')?.value === cfg.securityLedgerBucket, 'staging_ledger_mismatch');
     requireThat(!env.some(v => /EMULATOR_HOST/.test(v.name)), 'deployed_emulators_forbidden');
     if (!ledger) return;
+    if (name === active.revisionName) recordContext(context);
     const startup = revision.spec?.containers?.[0]?.startupProbe;
     requireThat(startup?.httpGet?.path === '/startup' && startup.httpGet.port === 8080 && !startup.tcpSocket && !startup.grpc, 'runtime_startup_probe_required');
     requireThat(env.find(v => v.name === 'SERVICE_URL')?.value === cfg.serviceUrl, 'runtime_service_origin_mismatch');
@@ -209,8 +211,6 @@ export async function preflight(cfg, inspect = cloud, recordContext = () => {}) 
   }
   const billing = await inspect(cfg, ['billing', 'projects', 'describe', cfg.projectId]);
   requireThat(billing.billingEnabled === true, 'staging_billing_not_enabled');
-  const context = { revision: active.revisionName, projectId: cfg.projectId };
-  recordContext(context);
   const queue = await inspect(cfg, ['tasks', 'queues', 'describe', delivery.queueId, `--location=${cfg.region}`]);
   const scheduler = await inspect(cfg, ['scheduler', 'jobs', 'describe', 'sms-relay-maintenance', `--location=${cfg.region}`]);
   requireThat(queue.name === delivery.queue, 'delivery_queue_mismatch');
