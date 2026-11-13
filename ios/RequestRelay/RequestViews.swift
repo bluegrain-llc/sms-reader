@@ -96,10 +96,10 @@ struct FormResponse: View {
             while !Task.isCancelled {
                 do {
                     let result: FormRequest = try await model.api.call("/v2/devices/\(model.deviceID)/requests/\(id)")
-                    let first = request == nil; request = result; draft = model.draft(id, expiresAt: result.expiresAt)
+                    let first = request == nil; request = result; draft = model.formDraft(result)
+                    if result.status != "pending" { break }
                     if first && fromNotification { let _: EmptyReply = try await model.api.call("/v2/devices/\(model.deviceID)/requests/\(id)/events", method: "POST", body: ["type":"notification.tapped"]) }
                     if first { let _: EmptyReply = try await model.api.call("/v2/devices/\(model.deviceID)/requests/\(id)/events", method: "POST", body: ["type":"request.opened"]) }
-                    if result.status != "pending" { model.discard(id); break }
                 } catch { failed = true; model.error = (error as? RelayFailure)?.localizedDescription ?? "Could not refresh the request. Try again."; break }
                 try? await Task.sleep(for: .seconds(3))
             }

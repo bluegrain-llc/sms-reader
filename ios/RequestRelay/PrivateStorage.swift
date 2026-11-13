@@ -19,6 +19,11 @@ enum PrivateStorage {
             guard SecItemAdd(value as CFDictionary, nil) == errSecSuccess else { throw RelayFailure.storage }
         } else if status != errSecSuccess { throw RelayFailure.storage }
     }
+    static func writeNew(_ name: String, _ data: Data) throws {
+        let value: [CFString: Any] = [kSecClass: kSecClassGenericPassword, kSecAttrService: "com.bluegrain.smsrelay.tickets", kSecAttrAccount: name,
+            kSecValueData: data, kSecAttrAccessible: kSecAttrAccessibleWhenUnlockedThisDeviceOnly]
+        guard SecItemAdd(value as CFDictionary, nil) == errSecSuccess else { throw RelayFailure.storage }
+    }
     static func remove(_ name: String) { SecItemDelete([kSecClass: kSecClassGenericPassword, kSecAttrService: "com.bluegrain.smsrelay.tickets", kSecAttrAccount: name] as CFDictionary) }
 }
 struct JWK: Codable { let kty: String; let crv: String; let x: String; let y: String; var d: String? }
@@ -45,4 +50,21 @@ struct SessionTicket: Codable {
 extension Data {
     var base64url: String { base64EncodedString().replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "") }
     var hex: String { map { String(format: "%02x", $0) }.joined() }
+}
+
+@MainActor
+enum RetainedTicketStore {
+    static func read(owner: String) throws -> SessionTicket? {
+        try PrivateStorage.read("provision:\(owner)").map { try JSONDecoder().decode(SessionTicket.self, from: $0) }
+    }
+    static func saveNew(_ ticket: SessionTicket, owner: String) throws {
+        try PrivateStorage.writeNew("provision:\(owner)", JSONEncoder().encode(ticket))
+    }
+    static func verify(_ ticket: SessionTicket, owner: String) throws {
+        guard try read(owner: owner)?.serviceCredential == ticket.serviceCredential else { throw RelayFailure.storage }
+    }
+    static func clear(_ ticket: SessionTicket, owner: String) throws {
+        try verify(ticket, owner: owner)
+        PrivateStorage.remove("provision:\(owner)")
+    }
 }

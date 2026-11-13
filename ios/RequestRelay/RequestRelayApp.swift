@@ -64,16 +64,15 @@ struct RelayRoot: View {
                 authenticatedContent
                 #endif
             }
-            if phase != .active { Color(uiColor: .systemBackground).ignoresSafeArea(); Label("Request Relay", systemImage: "lock.shield").font(.title) }
-        }
+        }.modifier(ResponsePrivacyCover(phase: phase))
         .sheet(item: $model.destination) { target in
             if target.kind == "agents" { NavigationStack { Group { if model.signedIn { AgentsScreen() } else { SignInPanel() } }.toolbar { ToolbarItem(placement: .cancellationAction) { Button("Close") { model.closeDestination() } } } } }
-            else { OnboardingView(target: target) }
+            else { OnboardingView(target: target).modifier(ResponsePrivacyCover(phase: phase)) }
         }
         .sheet(item: $notification) { target in NavigationStack {
             Group { if target.kind == "form" { FormResponse(id: target.id, fromNotification: true) } else { CodeResponse(id: target.id) } }
                 .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Close") { notification = nil } } }
-        } }
+        }.modifier(ResponsePrivacyCover(phase: phase)) }
         .alert("Request Relay", isPresented: Binding(get: { model.error != nil || model.notice != nil }, set: { if !$0 { model.error = nil; model.notice = nil } })) {
             Button("OK") { model.error = nil; model.notice = nil }
         } message: { Text(model.error ?? model.notice ?? "") }
@@ -99,5 +98,19 @@ struct RelayRoot: View {
         notification = .init(id: id, kind: UserDefaults.standard.string(forKey: "notification-kind") ?? "sms")
         UserDefaults.standard.removeObject(forKey: "notification-id"); UserDefaults.standard.removeObject(forKey: "notification-kind")
         model.notificationRequest = nil
+    }
+}
+
+struct ResponsePrivacyCover: ViewModifier {
+    let phase: ScenePhase
+    func body(content: Content) -> some View {
+        content.accessibilityHidden(phase != .active).overlay {
+            if phase != .active {
+                ZStack {
+                    Color(uiColor: .systemBackground).ignoresSafeArea()
+                    Label("Request Relay", systemImage: "lock.shield").font(.title)
+                }.accessibilityElement(children: .combine).accessibilityIdentifier("response-privacy-cover")
+            }
+        }
     }
 }

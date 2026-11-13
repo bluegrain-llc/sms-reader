@@ -55,13 +55,13 @@ struct OnboardingView: View {
                     if approval.status == "approved", !registration, let id = approval.connectionId {
                         Button("Manage permissions") { model.destination = .init(kind: "connections", value: id) }
                         if needsDevice { Button("Connect this device") { Task { await model.perform { try await model.registerDevice() } } } }
-                        if target.kind == "oauth" { Button("Continue to requesting app") { Task { await model.perform {
+                    }
+                    if target.kind == "oauth", oauthResponseAvailable(approval.status) { Button("Continue to requesting app") { Task { await model.perform {
                             struct Redirect: Decodable { let redirect: String }
                             let result: Redirect = try await model.api.call("/v3/oauth/sessions/\(target.value)/response", method: "POST", body: [:])
                             guard let url = URL(string: result.redirect), ["https","http"].contains(url.scheme ?? "") else { throw RelayFailure.unavailable }
                             openURL(url)
                         } } } }
-                    }
                 } else if !failed { ProgressView("Loading approval…") }
                 if failed { Text(status); Button("Try again") { Task { await load() } } }
             }.disabled(model.busy).navigationTitle(registration ? "Register agent" : management ? "Manage connection" : "Connect to agent")
@@ -122,7 +122,7 @@ struct OnboardingView: View {
         }
         if management {
             if approved {
-                let _: EmptyReply = try await model.api.call("/v3/connections/\(target.value)", method: "PATCH", body: ["capabilities":caps,"expiresAt":days == 0 ? NSNull() : NSNumber(value: Date().timeIntervalSince1970 * 1000 + Double(days) * 86400000)])
+                let _: EmptyReply = try await model.api.call("/v3/connections/\(target.value)", method: "PATCH", body: ["capabilities":caps,"expiresAt":connectionExpiry(days: days).map { NSNumber(value: $0) as Any } ?? NSNull()])
                 status = "Permissions saved."
             } else { let _: EmptyReply = try await model.api.call("/v3/connections/\(target.value)", method: "DELETE"); await load() }
         } else {

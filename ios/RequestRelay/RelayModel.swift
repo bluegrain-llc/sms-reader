@@ -82,6 +82,8 @@ final class RelayModel: ObservableObject {
     @Published var busy = false
     @Published var notificationRequest: String?
     private var resumeWhenConnected = false
+    private var removingDevices = Set<String>()
+    private var registrationRevision = 0
     private var cachedDeviceID: String?
     var deviceID: String {
         if let cachedDeviceID { return cachedDeviceID }
@@ -95,6 +97,7 @@ final class RelayModel: ObservableObject {
     private var owner: String?
     private var drafts: [String: ResponseDraft] = [:]
     private var expiries: [String: Double] = [:]
+    private var formDraftIDs = Set<String>()
     init() {
         let origin = URL(string: Bundle.main.object(forInfoDictionaryKey: "RelayURL") as? String ?? "https://relay.invalid")!
         api = RelayAPI(origin: origin)
@@ -102,9 +105,9 @@ final class RelayModel: ObservableObject {
             authListener = Auth.auth().addStateDidChangeListener { [weak self] _, user in
                 Task { @MainActor in
                     guard let self else { return }
-                    if owner != user?.uid { clearResponses(); cachedDeviceID = nil; resumeWhenConnected = false; owner = user?.uid; inbox = []; devices = []; grants = []; history = []; agents = []; sms = nil }
-                    signedIn = user != nil; identity = user?.email ?? "Your account"
-                    if user != nil { await refresh() }
+                    if self.owner != user?.uid { self.clearResponses(); self.cachedDeviceID = nil; self.resumeWhenConnected = false; self.registrationRevision += 1; self.owner = user?.uid; self.inbox = []; self.devices = []; self.grants = []; self.history = []; self.agents = []; self.sms = nil }
+                    self.signedIn = user != nil; self.identity = user?.email ?? "Your account"
+                    if user != nil { await self.refresh() }
                 }
             }
         }
@@ -120,8 +123,21 @@ final class RelayModel: ObservableObject {
         if let draft = drafts[id] { return draft }
         let draft = ResponseDraft(); drafts[id] = draft; return draft
     }
-    func discard(_ id: String) { drafts[id]?.clear(); drafts.removeValue(forKey: id); expiries.removeValue(forKey: id) }
-    func clearResponses() { drafts.values.forEach { $0.clear() }; drafts = [:]; expiries = [:] }
+    func formDraft(_ request: FormRequest) -> ResponseDraft {
+        let value = draft(request.id, expiresAt: request.expiresAt)
+        formDraftIDs.insert(request.id)
+        if request.status != "pending" { discard(request.id) }
+        return value
+    }
+    func reconcileFormDrafts(pendingIDs: Set<String>, fetch: (String) async throws -> FormRequest) async {
+        for id in formDraftIDs.subtracting(pendingIDs) {
+            guard let retained = drafts[id] else { continue }
+            // Absence alone is not terminal: the inbox has a bounded result set.
+            if let request = try? await fetch(id), request.status != "pending", drafts[id] === retained { discard(id) }
+        }
+    }
+    func discard(_ id: String) { drafts[id]?.clear(); drafts.removeValue(forKey: id); expiries.removeValue(forKey: id); formDraftIDs.remove(id) }
+    func clearResponses() { drafts.values.forEach { $0.clear() }; drafts = [:]; expiries = [:]; formDraftIDs = [] }
     func expireDrafts() { for (id, expiry) in expiries where expiry <= Date().timeIntervalSince1970 * 1000 { discard(id) } }
     func perform(_ action: () async throws -> Void) async {
         guard !busy else { return }; busy = true; error = nil
@@ -137,6 +153,9 @@ final class RelayModel: ObservableObject {
             let fetched: [Device] = try await api.call("/v1/devices"); devices = fetched
             if let device = fetched.first(where: { $0.id == deviceID }), !device.paused {
                 inbox = try await api.call("/v2/devices/\(deviceID)/inbox")
+                await reconcileFormDrafts(pendingIDs: Set(inbox.map(\.id))) { id in
+                    try await self.api.call("/v2/devices/\(self.deviceID)/requests/\(id)")
+                }
                 if let id = device.activeRequestId {
                     let request: SMSRequest = try await api.call("/v1/devices/\(deviceID)/requests/\(id)"); sms = request
                     if !request.active { discard(id) }
@@ -152,17 +171,26 @@ final class RelayModel: ObservableObject {
         // The FCM delegate retries registration when APNs supplies a token.
         if Messaging.messaging().apnsToken != nil { try await updatePushToken() }
     }
+    func acceptsPushUpdates(for id: String) -> Bool {
+        signedIn && !removingDevices.contains(id) && (resumeWhenConnected || devices.contains { $0.id == id })
+    }
     func updatePushToken() async throws {
         guard signedIn else { return }
+        let id = deviceID
+        guard acceptsPushUpdates(for: id) else { return }
+        let revision = registrationRevision, uid = authentication.user?.uid
         let token = try await Messaging.messaging().token()
-        let _: EmptyReply = try await api.call("/v1/devices/\(deviceID)", method: "PUT", body: ["name":UIDevice.current.name,"fcmToken":token,"wizardVersion":1,"platform":"ios"])
-        if resumeWhenConnected {
-            let _: EmptyReply = try await api.call("/v1/devices/\(deviceID)", method: "PATCH", body: ["paused":false]); resumeWhenConnected = false
+        guard registrationRevision == revision, authentication.user?.uid == uid, acceptsPushUpdates(for: id) else { return }
+        let _: EmptyReply = try await api.call("/v1/devices/\(id)", method: "PUT", body: ["name":UIDevice.current.name,"fcmToken":token,"wizardVersion":1,"platform":"ios"])
+        if resumeWhenConnected, registrationRevision == revision, acceptsPushUpdates(for: id) {
+            let _: EmptyReply = try await api.call("/v1/devices/\(id)", method: "PATCH", body: ["paused":false]); resumeWhenConnected = false
         }
         await refresh()
     }
     func removeDevice(_ id: String) async throws {
         let current = id == deviceID
+        removingDevices.insert(id); registrationRevision += 1
+        defer { removingDevices.remove(id) }
         let _: EmptyReply = try await api.call("/v1/devices/\(id)", method: "DELETE")
         if current {
             PrivateStorage.remove("installation:\(authentication.user?.uid ?? "")"); cachedDeviceID = nil; resumeWhenConnected = false; clearResponses()

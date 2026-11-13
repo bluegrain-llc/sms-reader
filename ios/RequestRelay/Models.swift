@@ -124,3 +124,8 @@ struct RelayDestination: Codable, Equatable, Identifiable {
         return .init(kind: kind, value: value)
     }
 }
+
+func connectionExpiry(days: Int, now: Date = Date()) -> Int64? {
+    days == 0 ? nil : Int64((now.timeIntervalSince1970 * 1000).rounded(.down)) + Int64(days) * 86400000
+}
+func oauthResponseAvailable(_ status: String?) -> Bool { status == "approved" || status == "denied" }

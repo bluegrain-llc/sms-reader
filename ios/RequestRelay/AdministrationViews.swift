@@ -100,7 +100,7 @@ struct AgentsScreen: View {
     @State private var exporting = false
     @State private var clear = false
     @State private var deleting: Agent?
-    private var storageKey: String { "provision:\(model.authentication.user?.uid ?? "")" }
+    @State private var ticketOwner: String?
     var body: some View {
         Form {
             Section("Create agent") {
@@ -115,9 +115,12 @@ struct AgentsScreen: View {
                     Toggle("Forms and decisions", isOn: $forms); Toggle("SMS codes", isOn: $sms)
                     Button("Create agent and save ticket") {
                         Task { await model.perform {
+                            guard let uid = model.authentication.user?.uid else { throw RelayFailure.authentication }
                             let ticket = try SessionTicket.create(origin: model.api.origin, agent: .init(name: name.trimmingCharacters(in: .whitespacesAndNewlines), purpose: purpose.trimmingCharacters(in: .whitespacesAndNewlines), capabilities: (forms ? ["forms"] : []) + (sms ? ["sms"] : [])))
-                            try PrivateStorage.write(storageKey, JSONEncoder().encode(ticket)); self.ticket = ticket
+                            try RetainedTicketStore.saveNew(ticket, owner: uid); self.ticket = ticket; ticketOwner = uid
                             let _: Agent = try await model.api.call("/v3/services", method: "POST", body: ticket.declaration)
+                            guard model.authentication.user?.uid == uid else { throw RelayFailure.authentication }
+                            try RetainedTicketStore.verify(ticket, owner: uid)
                             document = TicketDocument(data: try JSONEncoder().encode(ticket)); exporting = true; await model.refresh()
                         } }
                     }.disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || purpose.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || (!forms && !sms))
@@ -140,18 +143,31 @@ struct AgentsScreen: View {
                 if model.agents.isEmpty { Text("No agents registered.").foregroundStyle(.secondary) }
             }
         }.navigationTitle("Agents").disabled(model.busy)
-        .task { do { ticket = try PrivateStorage.read(storageKey).map { try JSONDecoder().decode(SessionTicket.self, from: $0) } } catch { model.error = RelayFailure.storage.localizedDescription } }
+        .task(id: model.authentication.user?.uid) {
+            ticket = nil; document = nil; exporting = false; ticketOwner = model.authentication.user?.uid
+            guard let uid = ticketOwner else { return }
+            do { ticket = try RetainedTicketStore.read(owner: uid) } catch { model.error = RelayFailure.storage.localizedDescription }
+        }
         .fileExporter(isPresented: $exporting, document: document, contentType: .json, defaultFilename: "agent-session-ticket") { result in
             switch result { case .success: model.notice = "Ticket saved. Supply it privately to your agent."; case .failure: model.error = "Ticket was not saved. Your provisioning state is retained for retry." }
         }
-        .confirmationDialog("Confirm the ticket is safely saved before clearing its retained copy.", isPresented: $clear, titleVisibility: .visible) { Button("Clear retained ticket", role: .destructive) { PrivateStorage.remove(storageKey); ticket = nil; document = nil } }
+        .confirmationDialog("Confirm the ticket is safely saved before clearing its retained copy.", isPresented: $clear, titleVisibility: .visible) { Button("Clear retained ticket", role: .destructive) {
+            do {
+                guard let ticket, let uid = ticketOwner, model.authentication.user?.uid == uid else { throw RelayFailure.authentication }
+                try RetainedTicketStore.clear(ticket, owner: uid); self.ticket = nil; document = nil
+            } catch { model.error = RelayFailure.storage.localizedDescription }
+        } }
         .confirmationDialog("Delete this agent and disconnect every recipient?", isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } }), titleVisibility: .visible) {
             if let agent = deleting { Button("Delete agent", role: .destructive) { Task { await model.perform { let _: Agent = try await model.api.call("/v3/services/\(agent.id)", method: "DELETE"); await model.refresh() } }; deleting = nil } }
         }
     }
     private func provision(_ ticket: SessionTicket) {
         Task { await model.perform {
+            guard let uid = ticketOwner, model.authentication.user?.uid == uid else { throw RelayFailure.authentication }
+            try RetainedTicketStore.verify(ticket, owner: uid)
             let _: Agent = try await model.api.call("/v3/services", method: "POST", body: ticket.declaration)
+            guard model.authentication.user?.uid == uid else { throw RelayFailure.authentication }
+            try RetainedTicketStore.verify(ticket, owner: uid)
             document = TicketDocument(data: try JSONEncoder().encode(ticket)); exporting = true; await model.refresh()
         } }
     }

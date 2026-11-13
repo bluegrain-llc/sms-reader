@@ -38,3 +38,15 @@ extension RelayUITests {
         XCTAssertFalse(app.staticTexts["Synthetic response"].exists)
     }
 }
+
+extension RelayUITests {
+    func testPrivacyCoverAlsoCoversPresentedResponse() {
+        let app = XCUIApplication(); app.launchArguments = ["--ui-contract"]; app.launch()
+        app.buttons["Private modal"].tap()
+        let response = app.staticTexts["private-modal-response"]
+        XCTAssertTrue(response.waitForExistence(timeout: 5)); XCTAssertTrue(response.isHittable)
+        app.buttons["Hide preview"].tap()
+        XCTAssertTrue(app.descendants(matching: .any)["response-privacy-cover"].waitForExistence(timeout: 5))
+        XCTAssertFalse(response.isHittable)
+    }
+}

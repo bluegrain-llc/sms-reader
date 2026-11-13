@@ -5,10 +5,13 @@ import SwiftUI
 struct UIContractHarness: View {
     @StateObject private var codeDraft = ResponseDraft()
     @StateObject private var formDraft = ResponseDraft()
+    @State private var privacySheet = false
+    @State private var previewPhase: ScenePhase = .active
     private let expiry = (Date().timeIntervalSince1970 + 300) * 1000
     var body: some View {
         NavigationStack {
             List {
+                Button("Private modal") { previewPhase = .active; privacySheet = true }
                 NavigationLink("Manual code") {
                     CodeEditor(request: SMSRequest(requestId: "fixture-code", callerName: "Synthetic agent", title: "Test sign-in", purpose: "Share only by tapping Send.", status: "ready", expiresAt: expiry, manualEntryDeadline: expiry), draft: codeDraft)
                 }
@@ -19,6 +22,11 @@ struct UIContractHarness: View {
                         steps: [.init(id: "choice", title: "Choose", fieldIds: ["include"]), .init(id: "details", title: "Details", fieldIds: ["details"], when: .init(fieldId: "include", equals: .boolean(true)))]), draft: formDraft)
                 }
             }.navigationTitle("Simulator contracts")
+        }.sheet(isPresented: $privacySheet) {
+            VStack {
+                Text("Synthetic private response").accessibilityIdentifier("private-modal-response")
+                Button("Hide preview") { previewPhase = .inactive }
+            }.modifier(ResponsePrivacyCover(phase: previewPhase))
         }
     }
 }
