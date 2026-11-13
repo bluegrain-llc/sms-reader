@@ -48,9 +48,30 @@ test('Python SDK decrypts JOSE delivery fixtures and rejects changed identifiers
 test('provider declarations expose only caller tools and never lifecycle authority', async () => {
   const calls: unknown[]=[];
   const t=providerTools([{name:'request_form',description:'Ask',inputSchema:{type:'object',properties:{title:{type:'string'}}}}],async(name: string,args: unknown)=>{calls.push([name,args]);return {status:'pending'};});
-  assert.ok(!JSON.stringify([t.openai,t.anthropic,t.google]).includes('token'));
+  assert.ok(!JSON.stringify([t.openai,t.anthropic,t.google,t.xai]).includes('token'));
   await assert.rejects(t.execute('register_service',{}));assert.equal(calls.length,0);
   assert.deepEqual(await t.execute('request_form',{title:'Review'}),{status:'pending'});assert.equal(calls.length,1);
+});
+test('xAI Responses declarations preserve approved schemas and reject unapproved execution', async () => {
+  const schema={type:'object',properties:{title:{type:'string'}},required:['title']};
+  const tools=[
+    {name:'request_form',description:'Ask',inputSchema:schema,_meta:{'com.bluegrain.smsrelay/capability':'forms'}},
+    {name:'request_sms',description:'Code',inputSchema:{type:'object'},_meta:{'com.bluegrain.smsrelay/capability':'sms'}},
+    {name:'register_service',description:'Private lifecycle',inputSchema:{type:'object'}},
+  ];
+  const calls: unknown[]=[];
+  const adapter=providerTools(capabilityTools(tools,['forms']),async(name: string,args: unknown)=>{calls.push([name,args]);return {status:'pending'};});
+  assert.deepEqual(adapter.xai,[{type:'function',name:'request_form',description:'Ask',parameters:schema}]);
+  for(const name of ['request_sms','register_service'])await assert.rejects(adapter.execute(name,{}),/capability_not_approved/);
+  assert.deepEqual(calls,[]);
+  assert.deepEqual(await adapter.execute('request_form',{title:'Review'}),{status:'pending'});
+  assert.deepEqual(calls,[['request_form',{title:'Review'}]]);
+});
+test('xAI remote MCP configuration keeps OAuth authority in private software fields', () => {
+  const resource='https://relay.example/mcp/services/public-service',accessToken=credential('smsa');
+  assert.deepEqual(hostedProviderConfig('xai',{resource,accessToken}),{type:'mcp',server_label:'relay',server_url:resource,authorization:accessToken});
+  for(const prefix of ['smsr','smss','smsreg'])assert.throws(()=>hostedProviderConfig('xai',{resource,accessToken:credential(prefix)}),/oauth_access_token_required/);
+  for(const invalid of ['http://relay.example/mcp/services/public-service','https://relay.example/mcp',resource+'?token=private',resource+'#private','https://user:private@relay.example/mcp/services/public-service'])assert.throws(()=>hostedProviderConfig('xai',{resource:invalid,accessToken}),/invalid_mcp_resource/);
 });
 test('hosted API configuration requires a named resource and OAuth access authority', () => {
   const resource='https://relay.example/mcp/services/public-service',accessToken=credential('smsa');
