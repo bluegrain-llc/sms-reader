@@ -87,7 +87,7 @@ extension RelayTests {
         let model = RelayModel(), retained = model.formDraft(formState("pending"))
         retained.values = ["answer": .text("private")]
         retained.numberInputs = ["number": "123."]
-        let terminal = try await model.prepareFormResponse(formState("cancelled"), opening: true, fromNotification: true) { _ in
+        let terminal = try await model.prepareFormResponse(formState("cancelled"), observations: FormOpeningObservations(), fromNotification: true) { _ in
             XCTFail("Terminal loads must not issue opening observations")
             throw RelayFailure.unavailable
         }
@@ -96,13 +96,85 @@ extension RelayTests {
         var observations: [String] = []
         var received = false
         do {
-            _ = try await model.prepareFormResponse(formState("pending"), opening: true, fromNotification: true, receive: { _ in received = true }) { event in
+            _ = try await model.prepareFormResponse(formState("pending"), observations: FormOpeningObservations(), fromNotification: true, receive: { _ in received = true }) { event in
                 XCTAssertTrue(received)
                 observations.append(event); throw RelayFailure.unavailable
             }
             XCTFail("The failing observation must propagate")
-        } catch { XCTAssertEqual(observations, ["notification.tapped"]) }
+        } catch { XCTAssertEqual(observations, ["notification.tapped", "request.opened"]) }
         model.clearResponses()
+    }
+    @MainActor func testOpeningRetriesOnlyFailedObservationsAfterContentWasReceived() async throws {
+        for failedEvent in ["notification.tapped", "request.opened"] {
+            let model = RelayModel(), observations = FormOpeningObservations()
+            var received = false, events: [String] = []
+            do {
+                _ = try await model.prepareFormResponse(formState("pending"), observations: observations, fromNotification: true, receive: { _ in received = true }) { event in
+                    XCTAssertTrue(received); events.append(event)
+                    if event == failedEvent { throw RelayFailure.unavailable }
+                }
+                XCTFail("The failed observation must offer retry")
+            } catch {}
+            XCTAssertEqual(events, ["notification.tapped", "request.opened"])
+            events = []
+            _ = try await model.prepareFormResponse(formState("pending"), observations: observations, fromNotification: true) { events.append($0) }
+            XCTAssertEqual(events, [failedEvent])
+            _ = try await model.prepareFormResponse(formState("pending"), observations: observations, fromNotification: true) { _ in XCTFail("Accepted observations must not repeat on polling") }
+            model.clearResponses()
+        }
+    }
+    func testRequesterMarkdownRemovesNavigationWithoutRemovingFormatting() {
+        let text = inertRequestMarkdown("[Review details](https://operator.example/track) and **careful**.")
+        XCTAssertEqual(String(text.characters), "Review details and careful.")
+        XCTAssertTrue(text.runs.allSatisfy { $0.link == nil })
+        XCTAssertTrue(text.runs.contains { $0.inlinePresentationIntent?.contains(.stronglyEmphasized) == true })
+    }
+    @MainActor func testRetainedSMSReadsDoNotReplaceTheActiveRequestOrItsDraft() {
+        let model = RelayModel()
+        let current = SMSRequest(requestId: "current", callerName: "Agent", title: "Code", purpose: "Test", status: "ready", expiresAt: 2000000000000)
+        model.updateSMS(current)
+        let draft = model.draft(current.id, expiresAt: current.expiresAt); draft.code = "123456"
+        let oldDraft = model.draft("old", expiresAt: current.expiresAt); oldDraft.code = "654321"
+        for status in ["completed", "ready"] {
+            model.receiveSMS(.init(requestId: "old", callerName: "Agent", title: "Old", purpose: "Test", status: status, expiresAt: current.expiresAt))
+            XCTAssertEqual(model.sms?.id, current.id)
+            XCTAssertEqual(draft.code, "123456")
+        }
+        XCTAssertTrue(oldDraft.code.isEmpty)
+        model.receiveSMS(.init(requestId: current.id, callerName: "Agent", title: "Code", purpose: "Test", status: "completed", expiresAt: current.expiresAt))
+        XCTAssertTrue(draft.code.isEmpty); XCTAssertEqual(model.sms?.status, "completed")
+        model.clearResponses()
+    }
+    @MainActor func testOnlyExplicitRegistrationReplacesARemotelyDeletedInstallation() async throws {
+        let model = RelayModel(), key = "installation:signed-out"
+        let original = try PrivateStorage.read(key)
+        defer { if let original { try? PrivateStorage.write(key, original) } else { PrivateStorage.remove(key) } }
+        let deletedID = model.deviceID
+        XCTAssertFalse(deletedID.isEmpty)
+        var attempts: [String] = []
+        do {
+            _ = try await model.registerInstallation(allowReplacement: false) { id in
+                attempts.append(id); throw RelayFailure.rejected("installation_id_unavailable")
+            }
+            XCTFail("Automatic token refresh must not reconnect a removed device")
+        } catch {}
+        XCTAssertEqual(attempts, [deletedID]); XCTAssertEqual(model.deviceID, deletedID)
+        attempts = []
+        let replacement = try await model.registerInstallation(allowReplacement: true) { id in
+            attempts.append(id)
+            if id == deletedID { throw RelayFailure.rejected("installation_id_unavailable") }
+        }
+        XCTAssertEqual(attempts, [deletedID, replacement]); XCTAssertNotEqual(replacement, deletedID)
+        XCTAssertEqual(model.deviceID, replacement)
+        XCTAssertEqual(try PrivateStorage.read(key), Data(replacement.utf8))
+        attempts = []
+        do {
+            _ = try await model.registerInstallation(allowReplacement: true) { id in
+                attempts.append(id); throw RelayFailure.unavailable
+            }
+            XCTFail("Unrelated failures must propagate without rotating the installation")
+        } catch {}
+        XCTAssertEqual(attempts, [replacement]); XCTAssertEqual(model.deviceID, replacement)
     }
     @MainActor func testSMSSuccessorErasesPriorPrivateDraft() {
         let model = RelayModel()

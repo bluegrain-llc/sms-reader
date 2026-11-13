@@ -12,10 +12,10 @@ cd ios
 xcodegen generate
 xcodebuild -resolvePackageDependencies -project RequestRelay.xcodeproj -scheme RequestRelay
 xcodebuild test -project RequestRelay.xcodeproj -scheme RequestRelay \
-  -destination 'platform=iOS Simulator,name=iPhone 16' CODE_SIGNING_ALLOWED=NO
+  -destination 'platform=iOS Simulator,name=iPhone 16' CODE_SIGN_IDENTITY=- DEVELOPMENT_TEAM=
 ```
 
-The macOS workflow selects an available iPhone simulator, builds and runs unit/UI tests, and uploads its xcresult bundle. XcodeGen creates the project, Info.plist and entitlements from tracked `project.yml`; these generated files are ignored. An unconfigured debug app displays a setup screen and cannot register a device.
+The macOS workflow selects an available iPhone simulator, builds and runs unit/UI tests, and uploads its xcresult bundle. Simulator builds use ad hoc signing and the tracked `Simulator.entitlements` application identity/access group so the tests exercise real Keychain storage without a developer account. Device builds use the deployment entitlements generated from `project.yml`. XcodeGen creates the project, Info.plist and deployment entitlements; these generated files are ignored. An unconfigured debug app displays a setup screen and cannot register a device.
 
 Before a signed build:
 
@@ -35,7 +35,7 @@ Manual submission uses `{"status":"completed","source":"manual","code":"123456"}
 
 Form wizards evaluate conditions against earlier reachable steps and omit hidden answers. They support native text, multiline, numbers, checkboxes, single/multiple choices and dates, with Previous/Next, final review and explicit submission. Form SMS helper fields use manual entry and never send Android `input.ready` observations from iOS. Existing connection permissions still authorize each request type independently.
 
-Draft answers and codes exist only in memory. They are cleared on terminal outcomes, expiry, account changes and termination; process death naturally discards them. They never enter Keychain, UserDefaults, state restoration, notifications, background work or logs. A privacy cover hides responses when the scene is inactive. Only public link/request identifiers and pairing attempt IDs enter UserDefaults. The installation ID and tickets use separate device-only Keychain entries; export is an explicit user file operation.
+Draft answers and codes exist only in memory. They are cleared on terminal outcomes, expiry, account changes and termination; process death naturally discards them. They never enter Keychain, UserDefaults, state restoration, notifications, background work or logs. A privacy cover hides responses when the scene is inactive. Public link/request identifiers and pairing attempt IDs enter UserDefaults; pairing attempt keys also contain the Firebase account ID to scope retries to that account. The installation ID and tickets use separate device-only Keychain entries; export is an explicit user file operation.
 
 ## Authentication and deletion
 

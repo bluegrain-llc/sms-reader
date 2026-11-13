@@ -8,7 +8,8 @@ enum PrivateStorage {
         var result: CFTypeRef?
         let status = SecItemCopyMatching([kSecClass: kSecClassGenericPassword, kSecAttrService: "com.bluegrain.smsrelay.tickets", kSecAttrAccount: name, kSecReturnData: true] as CFDictionary, &result)
         if status == errSecItemNotFound { return nil }
-        guard status == errSecSuccess, let data = result as? Data else { throw RelayFailure.storage }
+        guard status == errSecSuccess else { throw RelayFailure.keychain(status) }
+        guard let data = result as? Data else { throw RelayFailure.storage }
         return data
     }
     static func write(_ name: String, _ data: Data) throws {
@@ -16,13 +17,15 @@ enum PrivateStorage {
         let status = SecItemUpdate(query as CFDictionary, [kSecValueData: data] as CFDictionary)
         if status == errSecItemNotFound {
             var value = query; value[kSecValueData] = data; value[kSecAttrAccessible] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
-            guard SecItemAdd(value as CFDictionary, nil) == errSecSuccess else { throw RelayFailure.storage }
-        } else if status != errSecSuccess { throw RelayFailure.storage }
+            let added = SecItemAdd(value as CFDictionary, nil)
+            guard added == errSecSuccess else { throw RelayFailure.keychain(added) }
+        } else if status != errSecSuccess { throw RelayFailure.keychain(status) }
     }
     static func writeNew(_ name: String, _ data: Data) throws {
         let value: [CFString: Any] = [kSecClass: kSecClassGenericPassword, kSecAttrService: "com.bluegrain.smsrelay.tickets", kSecAttrAccount: name,
             kSecValueData: data, kSecAttrAccessible: kSecAttrAccessibleWhenUnlockedThisDeviceOnly]
-        guard SecItemAdd(value as CFDictionary, nil) == errSecSuccess else { throw RelayFailure.storage }
+        let status = SecItemAdd(value as CFDictionary, nil)
+        guard status == errSecSuccess else { throw RelayFailure.keychain(status) }
     }
     static func remove(_ name: String) { SecItemDelete([kSecClass: kSecClassGenericPassword, kSecAttrService: "com.bluegrain.smsrelay.tickets", kSecAttrAccount: name] as CFDictionary) }
 }

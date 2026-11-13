@@ -7,12 +7,12 @@ import FirebaseMessaging
 import UserNotifications
 
 enum RelayFailure: LocalizedError {
-    case configuration, authentication, storage, unavailable, expired, rejected(String)
+    case configuration, authentication, storage, keychain(Int32), unavailable, expired, rejected(String)
     var errorDescription: String? {
         switch self {
         case .configuration: return "Install a configured build to connect to this relay."
         case .authentication: return "Sign-in was not completed. Use the same account and try again. Accounts are linked only through Link account."
-        case .storage: return "Private storage is unavailable. Retry before continuing."
+        case .storage, .keychain: return "Private storage is unavailable. Retry before continuing."
         case .unavailable: return "The relay is unavailable. Try again."
         case .expired: return "This request or link expired. Ask for a new one."
         case .rejected(let reason):
@@ -63,6 +63,18 @@ final class ResponseDraft: ObservableObject {
     @Published var review = false
     let submissionID = UUID().uuidString
     func clear() { values = [:]; code = ""; numberInputs = [:]; stepID = nil; review = false }
+}
+@MainActor
+final class FormOpeningObservations: ObservableObject {
+    private var accepted = Set<String>()
+    func report(fromNotification: Bool, observe: (String) async throws -> Void) async throws {
+        var failure: Error?
+        for event in (fromNotification ? ["notification.tapped", "request.opened"] : ["request.opened"]) where !accepted.contains(event) {
+            do { try await observe(event); accepted.insert(event) }
+            catch { if failure == nil { failure = error } }
+        }
+        if let failure { throw failure }
+    }
 }
 @MainActor
 final class RelayModel: ObservableObject {
@@ -134,18 +146,22 @@ final class RelayModel: ObservableObject {
         if request.status != "pending" { discard(request.id) }
         return value
     }
-    func prepareFormResponse(_ request: FormRequest, opening: Bool, fromNotification: Bool, receive: (ResponseDraft) -> Void = { _ in }, observe: (String) async throws -> Void) async throws -> ResponseDraft {
+    func prepareFormResponse(_ request: FormRequest, observations: FormOpeningObservations, fromNotification: Bool, receive: (ResponseDraft) -> Void = { _ in }, observe: (String) async throws -> Void) async throws -> ResponseDraft {
         let value = formDraft(request)
         receive(value)
-        guard request.status == "pending", opening else { return value }
-        if fromNotification { try await observe("notification.tapped") }
-        try await observe("request.opened")
+        guard request.status == "pending" else { return value }
+        try await observations.report(fromNotification: fromNotification, observe: observe)
         return value
     }
     func updateSMS(_ request: SMSRequest?) {
         if let old = sms, old.id != request?.id { discard(old.id) }
         sms = request
         if let request, !request.active { discard(request.id) }
+    }
+    func receiveSMS(_ request: SMSRequest) {
+        // Only active-request discovery can replace another request's draft.
+        if sms?.id == request.id { sms = request }
+        if !request.active || (request.manualEntryDeadline ?? request.expiresAt) <= Date().timeIntervalSince1970 * 1000 { discard(request.id) }
     }
     func reconcileFormDrafts(pendingIDs: Set<String>, fetch: (String) async throws -> FormRequest) async {
         for id in formDraftIDs.subtracting(pendingIDs) {
@@ -215,11 +231,27 @@ final class RelayModel: ObservableObject {
         let revision = registrationRevision, uid = authentication.user?.uid
         let token = try await Messaging.messaging().token()
         guard registrationRevision == revision, authentication.user?.uid == uid, acceptsPushUpdates(for: id) else { return }
-        let _: EmptyReply = try await api.call("/v1/devices/\(id)", method: "PUT", body: ["name":UIDevice.current.name,"fcmToken":token,"wizardVersion":1,"platform":"ios"])
-        if resumeWhenConnected, registrationRevision == revision, acceptsPushUpdates(for: id) {
-            let _: EmptyReply = try await api.call("/v1/devices/\(id)", method: "PATCH", body: ["paused":false]); resumeWhenConnected = false
+        let registeredID = try await registerInstallation(allowReplacement: resumeWhenConnected) { installation in
+            let _: EmptyReply = try await self.api.call("/v1/devices/\(installation)", method: "PUT", body: ["name":UIDevice.current.name,"fcmToken":token,"wizardVersion":1,"platform":"ios"])
+        }
+        let registeredRevision = registrationRevision
+        if resumeWhenConnected, authentication.user?.uid == uid, registeredID == deviceID, acceptsPushUpdates(for: registeredID) {
+            let _: EmptyReply = try await api.call("/v1/devices/\(registeredID)", method: "PATCH", body: ["paused":false])
+            if registrationRevision == registeredRevision { resumeWhenConnected = false }
         }
         await refresh()
+    }
+    func registerInstallation(allowReplacement: Bool, register: (String) async throws -> Void) async throws -> String {
+        let id = deviceID, revision = registrationRevision, uid = authentication.user?.uid
+        do { try await register(id); return id }
+        catch RelayFailure.rejected(let reason) where reason == "installation_id_unavailable" {
+            guard allowReplacement, registrationRevision == revision, authentication.user?.uid == uid else { throw RelayFailure.rejected(reason) }
+            let replacement = UUID().uuidString
+            try PrivateStorage.write("installation:\(uid ?? "signed-out")", Data(replacement.utf8))
+            cachedDeviceID = replacement; registrationRevision += 1; clearResponses()
+            try await register(replacement)
+            return replacement
+        }
     }
     func removeDevice(_ id: String) async throws {
         let current = id == deviceID
@@ -236,8 +268,7 @@ final class RelayModel: ObservableObject {
         if request.status == "pending_phone" {
             request = try await api.call("/v1/devices/\(deviceID)/requests/\(id)/events", method: "POST", body: ["status":"ready","mode":"manual"])
         }
-        updateSMS(request)
-        if !request.active || (request.manualEntryDeadline ?? request.expiresAt) <= Date().timeIntervalSince1970 * 1000 { discard(id) }
+        receiveSMS(request)
         return request
     }
     func submitSMS(_ request: SMSRequest, code: String, deny: Bool = false) async throws {
@@ -245,7 +276,7 @@ final class RelayModel: ObservableObject {
         let body: [String: Any] = deny ? ["status":"denied"] : ["status":"completed","source":"manual","code":code]
         let state: SMSRequest = try await api.call("/v1/devices/\(deviceID)/requests/\(request.id)/events", method: "POST", body: body)
         if !state.active { discard(request.id); notice = state.reason == "handled_on_another_device" ? "Handled on another device." : "Response accepted." }
-        updateSMS(state); await refresh()
+        receiveSMS(state); await refresh()
     }
     func submitForm(_ request: FormRequest, action: FormAction, draft: ResponseDraft) async throws -> FormRequest {
         let fields = request.visibleFields(draft.values), ids = Set(fields.map(\.id))

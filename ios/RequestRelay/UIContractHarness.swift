@@ -8,13 +8,17 @@ struct UIContractHarness: View {
     @StateObject private var numberDraft = ResponseDraft()
     @State private var privacySheet = false
     @State private var previewPhase: ScenePhase = .active
+    @State private var codeExpiry = (Date().timeIntervalSince1970 + 300) * 1000
     private let expiry = (Date().timeIntervalSince1970 + 300) * 1000
     var body: some View {
         NavigationStack {
             List {
                 Button("Private modal") { previewPhase = .active; privacySheet = true }
                 NavigationLink("Manual code") {
-                    CodeEditor(request: SMSRequest(requestId: "fixture-code", callerName: "Synthetic agent", title: "Test sign-in", purpose: "Share only by tapping Send.", status: "ready", expiresAt: expiry, manualEntryDeadline: expiry), draft: codeDraft)
+                    VStack {
+                        CodeEditor(request: SMSRequest(requestId: "fixture-code", callerName: "Synthetic agent", title: "Test sign-in", purpose: "Share only by tapping Send.", status: "ready", expiresAt: expiry, manualEntryDeadline: codeExpiry), draft: codeDraft)
+                        Button("Expire entry window") { codeExpiry = 0 }
+                    }
                 }
                 NavigationLink("Numeric draft") {
                     VStack {

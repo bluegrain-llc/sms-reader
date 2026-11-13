@@ -25,14 +25,20 @@ extension RelayUITests {
         let app = XCUIApplication(); app.launchArguments = ["--ui-contract"]; app.launch()
         app.buttons["Wizard request"].tap()
         let include = app.switches["Include details"]
-        XCTAssertTrue(include.waitForExistence(timeout: 5)); include.tap(); app.buttons["Next"].tap()
+        XCTAssertTrue(include.waitForExistence(timeout: 5))
+        include.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)).tap()
+        XCTAssertTrue(NSPredicate(format: "value == %@", "1").evaluate(with: include))
+        let next = app.buttons["review-response"]
+        XCTAssertTrue(next.waitForExistence(timeout: 5)); XCTAssertEqual(next.label, "Next"); next.tap()
         let details = app.textFields["Details"]; XCTAssertTrue(details.waitForExistence(timeout: 5))
         details.tap(); details.typeText("Synthetic response")
         app.buttons["review-response"].tap()
         XCTAssertTrue(app.staticTexts["Review your response"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.buttons["Send response"].exists)
         XCTAssertFalse(app.alerts.firstMatch.exists)
-        app.buttons["Edit response"].tap(); app.buttons["Previous"].tap(); include.tap()
+        app.buttons["Edit response"].tap(); app.buttons["Previous"].tap()
+        include.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)).tap()
+        XCTAssertEqual(include.value as? String, "0")
         XCTAssertTrue(app.buttons["review-response"].exists)
         app.buttons["review-response"].tap()
         XCTAssertFalse(app.staticTexts["Synthetic response"].exists)
@@ -40,6 +46,16 @@ extension RelayUITests {
 }
 
 extension RelayUITests {
+    func testExpiredSMSCannotAcceptAnotherPrivateCode() {
+        let app = XCUIApplication(); app.launchArguments = ["--ui-contract"]; app.launch()
+        app.buttons["Manual code"].tap()
+        let input = app.textFields["code-input"]
+        XCTAssertTrue(input.waitForExistence(timeout: 5)); input.tap(); input.typeText("123456")
+        app.buttons["Expire entry window"].tap()
+        XCTAssertTrue(app.staticTexts["The entry window has closed."].waitForExistence(timeout: 5))
+        XCTAssertFalse(input.exists); XCTAssertFalse(app.buttons["send-code"].exists)
+        XCTAssertFalse(app.staticTexts["123456"].exists)
+    }
     func testClearingDraftErasesMountedNumericInput() {
         let app = XCUIApplication(); app.launchArguments = ["--ui-contract"]; app.launch()
         app.buttons["Numeric draft"].tap()

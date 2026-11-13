@@ -25,6 +25,16 @@ struct RequestLabel: View {
         Text("Expires \(Date(timeIntervalSince1970: expiry / 1000), style: .relative)").font(.caption).foregroundStyle(.secondary)
     }.padding(.vertical, 4) }
 }
+func inertRequestMarkdown(_ source: String) -> AttributedString {
+    var text = (try? AttributedString(markdown: source, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(source)
+    let links = text.runs.filter { $0.link != nil }.map(\.range)
+    for range in links { text[range].link = nil }
+    return text
+}
+struct RequestMessage: View {
+    let source: String
+    var body: some View { Text(inertRequestMarkdown(source)).environment(\.openURL, OpenURLAction { _ in .discarded }) }
+}
 struct CodeResponse: View {
     @EnvironmentObject var model: RelayModel
     let id: String
@@ -60,20 +70,19 @@ struct CodeEditor: View {
             let deadline = request.manualEntryDeadline ?? request.expiresAt
             let available = request.status == "ready" && deadline > context.date.timeIntervalSince1970 * 1000
             Form {
-                Section { Text(request.callerName).font(.title2.weight(.semibold)); Text(request.title).font(.headline); Text(.init(request.purpose)) }
-                if request.active {
+                Section { Text(request.callerName).font(.title2.weight(.semibold)); Text(request.title).font(.headline); RequestMessage(source: request.purpose) }
+                if request.active && deadline > context.date.timeIntervalSince1970 * 1000 {
                     Section("Enter the code you want to share") {
-                        TextField("SMS code", text: $draft.code).textContentType(.oneTimeCode)
+                        TextField("SMS code", text: Binding(get: { draft.code }, set: { draft.code = available ? String($0.prefix(10)) : "" })).textContentType(.oneTimeCode)
                             .textInputAutocapitalization(.never).autocorrectionDisabled().privacySensitive().accessibilityIdentifier("code-input")
-                            .onChange(of: draft.code) { _, value in draft.code = String(value.prefix(10)) }
                         Text("Type or deliberately paste a code. AutoFill is offered only when iOS allows it. Nothing is sent until you tap Send.").font(.footnote).foregroundStyle(.secondary)
                         Text(available ? "Entry closes \(Date(timeIntervalSince1970: deadline / 1000).formatted(date: .omitted, time: .standard))." : "The entry window has closed.")
                         Button("Send") { Task { await model.perform { try await model.submitSMS(request, code: draft.code) } } }
                             .disabled(!available || !validCode(draft.code) || model.busy).accessibilityIdentifier("send-code")
                         Button("Decline", role: .destructive) { Task { await model.perform { try await model.submitSMS(request, code: "", deny: true) } } }.disabled(model.busy)
                     }
-                } else { Text(request.reason == "handled_on_another_device" ? "Handled on another device." : "This request is \(request.status).") }
-            }.onChange(of: available) { _, active in if !active { draft.code = "" } }
+                } else { Text(request.active ? "The entry window has closed." : request.reason == "handled_on_another_device" ? "Handled on another device." : "This request is \(request.status).") }
+            }.onChange(of: available, initial: true) { _, active in if !active { draft.code = "" } }
         }
     }
 }
@@ -85,6 +94,7 @@ struct FormResponse: View {
     @State private var draft: ResponseDraft?
     @State private var failed = false
     @State private var attempt = 0
+    @StateObject private var observations = FormOpeningObservations()
     var body: some View {
         VStack {
             if failed { Button("Refresh request") { attempt += 1 } }
@@ -96,8 +106,7 @@ struct FormResponse: View {
             while !Task.isCancelled {
                 do {
                     let result: FormRequest = try await model.api.call("/v2/devices/\(model.deviceID)/requests/\(id)")
-                    let first = request == nil
-                    draft = try await model.prepareFormResponse(result, opening: first, fromNotification: fromNotification, receive: { value in request = result; draft = value }) { event in
+                    draft = try await model.prepareFormResponse(result, observations: observations, fromNotification: fromNotification, receive: { value in request = result; draft = value }) { event in
                         let _: EmptyReply = try await model.api.call("/v2/devices/\(model.deviceID)/requests/\(id)/events", method: "POST", body: ["type":event])
                     }
                     if result.status != "pending" { break }
@@ -123,7 +132,7 @@ struct FormEditor: View {
         TimelineView(.periodic(from: .now, by: 1)) { context in
             let active = request.status == "pending" && request.expiresAt > context.date.timeIntervalSince1970 * 1000
             Form {
-                Section { Text(request.callerName).font(.title2.weight(.semibold)); Text(.init(request.body)) }
+                Section { Text(request.callerName).font(.title2.weight(.semibold)); RequestMessage(source: request.body) }
                 if active {
                     if draft.review {
                         Section("Review your response") {
@@ -139,7 +148,7 @@ struct FormEditor: View {
                         }
                     } else {
                         Section(request.steps == nil || steps.isEmpty ? "Your response" : "\(current + 1) of \(steps.count) · \(steps[current].title)") {
-                            if request.steps != nil, !steps.isEmpty, let body = steps[current].body { Text(.init(body)) }
+                            if request.steps != nil, !steps.isEmpty, let body = steps[current].body { RequestMessage(source: body) }
                             ForEach(fields) { field in NativeField(field: field, values: $draft.values, numberInputs: $draft.numberInputs) }
                         }
                         Section {
