@@ -1,4 +1,4 @@
-# Android Request Relay
+# Request Relay
 
 Production publication follows the [Google Play release gates and preparation package](docs/play/README.md). The package does not claim that Console, closed testing, or physical acceptance is complete.
 
@@ -74,4 +74,4 @@ SMS User Consent requires an eligible 4–10 character alphanumeric code with at
 
 ## QR and service onboarding
 
-The additive v3 implementation supports named services, focused Android/browser registration and approval, reusable service links, temporary pairing, separate service/recipient credentials, explicit forms/SMS capabilities, and encrypted credential delivery. Start with `relay service register` after installing the CLI workspace. See [onboarding and rollout](docs/ONBOARDING.md), [SDKs](sdks/README.md), and [developer integrations](integrations/README.md). Named-resource OAuth supports hosted MCP connections; physical-device/live provider acceptance and SDK registry publication remain outstanding. Every connection uses the configured relay server.
+The additive v3 implementation supports named services, focused Android/browser registration and approval, reusable service links, temporary pairing, separate service/recipient credentials, explicit forms/SMS capabilities, and encrypted credential delivery. Start with `relay service register`, or create an agent in Administration and use `relay service import-ticket --file PATH`. Registration and account access require separate approvals. A native iOS 17+ companion and macOS CI configuration are in [ios](ios); see [iOS setup and release gates](docs/IOS.md). See [onboarding and rollout](docs/ONBOARDING.md), [SDKs](sdks/README.md), and [developer integrations](integrations/README.md). Named-resource OAuth supports hosted MCP connections; physical-device/live provider acceptance and SDK registry publication remain outstanding. Every connection uses the configured relay server.
