@@ -48,6 +48,7 @@ pub struct Options {
     pub apple_app_ids: Vec<String>,
     pub android_cert: Option<String>,
     pub android_certs: Option<Value>,
+    pub android_package: Option<String>,
     pub firebase_web_config: Option<Value>,
     pub privacy_contact: Option<String>,
     pub origins: Vec<String>,
@@ -1073,16 +1074,20 @@ async fn route(s: App, request: Request) -> Result<Response> {
             json!({"applinks":{"details":s.options.apple_app_ids.iter().filter(|id| regex::Regex::new(r"^[A-Z0-9]{10}\.[A-Za-z0-9.-]+$").unwrap().is_match(id)).map(|id|json!({"appID":id,"paths":["/register/*","/pair/*","/services/*","/connections/*","/oauth/consent/*","/connect","/owned-services"]})).collect::<Vec<_>>()}})
         }
         ("GET", [".well-known", "assetlinks.json"]) => {
+            let (package, _) = android_link_target(s.options.android_package.as_deref())?;
             let certificates = signing_fingerprints(
                 s.options.android_cert.as_deref(),
                 s.options.android_certs.as_ref(),
             )?;
-            json!([{"relation":["delegate_permission/common.handle_all_urls"],"target":{"namespace":"android_app","package_name":"com.bluegrain.smsrelay","sha256_cert_fingerprints":certificates}}])
+            json!([{"relation":["delegate_permission/common.handle_all_urls"],"target":{"namespace":"android_app","package_name":package,"sha256_cert_fingerprints":certificates}}])
         }
         ("GET", ["connect"]) => {
             let code = user_code(&query_value("code")?.ok_or(Error::Api(400, "invalid_input"))?)?;
             let code = format!("{}-{}", &code[..5], &code[5..]);
-            let html = include_str!("../compat/connect.html").replace("{{CODE}}", &code);
+            let (_, scheme) = android_link_target(s.options.android_package.as_deref())?;
+            let html = include_str!("../compat/connect.html")
+                .replace("{{CODE}}", &code)
+                .replace("smsrelay://connect", &format!("{scheme}://connect"));
             let mut response=(StatusCode::OK,[("Content-Type","text/html; charset=utf-8"),("Content-Security-Policy","default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'"),("Referrer-Policy","no-referrer")],html).into_response();
             response
                 .headers_mut()
@@ -1475,6 +1480,15 @@ fn urlencoding(s: &str) -> Result<String> {
         }
     }
     String::from_utf8(bytes).map_err(|_| Error::External)
+}
+fn android_link_target(package: Option<&str>) -> Result<(&'static str, &'static str)> {
+    match package.unwrap_or("com.bluegrain.smsrelay") {
+        "com.bluegrain.smsrelay" => Ok(("com.bluegrain.smsrelay", "smsrelay")),
+        "com.bluegrain.smsrelay.staging" => {
+            Ok(("com.bluegrain.smsrelay.staging", "smsrelay-staging"))
+        }
+        _ => Err(Error::Api(503, "app_links_not_configured")),
+    }
 }
 fn signing_fingerprints(legacy: Option<&str>, additional: Option<&Value>) -> Result<Vec<String>> {
     ensure(
@@ -2331,6 +2345,25 @@ mod tests {
             .unwrap();
     }
 
+    #[test]
+    fn android_links_isolate_staging_and_retain_production_default() {
+        assert_eq!(
+            android_link_target(None).unwrap(),
+            ("com.bluegrain.smsrelay", "smsrelay")
+        );
+        assert_eq!(
+            android_link_target(Some("com.bluegrain.smsrelay.staging")).unwrap(),
+            ("com.bluegrain.smsrelay.staging", "smsrelay-staging")
+        );
+        for invalid in [
+            "",
+            "com.bluegrain.smsrelay.other",
+            "com.bluegrain.smsrelay\n",
+            "<script>",
+        ] {
+            assert!(android_link_target(Some(invalid)).is_err());
+        }
+    }
     #[test]
     fn signing_fingerprints_preserve_order_and_reject_partial_configuration() {
         let a = ["AA"; 32].join(":");

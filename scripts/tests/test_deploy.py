@@ -26,6 +26,19 @@ class DeploymentSafety(unittest.TestCase):
         for bucket in ['', 'gs://invalid', 'unsafe|injection']:
             with self.subTest(bucket=bucket), self.assertRaises(ValueError):
                 d.config({**self.env, 'SECURITY_LEDGER_BUCKET': bucket})
+        with self.assertRaises(ValueError):
+            d.config({**self.env, 'ANDROID_PACKAGE_NAME': 'other.package'})
+
+    def test_staging_package_reaches_each_backend_and_production_remains_default(self):
+        for backend in ('typescript', 'rust'):
+            for package in ('com.bluegrain.smsrelay', 'com.bluegrain.smsrelay.staging'):
+                with self.subTest(backend=backend, package=package):
+                    options = {'BACKEND':backend}
+                    if package.endswith('.staging'):
+                        options['ANDROID_PACKAGE_NAME'] = package
+                    calls, _, _, _ = self.exercise(**options)
+                    deploy = next(c for c in calls if c[:3] == ['gcloud', 'run', 'deploy'])
+                    self.assertIn('ANDROID_PACKAGE_NAME=' + package, deploy[deploy.index('--update-env-vars') + 1])
 
     def exercise(self, failure=None, **options):
         calls = []

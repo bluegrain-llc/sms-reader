@@ -2,7 +2,7 @@
 import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { once } from 'node:events';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { writeFileSync } from 'node:fs';
 import { z } from 'zod';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
@@ -117,6 +117,9 @@ try {
   const port = (server.address() as { port: number }).port;
   await client.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`), { requestInit: { headers: { Authorization: 'Bearer fixture' } } }), { timeout: 15_000 });
   save('tools.json', (await client.listTools()).tools);
+  const page = await fetch(`http://127.0.0.1:${port}/connect?code=ABCDE-FG234`, {signal:AbortSignal.timeout(15_000)});
+  if (page.status !== 200) throw Error('Pairing page capture failed');
+  writeFileSync(new URL('connect.html', directory), (await page.text()).replaceAll('ABCDE-FG234', '{{CODE}}'));
 } finally { await client.close(); await new Promise<void>(resolve => server.close(() => resolve())); }
 const require = createRequire(new URL('server/package.json', root));
 const ip = require('ipaddr.js'), ranges: string[] = [];
@@ -132,11 +135,6 @@ save('js-strings.json', ['\ud800', '\udfff', '\ud800\ud800', '😀', '\u{f0000}\
   input, json: JSON.stringify(input), units: input.length, points: Array.from(input).length,
   utf8: Buffer.from(input).toString('utf8'), jsonHash: createHash('sha256').update(JSON.stringify(input)).digest('hex'),
 })));
-const source = readFileSync(new URL('server/src/http.ts', root), 'utf8');
-const start = source.indexOf('<!doctype html>'), end = source.indexOf('`);', start);
-if (start < 0 || end < 0) throw Error('Pairing HTML source moved; update its capture');
-writeFileSync(new URL('connect.html', directory), source.slice(start, end).replaceAll('${formatted}', '{{CODE}}'));
-
 // Capture account page templates through their registered handlers. Replace only
 // generated nonce/configuration values so regeneration remains deterministic.
 const webConfig: WebConfig = { apiKey: 'fixture-key', authDomain: 'fixture.firebaseapp.com', projectId: 'fixture', appId: 'fixture-app' };

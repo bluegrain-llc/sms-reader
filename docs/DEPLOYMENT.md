@@ -43,6 +43,10 @@ Set the production GitHub environment variable `APPLE_APP_IDS` to the Apple team
 
 After deployment, check the canonical relay origin's `/.well-known/apple-app-site-association` response for the configured `applinks.details[].appID` values. Configure the companion app's Associated Domains entitlement for that origin and verify on a physical iOS device that a public pairing or registration link opens the intended app before accepting Universal Links for release.
 
+## Isolated staging associations
+
+For an isolated staging deployment, export `ANDROID_PACKAGE_NAME=com.bluegrain.smsrelay.staging` when invoking local deployment tools and select that staging project's Firebase app and signing certificates. Associations and fallback links target the selected package. The protected production release workflow uses the default `com.bluegrain.smsrelay` package. See [isolated staging candidate](PILOT.md#isolated-staging-candidate).
+
 ## Release procedure
 
 1. Wait for the `CI and delivery` push run on `main` to succeed. Its tested container archive includes a SHA-256 checksum and an OCI commit label.
