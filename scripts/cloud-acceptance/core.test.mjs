@@ -75,6 +75,11 @@ test('cloud preflight binds delivery readiness to each serving revision and Sche
       await assert.rejects(preflight(cfg, inspect(wrong)));
     }
   }
+  for (const [key, value] of [['DELIVERY_QUEUE', `projects/${cfg.projectId}/locations/${cfg.region}/queues/replay-delivery`], ['SCHEDULER_EMAIL', `replay@${cfg.projectId}.iam.gserviceaccount.com`]]) {
+    const mismatched = structuredClone(revisions);
+    mismatched.previous.spec.containers[0].env.find(v => v.name === key).value = value;
+    await assert.rejects(preflight(cfg, inspect(mismatched)), /replay_delivery_configuration_mismatch/);
+  }
 });
 test('callback verification binds exact body and timestamp and refuses stale or malformed signatures', () => {
   const secret = 'private-test-secret', now = 1800000000000, timestamp = String(now / 1000), body = '{"id":"event"}';
