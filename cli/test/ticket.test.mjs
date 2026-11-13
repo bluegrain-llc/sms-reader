@@ -1,11 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, stat, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, stat, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { deliveryKey, credential } from '../client.mjs';
 import { ServiceSession } from '../service.mjs';
 import { exportPrivateFile } from '../store.mjs';
+const execute = promisify(execFile);
 const memory = () => ({value:null,async load(){return structuredClone(this.value);},async save(v){this.value=structuredClone(v);}});
 async function fixture() {
   const key=await deliveryKey();
@@ -80,4 +84,28 @@ test('ticket export and import retain every key after 100 completed rotations',a
   assert.equal(exported.deliveryKeys.length,101);
   const restored=await ServiceSession.importTicket(exported,memory(),options);
   assert.equal(restored.state.keys.length,101);
+});
+
+test('malformed private ticket input never reaches CLI error output',async()=>{
+  const directory=await mkdtemp(join(tmpdir(),'relay-ticket-invalid-'));
+  try {
+    const path=join(directory,'invalid.json'),store=join(directory,'profile');
+    await writeFile(path,'smss_private_ticket_DO_NOT_PRINT',{mode:0o600});
+    await assert.rejects(execute(process.execPath,[fileURLToPath(new URL('../relay.mjs',import.meta.url)),'service','import-ticket','--file',path,'--store',store],{timeout:5000}),error=>{
+      assert.equal(error.code,1);assert.equal(error.stdout,'');
+      assert.doesNotMatch(error.stderr,/smss_|private_ticket|DO_NOT_PRINT/);
+      assert.match(error.stderr,/Invalid session ticket JSON/);return true;
+    });
+    assert.deepEqual(await readdir(store),[]);
+  } finally {await rm(directory,{recursive:true,force:true});}
+});
+
+test('occupied FIFO export destinations reject without blocking or retaining temporary tickets',{skip:process.platform==='win32'},async()=>{
+  const directory=await mkdtemp(join(tmpdir(),'relay-ticket-fifo-'));
+  try {
+    const path=join(directory,'occupied');await execute('mkfifo',[path]);
+    const source=`import assert from 'node:assert/strict';import {exportPrivateFile} from ${JSON.stringify(new URL('../store.mjs',import.meta.url).href)};await assert.rejects(exportPrivateFile(process.argv[1],{privateTicket:'synthetic'}),/occupied/);`;
+    await execute(process.execPath,['--input-type=module','-e',source,path],{timeout:2000,killSignal:'SIGKILL'});
+    assert.deepEqual(await readdir(directory),['occupied']);assert.ok((await stat(path)).isFIFO());
+  } finally {await rm(directory,{recursive:true,force:true});}
 });

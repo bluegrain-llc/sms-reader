@@ -48,7 +48,12 @@ class AgentTicket(private val context: Context, ownerId: String) {
         check(load() == null) { "Save or clear the retained ticket before creating another agent." }
         save(ticket)
     }
-    fun clear() = file.delete()
+    fun clear(expectedCredential: String): Boolean = synchronized(retentionLock) {
+        val retained = load()
+        if (retained == null) true
+        else if (retained.getString("serviceCredential") != expectedCredential) false
+        else { file.delete(); true }
+    }
     companion object {
         private val retentionLock = Any()
         private fun encode(bytes: ByteArray) = Base64.getUrlEncoder().withoutPadding().encodeToString(bytes)

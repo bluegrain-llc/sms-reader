@@ -68,7 +68,11 @@ class AgentsActivity : AccountActivity() {
                         Button(enabled = !busy, onClick = { work { repository.onboarding("POST", "/v3/services", AgentTicket.declaration(pending!!)); refresh(); exportTicket() } }) { Text("Save session ticket") }
                         var confirmClear by remember { mutableStateOf(false) }
                         TextButton(onClick = { confirmClear = true }) { Text("Clear retained ticket") }
-                        if (confirmClear) AlertDialog(onDismissRequest = { confirmClear = false }, title = { Text("Ticket safely saved?") }, text = { Text("Clear only after saving the ticket or deleting the agent. The relay cannot recover private keys.") }, confirmButton = { TextButton(onClick = { AgentTicket(this@AgentsActivity, repository.ownerId).clear(); pending = null; confirmClear = false }) { Text("Clear") } }, dismissButton = { TextButton(onClick = { confirmClear = false }) { Text("Cancel") } })
+                        if (confirmClear) AlertDialog(onDismissRequest = { confirmClear = false }, title = { Text("Ticket safely saved?") }, text = { Text("Clear only after saving the ticket or deleting the agent. The relay cannot recover private keys.") }, confirmButton = { TextButton(onClick = { val expectedCredential = pending!!.getString("serviceCredential"); confirmClear = false; work {
+                            val storage = AgentTicket(this@AgentsActivity, repository.ownerId)
+                            val cleared = storage.clear(expectedCredential); pending = storage.load()
+                            if (!cleared) message = "The retained ticket changed. Review the current agent before clearing."
+                        } }) { Text("Clear") } }, dismissButton = { TextButton(onClick = { confirmClear = false }) { Text("Cancel") } })
                     }
                     Text("Your agents", style = MaterialTheme.typography.titleLarge)
                     services.forEach { service ->

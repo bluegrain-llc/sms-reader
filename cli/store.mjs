@@ -51,7 +51,7 @@ export async function exportPrivateFile(path, value) {
     try { const { link } = await import('node:fs/promises'); await link(temporary, path); }
     catch (e) {
       if (e.code !== 'EEXIST') throw e;
-      const existing = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+      const existing = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
       try {
         const st = await existing.stat();
         if (!st.isFile() || (st.mode & 0o077) || st.uid !== process.getuid?.() || await existing.readFile('utf8') !== data) throw Error('Export destination is occupied. Choose a new file.');

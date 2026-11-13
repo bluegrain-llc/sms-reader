@@ -42,7 +42,7 @@ class AgentTicketTest {
             assertEquals(ticket.toString(), storage.load()!!.toString())
             val bytes = retained.readBytes()
             assertFalse(String(bytes, Charsets.ISO_8859_1).contains(ticket.getString("serviceCredential")))
-        } finally { storage.clear() }
+        } finally { storage.clear(ticket.getString("serviceCredential")) }
     }
     @Test fun anotherCreationCannotReplaceAnUnsavedRetainedTicket() {
         val context = ApplicationProvider.getApplicationContext<android.content.Context>()
@@ -56,6 +56,22 @@ class AgentTicketTest {
                 fail("An unsaved private ticket must not be replaced")
             } catch (_: IllegalStateException) { }
             assertEquals(retained.toString(), storage.load()!!.toString())
-        } finally { storage.clear() }
+        } finally { storage.clear(retained.getString("serviceCredential")) }
+    }
+    @Test fun staleClearCannotDeleteAnotherAgentsRetainedTicket() {
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        val owner = "test-ticket-" + UUID.randomUUID()
+        val stale = AgentTicket(context, owner); val current = AgentTicket(context, owner)
+        val first = AgentTicket.create("First", "Decisions", listOf("forms"))
+        val second = AgentTicket.create("Second", "Decisions", listOf("forms"))
+        try {
+            stale.saveNew(first)
+            assertTrue(current.clear(first.getString("serviceCredential")))
+            current.saveNew(second)
+            assertFalse(stale.clear(first.getString("serviceCredential")))
+            assertEquals(second.toString(), current.load()!!.toString())
+            assertTrue(current.clear(second.getString("serviceCredential")))
+            assertNull(current.load())
+        } finally { current.load()?.let { current.clear(it.getString("serviceCredential")) } }
     }
 }

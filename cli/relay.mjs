@@ -28,7 +28,10 @@ export async function main(args = process.argv.slice(2)) {
     if (command === 'import-ticket') {
       if (state) throw Error('This profile is occupied. Choose a different --profile.');
       if (!v.file) throw Error('Import needs --file PATH.');
-      const imported = await ServiceSession.importTicket(JSON.parse(await readFile(v.file, 'utf8')), store,
+      let ticket;
+      try { ticket = JSON.parse(await readFile(v.file, 'utf8')); }
+      catch (error) { if (error instanceof SyntaxError) throw Error('Invalid session ticket JSON.'); throw error; }
+      const imported = await ServiceSession.importTicket(ticket, store,
         {signal:abort.signal,allowHttpLoopback:v['allow-http-loopback']});
       console.log(`Agent imported. ${imported.state.serviceId}`); return;
     }
