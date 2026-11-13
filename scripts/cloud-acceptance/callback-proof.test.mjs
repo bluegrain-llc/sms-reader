@@ -64,51 +64,122 @@ test('failed callback checks retain only allowlisted numeric and boolean evidenc
   assert.equal('senderTimeoutObserved' in results[0], false); assert.equal('firstResponseWithheldMs' in results[0], false);
 });
 
-test('an HTTP proxy that retains its upstream request hides disconnect while actual sender timeout evidence passes', { timeout: 16000 }, async () => {
+// Every fixture request owns its deadline and handles response aborts, so a
+// node:test timeout is never responsible for releasing listening servers.
+async function boundedRequest(port, { signal, timeoutMs = 2000 } = {}) {
+  const { request } = await import('node:http');
+  return new Promise((resolve, reject) => {
+    let response, settled = false;
+    const finish = error => {
+      if (settled) return;
+      settled = true; clearTimeout(timer); signal?.removeEventListener('abort', abort);
+      if (error) { response?.destroy(); outgoing.destroy(); reject(error); }
+      else resolve();
+    };
+    const abort = () => finish(signal.reason ?? Error('request_aborted'));
+    const outgoing = request({ host: '127.0.0.1', port }, reply => {
+      response = reply;
+      reply.on('error', finish);
+      reply.once('aborted', () => finish(Error('response_aborted')));
+      reply.once('end', () => finish()); reply.resume();
+    });
+    const timer = setTimeout(() => finish(Error('request_timeout')), timeoutMs);
+    outgoing.on('error', finish);
+    signal?.addEventListener('abort', abort, { once: true });
+    if (signal?.aborted) abort(); else outgoing.end();
+  });
+}
+async function closeFixture(...servers) {
+  await Promise.all(servers.map(server => new Promise(resolve => {
+    server.close(resolve); server.closeAllConnections();
+  })));
+}
+async function listen(server) {
+  await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
+}
+test('stalled and aborted HTTP responses reject locally and fixture servers close', { timeout: 3000 }, async () => {
+  const { createServer } = await import('node:http');
+  for (const mode of ['no-headers', 'no-end', 'aborted']) {
+    const server = createServer((_request, response) => {
+      if (mode === 'no-headers') return;
+      response.writeHead(200); response.write('partial');
+      if (mode === 'aborted') setImmediate(() => response.destroy());
+    });
+    try {
+      await listen(server);
+      await assert.rejects(boundedRequest(server.address().port, { timeoutMs: 50 }), mode === 'aborted' ? /response_aborted/ : /request_timeout/);
+    } finally { await closeFixture(server); }
+    assert.equal(server.listening, false);
+  }
+  const server = createServer(() => {}), controller = new AbortController();
+  try {
+    await listen(server);
+    const pending = boundedRequest(server.address().port, { signal: controller.signal });
+    controller.abort(Error('fixture_cancelled'));
+    await assert.rejects(pending, /fixture_cancelled/);
+  } finally { await closeFixture(server); }
+  assert.equal(server.listening, false);
+});
+
+test('an HTTP proxy that retains its upstream request hides disconnect while actual sender timeout evidence passes', { timeout: 22000 }, async t => {
   const { createServer, request } = await import('node:http');
+  const { setTimeout: delay } = await import('node:timers/promises');
+  const controller = new AbortController(), signal = AbortSignal.any([controller.signal, t.signal]);
+  const deadline = setTimeout(() => controller.abort(Error('fixture_deadline')), 20000);
+  const firstFinished = Promise.withResolvers();
+  // Attach the rejection consumer immediately, including during sender I/O.
+  firstFinished.promise.catch(() => {});
+  const abort = () => firstFinished.reject(signal.reason);
+  signal.addEventListener('abort', abort, { once: true });
   const firstAt = Date.now(), actualReceipts = [], observed = {}, logs = [];
   let prematureBackendClose = false, attempts = 0;
   const backend = createServer(async (_req, response) => {
     const attempt = ++attempts, receipt = { id: 'event', attempt, status: 204, at: Date.now() };
     actualReceipts.push(receipt);
     response.once('close', () => { if (!response.writableFinished) prematureBackendClose = true; });
-    if (attempt === 1) receipt.withheldResponseMs = await withholdCallbackResponse();
-    response.on('finish', () => { receipt.responseFinished = true; });
-    response.writeHead(204); response.end();
+    try {
+      if (attempt === 1) {
+        const started = performance.now();
+        // Abortable fixture equivalent of the receiver's real eleven-second hold.
+        do { await delay(Math.ceil(11000 - (performance.now() - started)), undefined, { signal }); }
+        while (performance.now() - started < 11000);
+        receipt.withheldResponseMs = Math.floor(performance.now() - started);
+      }
+      response.on('finish', () => {
+        receipt.responseFinished = true;
+        if (attempt === 1) firstFinished.resolve();
+      });
+      response.writeHead(204); response.end();
+    } catch (error) { firstFinished.reject(error); response.destroy(); }
   });
-  const proxy = createServer((_req, response) => {
-    // Cloud Run HTTP1 keeps the upstream alive after its downstream disconnects.
-    const upstream = request({ host: '127.0.0.1', port: backend.address().port }, reply => { response.writeHead(reply.statusCode); reply.pipe(response); });
-    upstream.on('error', () => response.destroy()); upstream.end();
+  const proxy = createServer(async (_req, response) => {
+    try {
+      // Deliberately accept upstream late enough to exceed the old polling
+      // deadline. Completion is synchronized to backend finish, not sender time.
+      if (attempts === 0) await delay(2200, undefined, { signal });
+      // Cloud Run HTTP1 keeps upstream alive after downstream disconnects.
+      const upstream = request({ host: '127.0.0.1', port: backend.address().port, signal }, reply => { response.writeHead(reply.statusCode); reply.pipe(response); });
+      upstream.on('error', () => response.destroy()); upstream.end();
+    } catch { response.destroy(); }
   });
-  const listen = server => new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
   try {
     await listen(backend); await listen(proxy);
     observeWebhookJob([job('actual-lease')], expected, observed);
-    await new Promise((resolve, reject) => {
-      const outgoing = request({ host: '127.0.0.1', port: proxy.address().port }, () => reject(Error('first response arrived before sender deadline')));
-      const timer = setTimeout(() => outgoing.destroy(Error('webhook_timeout')), 10000);
-      outgoing.on('error', error => {
-        clearTimeout(timer);
-        if (error.message !== 'webhook_timeout') return reject(error);
-        logs.push({ ...log, timestamp: new Date().toISOString() });
-        observeWebhookJob([job(null)], expected, observed);
-        resolve();
-      });
-      outgoing.end();
+    await assert.rejects(boundedRequest(proxy.address().port, { signal, timeoutMs: 10000 }), error => {
+      if (error.message !== 'request_timeout') return false;
+      logs.push({ ...log, timestamp: new Date().toISOString() });
+      observeWebhookJob([job(null)], expected, observed);
+      return true;
     });
-    const end = Date.now() + 3000;
-    while (!actualReceipts[0]?.responseFinished && Date.now() < end) await new Promise(resolve => setTimeout(resolve, 10));
+    await firstFinished.promise;
     assert.equal(actualReceipts[0].responseFinished, true);
     assert.equal(prematureBackendClose, false);
-    await new Promise((resolve, reject) => {
-      const outgoing = request({ host: '127.0.0.1', port: proxy.address().port }, reply => { reply.resume(); reply.on('end', resolve); });
-      outgoing.on('error', reject); outgoing.end();
-    });
+    await boundedRequest(proxy.address().port, { signal });
     const proof = proveWebhookTimeout(actualReceipts, observed, logs, cfg, revision, firstAt);
     callbackReceipts('timeout-once', actualReceipts, proof);
   } finally {
-    proxy.closeAllConnections(); backend.closeAllConnections();
-    await Promise.all([proxy, backend].map(server => new Promise(resolve => server.close(resolve))));
+    clearTimeout(deadline); signal.removeEventListener('abort', abort);
+    controller.abort(Error('fixture_cleanup'));
+    await closeFixture(proxy, backend);
   }
 });
