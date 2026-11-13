@@ -34,14 +34,14 @@ pub struct Identity {
     pub uid: String,
     pub auth_time: f64,
 }
-fn provider_transport(error: reqwest::Error) -> Error {
+pub(crate) fn provider_transport(error: reqwest::Error) -> Error {
     Error::Provider(if error.is_timeout() {
         "timeout"
     } else {
         "unavailable"
     })
 }
-fn provider_response(status: u16, response: &Value) -> Error {
+pub(crate) fn provider_response(status: u16, response: &Value) -> Error {
     let details = response["error"]["details"].as_array();
     let fcm = details
         .into_iter()
@@ -288,12 +288,19 @@ impl Delivery for Google {
         form: bool,
     ) -> futures::future::BoxFuture<'a, Result<()>> {
         Box::pin(async move {
-            let mut data = json!({"requestId":id});
-            if form {
-                data["kind"] = json!("form");
-            }
-            self.api(format!("https://fcm.googleapis.com/v1/projects/{}/messages:send",self.project),json!({"message":{"token":crate::js_string::utf8(token),"data":data,"android":{"priority":"HIGH","ttl":format!("{}.{:03}s",ttl.max(0)/1000,ttl.max(0)%1000),"collapse_key":id},"apns":{"headers":{"apns-push-type":"alert","apns-priority":"10","apns-expiration":((crate::model::now()+ttl)/1000).to_string(),"apns-collapse-id":id},"payload":{"aps":{"alert":{"title":"Request Relay","body":"Open Inbox to review a request."},"sound":"default"}}}}}),false).await?;
-            Ok(())
+            let google = self.clone();
+            crate::fcm::send(
+                &self.client,
+                async move { google.access().await },
+                &format!(
+                    "https://fcm.googleapis.com/v1/projects/{}/messages:send",
+                    self.project
+                ),
+                crate::fcm::payload(token, id, ttl, form, crate::model::now()),
+                form,
+                crate::fcm::DEADLINE,
+            )
+            .await
         })
     }
     fn wake(&self) -> futures::future::BoxFuture<'_, Result<()>> {

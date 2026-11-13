@@ -8,6 +8,8 @@ type Event =
   | { event: 'onboarding_outcome'; phase: 'registration' | 'approval' | 'delivery' | 'setup'; outcome: string; count: number }
   | { event: 'http_completed'; method: string; route: string; status_class: string; duration_ms: number }
   | { event: 'delivery_attempt'; kind: Kind; outcome: 'accepted' | 'failed'; category?: Category; age_ms: number }
+  | { event: 'fcm_send'; phase: 'started' | 'http_started' | 'completed' | 'transport_closed'; attempt_id: string; kind: 'sms' | 'form';
+      duration_ms: number; http_attempts: number; outcome?: 'accepted' | 'failed'; category?: Category }
   | { event: 'wakeup_failed'; category: Category }
   | { event: 'maintenance_completed'; duration_ms: number }
   | { event: 'deletion_failed' | 'maintenance_failed' | 'backlog_sampling_failed' | 'request_failed' | 'mcp_tool_failed'; category: Category }
@@ -18,7 +20,7 @@ const defaultSink: Sink = entry => console.info(JSON.stringify(entry));
 export class Telemetry {
   constructor(readonly sink: Sink = defaultSink, readonly now = Date.now) {}
   emit(event: Event) {
-    const severity = event.event.endsWith('_failed') ? 'ERROR' : event.event === 'delivery_attempt' && event.outcome === 'failed' ? 'WARNING' : 'INFO';
+    const severity = event.event.endsWith('_failed') ? 'ERROR' : (event.event === 'delivery_attempt' || event.event === 'fcm_send') && event.outcome === 'failed' ? 'WARNING' : 'INFO';
     try { this.sink({ ...event, component: 'relay', severity }); } catch { /* Logging failure must not change committed outcomes. */ }
   }
   http = (req: Request, res: Response, next: NextFunction) => {
