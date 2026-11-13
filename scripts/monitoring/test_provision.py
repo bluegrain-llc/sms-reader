@@ -33,18 +33,52 @@ class ProvisionTest(unittest.TestCase):
         second = provision.resources('demo-sms-relay', 'other-service', [], '1234', 'ABCDEF-ABCDEF-ABCDEF')
         self.assertTrue(set(m['name'] for m in first['metrics']).isdisjoint(m['name'] for m in second['metrics']))
 
-    def test_disabled_channel_fails_before_writes(self):
-        calls = []
-        def api(token, method, url, body=None):
-            calls.append(method)
-            if 'cloudresourcemanager' in url:
-                return {'projectNumber': '1234'}
-            if '/billingInfo' in url:
-                return {'billingEnabled': True, 'billingAccountName': 'billingAccounts/ABCDEF-ABCDEF-ABCDEF'}
-            return {'type': 'email', 'verificationStatus': 'VERIFIED', 'enabled': False}
-        with patch.object(provision, 'api', api), patch.object(provision.subprocess, 'check_output', return_value='token'), self.assertRaises(ValueError):
-            provision.apply(self.config(), 'operator@example.test')
-        self.assertTrue(all(method == 'GET' for method in calls))
+    def test_unusable_channels_fail_before_writes(self):
+        valid = {'type': 'email', 'verificationStatus': 'VERIFIED', 'enabled': True}
+        for channel in [
+            {**valid, 'enabled': False},
+            {'type': 'email', 'verificationStatus': 'VERIFIED'},
+            {**valid, 'type': 'sms'},
+            {**valid, 'verificationStatus': 'UNVERIFIED'},
+            {**valid, 'verificationStatus': 'unknown'},
+            {**valid, 'verificationStatus': None},
+        ]:
+            with self.subTest(channel=channel):
+                calls = []
+                def api(token, method, url, body=None):
+                    calls.append(method)
+                    if 'cloudresourcemanager' in url:
+                        return {'projectNumber': '1234'}
+                    if '/billingInfo' in url:
+                        return {'billingEnabled': True, 'billingAccountName': 'billingAccounts/ABCDEF-ABCDEF-ABCDEF'}
+                    return channel
+                with patch.object(provision, 'api', api), patch.object(provision.subprocess, 'check_output', return_value='token'), self.assertRaises(ValueError):
+                    provision.apply(self.config(), 'operator@example.test')
+                self.assertTrue(all(method == 'GET' for method in calls))
+
+    def test_usable_email_verification_states_provision_alerts_and_budget(self):
+        for status in ['VERIFIED', 'VERIFICATION_STATUS_UNSPECIFIED', None]:
+            with self.subTest(status=status):
+                config = self.config()
+                channel = {'type': 'email', 'enabled': True}
+                if status is not None:
+                    channel['verificationStatus'] = status
+                writes = []
+                def api(token, method, url, body=None):
+                    if method != 'GET':
+                        writes.append((method, url, body))
+                        return {}
+                    if 'cloudresourcemanager' in url:
+                        return {'projectNumber': '1234'}
+                    if '/billingInfo' in url:
+                        return {'billingEnabled': True, 'billingAccountName': 'billingAccounts/ABCDEF-ABCDEF-ABCDEF'}
+                    if '/notificationChannels/' in url:
+                        return channel
+                    return {}
+                with patch.object(provision, 'api', api), patch.object(provision.subprocess, 'check_output', return_value='token'), contextlib.redirect_stdout(io.StringIO()):
+                    provision.apply(config, 'operator@example.test')
+                self.assertEqual([body for method, _, body in writes if method == 'PUT'], config['metrics'])
+                self.assertEqual([body for method, _, body in writes if method == 'POST'], [*config['policies'], config['budget']])
 
     def test_render_does_not_authenticate_or_write(self):
         args = ['provision.py', '--project', 'demo-sms-relay', '--project-number', '1234', '--billing-account', 'ABCDEF-ABCDEF-ABCDEF', '--channel', 'projects/demo-sms-relay/notificationChannels/1']
