@@ -117,3 +117,45 @@ test('CLI resumes shared pairing and credential transitions after interrupted pe
     for (const secret of [saved.serviceToken, saved.registrationToken, JSON.stringify(saved.keys[0].privateKey)]) assert.ok(!output.join('\n').includes(secret));
   } finally { await rm(directory, {recursive:true,force:true}); }
 });
+
+
+test('broker retains approved pairing until its credential survives a delivery backlog', { timeout: 20000 }, async () => {
+  const { createServer } = await import('node:http');
+  const { execFile } = await import('node:child_process');
+  const directory = await mkdtemp(join(tmpdir(), 'relay-broker-backlog-'));
+  const key = await deliveryKey(), token = credential('smsr');
+  const payload = { version: 1, serviceId: 'service', connectionId: 'target', deliveryId: 'target-delivery', token };
+  const envelope = await new CompactEncrypt(Buffer.from(JSON.stringify(payload))).setProtectedHeader({ alg: 'ECDH-ES', enc: 'A256GCM', kid: key.id, serviceId: 'service', connectionId: 'target', deliveryId: 'target-delivery' }).encrypt(await importJWK(key.publicKey, 'ECDH-ES'));
+  let pages = 0, acknowledged = false;
+  const server = createServer((request, response) => {
+    let value;
+    if (request.url === '/v3/service/pairing-sessions/pairing') value = { status: 'approved', connectionId: 'target' };
+    else if (request.url === '/v3/service/deliveries/target-delivery/acknowledgement') { acknowledged = true; value = { ok: true }; }
+    else if (request.url === '/v3/service/deliveries') {
+      pages++;
+      // A full page of invalidated deliveries is discarded by the relay before returning this empty page.
+      value = pages <= 10 ? { deliveries: [], hasMore: true } : { deliveries: [{ deliveryId: 'target-delivery', connectionId: 'target', keyId: key.id, envelope }], hasMore: false };
+    } else { response.writeHead(404); response.end('{}'); return; }
+    response.writeHead(200, { 'Content-Type': 'application/json' }); response.end(JSON.stringify(value));
+  });
+  try {
+    await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
+    const store = new PrivateStore(directory);
+    await store.write({ version: 1, baseUrl: `http://127.0.0.1:${server.address().port}`, registered: true, serviceId: 'service', serviceToken: credential('smss'), keys: [key], connections: {}, pairing: { sessionId: 'pairing' }, pairingInput: { idempotencyKey: 'same-pairing' } });
+    const poll = () => new Promise((resolve, reject) => {
+      const child = execFile(process.execPath, [new URL('../broker.mjs', import.meta.url).pathname], { timeout: 10000 }, (error, stdout) => error ? reject(error) : resolve(JSON.parse(stdout)));
+      child.stdin.end(JSON.stringify({ operation: 'pollPairing', directory, allowHttpLoopback: true }));
+    });
+    assert.equal((await poll()).value.status, 'approved');
+    let saved = await store.read();
+    assert.equal(pages, 10); assert.equal(saved.connections.target, undefined); assert.equal(acknowledged, false);
+    assert.equal(saved.pairing.sessionId, 'pairing'); assert.equal(saved.pairingInput.idempotencyKey, 'same-pairing');
+    assert.equal((await poll()).value.status, 'approved');
+    saved = await store.read();
+    assert.equal(saved.connections.target.token, token); assert.equal(acknowledged, true);
+    assert.equal(saved.pairing, null); assert.equal(saved.pairingInput, null);
+  } finally {
+    server.closeAllConnections(); await new Promise(resolve => server.close(resolve));
+    await rm(directory, { recursive: true, force: true });
+  }
+});

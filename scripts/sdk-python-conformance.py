@@ -28,7 +28,9 @@ def execute():
  if op=='pollPairing':
   v=s.client.request('/v3/service/pairing-sessions/'+s.state['pairing']['sessionId'],s.state['serviceToken'])
   if v['status']=='approved':
-   s.consume_deliveries();s.state.update(pairing=None,pairingInput=None);s.save()
+   s.consume_deliveries()
+   if s.state['connections'].get(v.get('connectionId')):
+    s.state.update(pairing=None,pairingInput=None);s.save()
   return v
  if op=='waitForRegistration':return s.wait_for_registration()
  if op=='waitForPairing':return s.wait_for_pairing()
