@@ -135,7 +135,7 @@ extension RelayTests {
                         return pending
                     }
                     if path == "/v1/devices" { throw RelayFailure.unavailable }
-                    if form, path.hasSuffix("/events") { observations += 1; return Data("{}".utf8) }
+                    if form, path.hasSuffix("/events") { observations += 1; return pending }
                     XCTAssertEqual(method, "POST")
                     if form { return try JSONEncoder().encode(self.formState("submitted")) }
                     return try JSONEncoder().encode(SMSRequest(requestId: id, callerName: "Agent", title: "Code", purpose: "Test", status: "completed", expiresAt: sms.expiresAt))
@@ -297,7 +297,7 @@ extension RelayTests {
         var observations: [String] = []
         var received = false
         do {
-            _ = try await model.prepareFormResponse(formState("pending"), observations: FormOpeningObservations(), fromNotification: true, receive: { _ in received = true }) { event in
+            _ = try await model.prepareFormResponse(formState("pending"), observations: FormOpeningObservations(), fromNotification: true, receive: { _, _ in received = true }) { event in
                 XCTAssertTrue(received)
                 observations.append(event); throw RelayFailure.unavailable
             }
@@ -310,18 +310,135 @@ extension RelayTests {
             let model = RelayModel(), observations = FormOpeningObservations()
             var received = false, events: [String] = []
             do {
-                _ = try await model.prepareFormResponse(formState("pending"), observations: observations, fromNotification: true, receive: { _ in received = true }) { event in
+                _ = try await model.prepareFormResponse(formState("pending"), observations: observations, fromNotification: true, receive: { _, _ in received = true }) { event in
                     XCTAssertTrue(received); events.append(event)
                     if event == failedEvent { throw RelayFailure.unavailable }
+                    return self.formState("pending")
                 }
                 XCTFail("The failed observation must offer retry")
             } catch {}
             XCTAssertEqual(events, ["notification.tapped", "request.opened"])
             events = []
-            _ = try await model.prepareFormResponse(formState("pending"), observations: observations, fromNotification: true) { events.append($0) }
+            _ = try await model.prepareFormResponse(formState("pending"), observations: observations, fromNotification: true) { events.append($0); return self.formState("pending") }
             XCTAssertEqual(events, [failedEvent])
-            _ = try await model.prepareFormResponse(formState("pending"), observations: observations, fromNotification: true) { _ in XCTFail("Accepted observations must not repeat on polling") }
+            _ = try await model.prepareFormResponse(formState("pending"), observations: observations, fromNotification: true) { _ in XCTFail("Accepted observations must not repeat on polling"); return self.formState("pending") }
             model.clearResponses()
+        }
+    }
+    @MainActor func testTerminalOpeningRepliesCloseMountedFormsAtBothObservationBoundaries() async throws {
+        let key = "installation:signed-out", original = try PrivateStorage.read("installation:signed-out")
+        defer { if let original { try? PrivateStorage.write(key, original) } else { PrivateStorage.remove(key) } }
+        for (boundary, failFirst) in [("notification.tapped", false), ("request.opened", false), ("request.opened", true)] {
+            for status in ["cancelled", "submitted", "expired"] {
+                let gate = SuspendedRelayReply(), api = FixtureRelayAPI(), model = RelayModel(api: api)
+                let pending = formState("pending"), observations = FormOpeningObservations()
+                let retained = model.formDraft(pending)
+                retained.values = ["answer": .text("private")]; retained.numberInputs = ["number": "123."]
+                retained.code = "123456"; retained.review = true; retained.stepID = "private-step"
+                var events: [String] = [], mountedStatus: String?, mountedDraft: ResponseDraft?, failDetails = false
+                api.respond = { _, method, body in
+                    if method == "GET" {
+                        if failDetails { throw RelayFailure.unavailable }
+                        return try JSONEncoder().encode(pending)
+                    }
+                    let event = try XCTUnwrap(body?["type"] as? String)
+                    events.append(event)
+                    if event == boundary { return try await gate.reply() }
+                    if failFirst { throw RelayFailure.unavailable }
+                    return try JSONEncoder().encode(pending)
+                }
+                let load = Task {
+                    try await model.loadFormResponse(pending.id, observations: observations, fromNotification: true) { state, draft in
+                        mountedStatus = state.status; mountedDraft = draft
+                        if state.status != "pending" {
+                            XCTAssertEqual(draft.closedStatus, state.status)
+                            XCTAssertTrue(draft.values.isEmpty); XCTAssertTrue(draft.numberInputs.isEmpty)
+                        }
+                    }
+                }
+                defer { gate.resume(.failure(CancellationError())); load.cancel(); model.clearResponses() }
+                await fulfillment(of: [gate.entered], timeout: 2)
+                XCTAssertEqual(mountedStatus, "pending"); XCTAssertTrue(mountedDraft === retained)
+                XCTAssertNil(retained.closedStatus); XCTAssertEqual(retained.values["answer"], .text("private"))
+                gate.resume(.success(try JSONEncoder().encode(formState(status))))
+                try await load.value
+                XCTAssertEqual(mountedStatus, status); XCTAssertTrue(mountedDraft === retained)
+                XCTAssertEqual(retained.closedStatus, status)
+                XCTAssertTrue(retained.values.isEmpty); XCTAssertTrue(retained.numberInputs.isEmpty); XCTAssertTrue(retained.code.isEmpty)
+                XCTAssertNil(retained.stepID); XCTAssertFalse(retained.review)
+                XCTAssertEqual(events, boundary == "notification.tapped" ? [boundary] : ["notification.tapped", boundary])
+                let acceptedEvents = events
+                failDetails = true
+                do {
+                    try await model.loadFormResponse(pending.id, observations: observations, fromNotification: true) { _, _ in XCTFail("A failed detail read must not publish") }
+                    XCTFail("The later detail failure must propagate")
+                } catch {}
+                XCTAssertEqual(retained.closedStatus, status); XCTAssertTrue(retained.values.isEmpty)
+                failDetails = false
+                try await model.loadFormResponse(pending.id, observations: FormOpeningObservations(), fromNotification: true) { _, draft in
+                    XCTAssertEqual(draft.closedStatus, status); XCTAssertTrue(draft.values.isEmpty)
+                }
+                XCTAssertEqual(events, acceptedEvents, "Terminal observations must prevent further opening reports")
+                XCTAssertEqual(model.formDraft(pending).closedStatus, status)
+            }
+        }
+    }
+    @MainActor func testDelayedOpeningRepliesCannotPublishAfterResponseOwnershipChanges() async throws {
+        let key = "installation:signed-out", original = try PrivateStorage.read("installation:signed-out")
+        defer { if let original { try? PrivateStorage.write(key, original) } else { PrivateStorage.remove(key) } }
+        for boundary in ["notification.tapped", "request.opened"] {
+            for transition in ["discard", "account-clear", "newer-load", "task-cancel", "replacement"] {
+                let gate = SuspendedRelayReply(), api = FixtureRelayAPI(), model = RelayModel(api: api)
+                let pending = formState("pending"), retained = model.formDraft(formState("pending"))
+                retained.values = ["answer": .text("private")]
+                var suspend = true, publications = 0
+                api.respond = { _, method, body in
+                    if method == "POST", body?["type"] as? String == boundary, suspend {
+                        suspend = false
+                        return try await gate.reply()
+                    }
+                    return try JSONEncoder().encode(pending)
+                }
+                let load = Task {
+                    do {
+                        try await model.loadFormResponse(pending.id, observations: FormOpeningObservations(), fromNotification: true) { _, _ in publications += 1 }
+                        return false
+                    } catch is CancellationError { return true }
+                    catch { XCTFail("Expected obsolete observation cancellation: \(error)"); return false }
+                }
+                defer { gate.resume(.failure(CancellationError())); load.cancel(); model.clearResponses() }
+                await fulfillment(of: [gate.entered], timeout: 2)
+                switch transition {
+                case "discard": model.discard(pending.id, status: "cancelled")
+                case "account-clear": model.clearResponses()
+                case "newer-load":
+                    try await model.loadFormResponse(pending.id, observations: FormOpeningObservations(), fromNotification: false) { _, _ in }
+                case "replacement":
+                    let installation = model.deviceID
+                    _ = try await model.registerInstallation(allowReplacement: true) { id in
+                        if id == installation { throw RelayFailure.rejected("installation_id_unavailable") }
+                    }
+                default: load.cancel()
+                }
+                let successor = model.formDraft(pending), acceptedPublications = publications
+                if successor.closedStatus == nil { successor.values = ["answer": .text("successor")] }
+                gate.resume(.success(try JSONEncoder().encode(formState("submitted"))))
+                let cancelled = await load.value
+                XCTAssertTrue(cancelled, "\(boundary): \(transition)")
+                XCTAssertEqual(publications, acceptedPublications)
+                if transition == "discard" {
+                    XCTAssertEqual(retained.closedStatus, "cancelled"); XCTAssertEqual(successor.closedStatus, "cancelled")
+                    XCTAssertTrue(retained.values.isEmpty)
+                } else {
+                    XCTAssertNil(successor.closedStatus)
+                    XCTAssertEqual(successor.values["answer"], .text("successor"))
+                    XCTAssertNil(model.formDraft(pending).closedStatus)
+                    if ["account-clear", "replacement"].contains(transition) {
+                        XCTAssertEqual(retained.closedStatus, "closed"); XCTAssertTrue(retained.values.isEmpty)
+                        XCTAssertFalse(successor === retained)
+                    }
+                }
+            }
         }
     }
     func testRequesterMarkdownRemovesNavigationWithoutRemovingFormatting() {

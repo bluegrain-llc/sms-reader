@@ -78,10 +78,14 @@ final class ResponseDraft: ObservableObject {
 @MainActor
 final class FormOpeningObservations: ObservableObject {
     private var accepted = Set<String>()
-    func report(fromNotification: Bool, observe: (String) async throws -> Void) async throws {
+    func report(fromNotification: Bool, observe: (String) async throws -> Bool) async throws {
         var failure: Error?
         for event in (fromNotification ? ["notification.tapped", "request.opened"] : ["request.opened"]) where !accepted.contains(event) {
-            do { try await observe(event); accepted.insert(event) }
+            do {
+                let keepReporting = try await observe(event)
+                accepted.insert(event)
+                if !keepReporting { return }
+            }
             catch { if failure == nil { failure = error } }
         }
         if let failure { throw failure }
@@ -161,11 +165,19 @@ final class RelayModel: ObservableObject {
         if request.status != "pending" { discard(request.id, status: request.status) }
         return value
     }
-    func prepareFormResponse(_ request: FormRequest, observations: FormOpeningObservations, fromNotification: Bool, receive: (ResponseDraft) -> Void = { _ in }, observe: (String) async throws -> Void) async throws -> ResponseDraft {
+    func prepareFormResponse(_ request: FormRequest, observations: FormOpeningObservations, fromNotification: Bool, isCurrent: () -> Bool = { true }, receive: (FormRequest, ResponseDraft) -> Void = { _, _ in }, observe: (String) async throws -> FormRequest) async throws -> ResponseDraft {
+        guard isCurrent() else { throw CancellationError() }
         let value = formDraft(request)
-        receive(value)
+        receive(request, value)
         guard request.status == "pending", value.closedStatus == nil else { return value }
-        try await observations.report(fromNotification: fromNotification, observe: observe)
+        try await observations.report(fromNotification: fromNotification) { event in
+            guard isCurrent(), self.drafts[request.id] === value else { throw CancellationError() }
+            let state = try await observe(event)
+            guard isCurrent(), self.drafts[request.id] === value else { throw CancellationError() }
+            if state.status != "pending" { self.discard(request.id, status: state.status) }
+            receive(state, value)
+            return value.closedStatus == nil
+        }
         return value
     }
     func updateSMS(_ request: SMSRequest?) {
@@ -336,9 +348,8 @@ final class RelayModel: ObservableObject {
         do {
             let request: FormRequest = try await api.call("/v2/devices/\(installation)/requests/\(id)")
             guard isCurrent() else { throw CancellationError() }
-            _ = try await prepareFormResponse(request, observations: observations, fromNotification: fromNotification, receive: { receive(request, $0) }) { event in
-                guard isCurrent() else { throw CancellationError() }
-                let _: EmptyReply = try await self.api.call("/v2/devices/\(installation)/requests/\(id)/events", method: "POST", body: ["type":event])
+            _ = try await prepareFormResponse(request, observations: observations, fromNotification: fromNotification, isCurrent: isCurrent, receive: receive) { event in
+                try await self.api.call("/v2/devices/\(installation)/requests/\(id)/events", method: "POST", body: ["type":event])
             }
         } catch {
             guard isCurrent() else { throw CancellationError() }
