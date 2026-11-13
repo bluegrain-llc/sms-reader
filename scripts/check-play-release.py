@@ -42,6 +42,13 @@ REQUIRED_CI = {
     "Android UI integration (API 36)", "Play release gate unit tests",
     "Staging callback probe container",
 }
+FORBIDDEN_PERMISSIONS = {
+    "android.permission." + name for name in (
+        "READ_SMS", "RECEIVE_SMS", "READ_CONTACTS", "WRITE_CONTACTS",
+        "BIND_ACCESSIBILITY_SERVICE", "BIND_NOTIFICATION_LISTENER_SERVICE",
+    )
+}
+ANDROID_NS = "{http://schemas.android.com/apk/res/android}"
 
 
 def sha256(path):
@@ -117,6 +124,26 @@ def native_alignment(path, apk):
                     name_size, extra_size = struct.unpack_from("<HH", local, 26)
                     if (member.header_offset + 30 + name_size + extra_size) % 16384:
                         errors.append("uncompressed APK native library is not ZIP aligned to 16 KiB")
+    return errors
+
+
+def bundle_manifest_errors(manifest, module):
+    errors = []
+    prefix = "AAB " + module + ": "
+    if any((element.tag.startswith("uses-permission") and element.get(ANDROID_NS + "name") in FORBIDDEN_PERMISSIONS) or
+           element.get(ANDROID_NS + "permission") in FORBIDDEN_PERMISSIONS for element in manifest.iter()):
+        errors.append(prefix + "forbidden broad permissions")
+    application = manifest.find("application")
+    if module == "base" and application is None:
+        errors.append(prefix + "application missing")
+    if application is not None:
+        if application.get(ANDROID_NS + "debuggable") not in (None, "false"):
+            errors.append(prefix + "debuggable application")
+        for attribute, description in (("allowBackup", "application backup"),
+                                       ("usesCleartextTraffic", "cleartext traffic")):
+            value = application.get(ANDROID_NS + attribute)
+            if (module == "base" and value != "false") or value not in (None, "false"):
+                errors.append(prefix + description + " is not disabled")
     return errors
 
 
@@ -218,8 +245,17 @@ def check_record(record, base, offline=False, run=command, now=None):
                 require(bool(bundletool), "BUNDLETOOL_JAR required for AAB manifest/structure validation")
                 if bundletool:
                     run(["java", "-jar", bundletool, "validate", "--bundle=" + str(path)])
-                    manifest = ET.fromstring(run(["java", "-jar", bundletool, "dump", "manifest", "--bundle=" + str(path), "--module=base"]))
-                    ns = "{http://schemas.android.com/apk/res/android}"
+                    with zipfile.ZipFile(path) as archive:
+                        modules = sorted({match[1] for name in archive.namelist()
+                                          if (match := re.fullmatch(r"([^/]+)/manifest/AndroidManifest\.xml", name))})
+                    require("base" in modules, "AAB base manifest missing")
+                    manifests = {}
+                    for module in modules:
+                        manifest = ET.fromstring(run(["java", "-jar", bundletool, "dump", "manifest", "--bundle=" + str(path), "--module=" + module]))
+                        manifests[module] = manifest
+                        blockers.extend(bundle_manifest_errors(manifest, module))
+                    manifest = manifests.get("base", ET.Element("manifest"))
+                    ns = ANDROID_NS
                     require(manifest.get("package") == "com.bluegrain.smsrelay", "AAB package mismatch")
                     require(manifest.get(ns + "versionCode") == str(record.get("versionCode")), "AAB versionCode mismatch")
                     sdk = manifest.find("uses-sdk")

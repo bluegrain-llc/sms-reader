@@ -35,6 +35,8 @@ class GateTest(unittest.TestCase):
             path = self.base / kind
             with zipfile.ZipFile(path, "w") as archive:
                 archive.writestr("fixture.txt", "synthetic artifact")
+                if kind == "aab":
+                    archive.writestr("base/manifest/AndroidManifest.xml", "synthetic protobuf manifest")
             self.record["artifacts"][kind] = {"path": path.name, "sha256": gate.sha256(path)}
         evidence = {"result": "passed", "commit": self.record["commit"], "aabSha256": self.record["artifacts"]["aab"]["sha256"], "apkSha256": self.record["artifacts"]["playApk"]["sha256"], "splitSha256": [], "reviewCycles": [{"head": str(index) * 40, "findingsAddressed": True} for index in range(5)], "checks": {name: True for name in (*gate.RECOVERY_CHECKS, *gate.CLOUD_CHECKS)}}
         for label in gate.EVIDENCE:
@@ -42,7 +44,7 @@ class GateTest(unittest.TestCase):
             path.write_text(json.dumps(evidence))
             self.record["evidence"][label] = {"path": path.name, "sha256": gate.sha256(path)}
         self.manifest = "package: name='com.bluegrain.smsrelay' versionCode='11'\ntargetSdkVersion:'36'"
-        self.aab_manifest = '<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.bluegrain.smsrelay" android:versionCode="11"><uses-sdk android:targetSdkVersion="36"/></manifest>'
+        self.aab_manifest = '<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.bluegrain.smsrelay" android:versionCode="11"><uses-sdk android:targetSdkVersion="36"/><application android:allowBackup="false" android:usesCleartextTraffic="false"/></manifest>'
         self.bad_ci = None
         self.open_issue = None
 
@@ -253,6 +255,78 @@ class GateTest(unittest.TestCase):
     def test_aab_manifest_cannot_differ_from_candidate(self):
         self.aab_manifest = self.aab_manifest.replace('versionCode="11"', 'versionCode="12"')
         self.assertIn("AAB versionCode mismatch", self.check()["blockers"])
+
+    def test_aab_unsafe_application_flags_block_clean_play_apk(self):
+        original = self.aab_manifest
+        for attribute, blocker in (("debuggable", "AAB base: debuggable application"),
+                                   ("allowBackup", "AAB base: application backup is not disabled"),
+                                   ("usesCleartextTraffic", "AAB base: cleartext traffic is not disabled")):
+            for value in ("true", "@bool/unsafe"):
+                with self.subTest(attribute=attribute, value=value):
+                    self.aab_manifest = original.replace('android:' + attribute + '="false"', '')
+                    self.aab_manifest = self.aab_manifest.replace('<application ', '<application android:' + attribute + '="' + value + '" ')
+                    result = self.check()
+                    self.assertFalse(result["ready"])
+                    self.assertIn(blocker, result["blockers"])
+
+    def test_aab_base_requires_explicit_no_backup_and_no_cleartext(self):
+        original = self.aab_manifest
+        for attribute, blocker in (("allowBackup", "AAB base: application backup is not disabled"),
+                                   ("usesCleartextTraffic", "AAB base: cleartext traffic is not disabled")):
+            with self.subTest(attribute=attribute):
+                self.aab_manifest = original.replace('android:' + attribute + '="false"', '')
+                self.assertIn(blocker, self.check()["blockers"])
+
+    def test_aab_requires_base_application(self):
+        self.aab_manifest = self.aab_manifest[:self.aab_manifest.index('<application ')] + '</manifest>'
+        self.assertIn("AAB base: application missing", self.check()["blockers"])
+
+    def test_aab_forbidden_permissions_block_clean_play_apk(self):
+        original = self.aab_manifest
+        for permission in ("READ_SMS", "RECEIVE_SMS", "READ_CONTACTS", "WRITE_CONTACTS",
+                           "BIND_ACCESSIBILITY_SERVICE", "BIND_NOTIFICATION_LISTENER_SERVICE"):
+            for tag in ("uses-permission", "uses-permission-sdk-23"):
+                with self.subTest(permission=permission, tag=tag):
+                    declaration = '<' + tag + ' android:name="android.permission.' + permission + '"/>'
+                    self.aab_manifest = original.replace('</manifest>', declaration + '</manifest>')
+                    self.assertIn("AAB base: forbidden broad permissions", self.check()["blockers"])
+
+    def test_aab_protected_service_binding_is_rejected(self):
+        self.aab_manifest = self.aab_manifest.replace('/></manifest>', '><service android:name=".Listener" android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE"/></application></manifest>')
+        self.assertIn("AAB base: forbidden broad permissions", self.check()["blockers"])
+
+    def test_aab_feature_module_cannot_hide_forbidden_permission(self):
+        path = self.base / "aab"
+        with zipfile.ZipFile(path, "a") as archive:
+            archive.writestr("feature/manifest/AndroidManifest.xml", "synthetic feature manifest")
+        self.record["artifacts"]["aab"]["sha256"] = gate.sha256(path)
+        # Keep the evidence candidate binding valid while exercising artifact checks.
+        for label in gate.EVIDENCE:
+            evidence = self.base / (label + ".json")
+            data = json.loads(evidence.read_text())
+            data["aabSha256"] = self.record["artifacts"]["aab"]["sha256"]
+            evidence.write_text(json.dumps(data))
+            self.record["evidence"][label]["sha256"] = gate.sha256(evidence)
+        calls = []
+        def run(args):
+            if args[0] == "java" and "dump" in args:
+                calls.append(args[-1])
+                if args[-1] == "--module=feature":
+                    return '<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.bluegrain.smsrelay"><uses-permission android:name="android.permission.READ_SMS"/></manifest>'
+            return self.tools(args)
+        result = self.check(run=run)
+        self.assertIn("AAB feature: forbidden broad permissions", result["blockers"])
+        self.assertEqual(calls, ["--module=base", "--module=feature"])
+        def safe_feature(args):
+            if args[0] == "java" and "dump" in args and args[-1] == "--module=feature":
+                return '<manifest package="com.bluegrain.smsrelay"/>'
+            return self.tools(args)
+        self.assertTrue(self.check(run=safe_feature)["ready"])
+        def unavailable_feature(args):
+            if args[0] == "java" and "dump" in args and args[-1] == "--module=feature":
+                raise subprocess.CalledProcessError(1, args)
+            return self.tools(args)
+        self.assertIn("aab: required artifact tool or structural verification failed", self.check(run=unavailable_feature)["blockers"])
 
     def test_config_split_can_omit_sdk_but_must_match_package_version_and_signer(self):
         path = self.base / "split.apk"
