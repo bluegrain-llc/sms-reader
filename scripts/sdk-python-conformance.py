@@ -25,7 +25,11 @@ def execute():
  if op in ('startPairing','restartPairing'):
   f=s.start_pairing if op=='startPairing' else s.restart_pairing
   return f(capabilities=i.get('capabilities'),expires_in_days=i.get('expiresInDays'),external_account_ref=i.get('externalAccountRef'))
- if op=='pollPairing':return s.client.request('/v3/service/pairing-sessions/'+s.state['pairing']['sessionId'],s.state['serviceToken'])
+ if op=='pollPairing':
+  v=s.client.request('/v3/service/pairing-sessions/'+s.state['pairing']['sessionId'],s.state['serviceToken'])
+  if v['status']=='approved':
+   s.consume_deliveries();s.state.update(pairing=None,pairingInput=None);s.save()
+  return v
  if op=='waitForRegistration':return s.wait_for_registration()
  if op=='waitForPairing':return s.wait_for_pairing()
  if op=='consumeDeliveries':return s.consume_deliveries()
