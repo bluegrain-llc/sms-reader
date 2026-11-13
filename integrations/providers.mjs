@@ -9,7 +9,7 @@ export function hostedProviderConfig(provider, {resource, accessToken}) {
   try { url = new URL(resource); } catch { throw Error('invalid_mcp_resource'); }
   if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash || !/^\/mcp\/services\/[A-Za-z0-9_-]{1,128}$/.test(url.pathname)) throw Error('invalid_mcp_resource');
   if (typeof accessToken !== 'string' || !/^smsa_[A-Za-z0-9_-]{43}$/.test(accessToken)) throw Error('oauth_access_token_required');
-  if (provider === 'openai') return {type:'mcp',server_label:'relay',server_url:url.href,authorization:accessToken};
+  if (provider === 'openai' || provider === 'xai') return {type:'mcp',server_label:'relay',server_url:url.href,authorization:accessToken};
   if (provider === 'anthropic') return {mcp_servers:[{type:'url',url:url.href,name:'relay',authorization_token:accessToken}],tools:[{type:'mcp_toolset',mcp_server_name:'relay'}],betas:['mcp-client-2025-11-20']};
   throw Error('hosted_provider_not_supported');
 }
@@ -21,6 +21,7 @@ export function providerTools(tools, call) {
   };
   return {
     openai: tools.map(t => ({ type:'function',name:t.name,description:t.description,parameters:t.inputSchema,strict:false })),
+    xai: tools.map(t => ({type:'function',name:t.name,description:t.description,parameters:t.inputSchema})),
     anthropic: tools.map(t => ({name:t.name,description:t.description,input_schema:t.inputSchema})),
     google: [{functionDeclarations:tools.map(t => ({name:t.name,description:t.description,parametersJsonSchema:t.inputSchema}))}],
     execute,

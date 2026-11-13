@@ -322,6 +322,10 @@ for(const runtime of [0,1])for(const profile of providerProfiles){
     assert.equal(redirect.origin+redirect.pathname,target.origin+target.pathname);assert.deepEqual(redirect.searchParams.getAll('state'),[state]);
     const exchange={grant_type:'authorization_code',client_id:client.client_id,redirect_uri:profile.redirectUri,resource,code:redirect.searchParams.get('code')!,code_verifier:verifier};
     await formCall(runtime,'/oauth/token',{...exchange,code_verifier:randomBytes(32).toString('base64url')},400);
+    if(profile.provider==='xai'){
+      await formCall(runtime,'/oauth/token',{...exchange,redirect_uri:profile.redirectUri+'/unregistered'},400);
+      await formCall(runtime,'/oauth/token',{...exchange,resource:'https://relay.example/mcp/services/another'},400);
+    }
     const tokens=await formCall(1-runtime,'/oauth/token',exchange);assert.equal(tokens.scope,'forms');assert.equal(tokens.token_type,'Bearer');assert.ok(tokens.refresh_token);
     const config=profile.provider==='google'?{authorization:tokens.access_token}:hostedProviderConfig(profile.provider,{resource,accessToken:tokens.access_token});
     const softwareToken='authorization' in config?config.authorization:config.mcp_servers[0]!.authorization_token;
@@ -329,6 +333,14 @@ for(const runtime of [0,1])for(const profile of providerProfiles){
     const tools=await call(runtime,endpoint,softwareToken,{jsonrpc:'2.0',id:'provider-list',method:'tools/list'});
     assert.equal(tools.result.tools.length,5);
     for(const tool of tools.result.tools)assert.deepEqual(tool._meta.securitySchemes,[{type:'oauth2',scopes:['forms']}]);
+    if(profile.provider==='xai'){
+      assert.deepEqual(config,{type:'mcp',server_label:'relay',server_url:resource,authorization:tokens.access_token});
+      assert.ok(tools.result.tools.every((tool: {name:string})=>!tool.name.includes('sms')));
+      await call(runtime,'/mcp/services/another',softwareToken,{jsonrpc:'2.0',id:'wrong-resource',method:'tools/list'},'POST',401);
+      await call(runtime,'/mcp',softwareToken,{jsonrpc:'2.0',id:'legacy-resource',method:'tools/list'},'POST',401);
+      const denied=await call(runtime,endpoint,softwareToken,{jsonrpc:'2.0',id:'sms-denied',method:'tools/call',params:{name:'request_sms_code',arguments:{title:'Not approved',purpose:'No SMS grant',idempotencyKey:randomUUID()}}});
+      assert.equal(denied.result.isError,true);
+    }
     await call(runtime,`/v1/devices/${randomUUID()}`,owner(providerRecipient),{name:'Synthetic provider phone',fcmToken:'synthetic',wizardVersion:1},'PUT');
     const created=await call(runtime,endpoint,tokens.access_token,{jsonrpc:'2.0',id:'create',method:'tools/call',params:{name:'create_request',arguments:{title:'Review',body:'Provider fixture',fields:[{id:'decision',type:'text',label:'Decision'}],actions:[{id:'send',type:'submit',label:'Send'}],idempotencyKey:randomUUID()}}});
     const requestId=created.result.structuredContent.requestId;assert.equal(typeof requestId,'string');

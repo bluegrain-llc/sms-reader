@@ -25,6 +25,12 @@
     "source": "https://platform.claude.com/docs/en/agents-and-tools/mcp-connector"
   },
   {
+    "name": "xAI Responses application-managed OAuth bearer",
+    "provider": "xai",
+    "redirectUri": "https://8.8.8.8/xai-application-owned-callback",
+    "source": "https://docs.x.ai/developers/tools/remote-mcp"
+  },
+  {
     "name": "Gemini Apps persistent linking",
     "provider": "google",
     "redirectUri": "https://oauth-redirect.googleusercontent.com/r/relay-conformance",
