@@ -65,16 +65,15 @@ struct CodeEditor: View {
     @EnvironmentObject var model: RelayModel
     let request: SMSRequest
     @ObservedObject var draft: ResponseDraft
-    @State private var terminalStatus: String?
     var body: some View {
         TimelineView(.periodic(from: .now, by: 1)) { context in
             let deadline = request.manualEntryDeadline ?? request.expiresAt
-            let available = terminalStatus == nil && request.status == "ready" && deadline > context.date.timeIntervalSince1970 * 1000
+            let available = draft.closedStatus == nil && request.status == "ready" && deadline > context.date.timeIntervalSince1970 * 1000
             Form {
                 Section { Text(request.callerName).font(.title2.weight(.semibold)); Text(request.title).font(.headline); RequestMessage(source: request.purpose) }
-                if terminalStatus == nil && request.active && deadline > context.date.timeIntervalSince1970 * 1000 {
+                if draft.closedStatus == nil && request.active && deadline > context.date.timeIntervalSince1970 * 1000 {
                     Section("Enter the code you want to share") {
-                        TextField("SMS code", text: Binding(get: { draft.code }, set: { draft.code = available ? String($0.prefix(10)) : "" })).textContentType(.oneTimeCode)
+                        TextField("SMS code", text: Binding(get: { draft.code }, set: { draft.code = available && draft.closedStatus == nil ? String($0.prefix(10)) : "" })).textContentType(.oneTimeCode)
                             .textInputAutocapitalization(.never).autocorrectionDisabled().privacySensitive().accessibilityIdentifier("code-input")
                         Text("Type or deliberately paste a code. AutoFill is offered only when iOS allows it. Nothing is sent until you tap Send.").font(.footnote).foregroundStyle(.secondary)
                         Text(available ? "Entry closes \(Date(timeIntervalSince1970: deadline / 1000).formatted(date: .omitted, time: .standard))." : "The entry window has closed.")
@@ -82,14 +81,14 @@ struct CodeEditor: View {
                             .disabled(!available || !validCode(draft.code) || model.busy).accessibilityIdentifier("send-code")
                         Button("Decline", role: .destructive) { submit(deny: true) }.disabled(model.busy)
                     }
-                } else { Text(terminalStatus.map { "This request is \($0)." } ?? (request.active ? "The entry window has closed." : request.reason == "handled_on_another_device" ? "Handled on another device." : "This request is \(request.status).")) }
+                } else { Text(draft.closedStatus.map { "This request is \($0)." } ?? (request.active ? "The entry window has closed." : request.reason == "handled_on_another_device" ? "Handled on another device." : "This request is \(request.status).")) }
             }.onChange(of: available, initial: true) { _, active in if !active { draft.code = "" } }
-        }.onChange(of: request.id) { _, _ in terminalStatus = nil }
+        }
     }
     private func submit(deny: Bool = false) {
+        guard draft.closedStatus == nil else { return }
         Task { await model.perform {
-            let result = try await model.submitSMS(request, code: deny ? "" : draft.code, deny: deny)
-            if !result.active { terminalStatus = result.status }
+            try await model.submitSMS(request, code: deny ? "" : draft.code, deny: deny)
         } }
     }
 }
@@ -129,16 +128,17 @@ struct FormEditor: View {
     @ObservedObject var draft: ResponseDraft
     @State private var validation: [String] = []
     @State private var confirmation: FormAction?
-    @State private var terminalStatus: String?
     private var steps: [FormStep] { request.visibleSteps(draft.values) }
     private var current: Int { steps.firstIndex(where: { $0.id == draft.stepID }) ?? 0 }
+    private var values: Binding<[String: Answer]> { Binding(get: { draft.values }, set: { if draft.closedStatus == nil { draft.values = $0 } }) }
+    private var numberInputs: Binding<[String: String]> { Binding(get: { draft.numberInputs }, set: { if draft.closedStatus == nil { draft.numberInputs = $0 } }) }
     private var fields: [FormField] {
         guard request.steps != nil else { return request.fields }
         guard !steps.isEmpty else { return [] }; let ids = Set(steps[current].fieldIds); return request.fields.filter { ids.contains($0.id) }
     }
     var body: some View {
         TimelineView(.periodic(from: .now, by: 1)) { context in
-            let active = terminalStatus == nil && request.status == "pending" && request.expiresAt > context.date.timeIntervalSince1970 * 1000
+            let active = draft.closedStatus == nil && request.status == "pending" && request.expiresAt > context.date.timeIntervalSince1970 * 1000
             Form {
                 Section { Text(request.callerName).font(.title2.weight(.semibold)); RequestMessage(source: request.body) }
                 if active {
@@ -157,7 +157,7 @@ struct FormEditor: View {
                     } else {
                         Section(request.steps == nil || steps.isEmpty ? "Your response" : "\(current + 1) of \(steps.count) · \(steps[current].title)") {
                             if request.steps != nil, !steps.isEmpty, let body = steps[current].body { RequestMessage(source: body) }
-                            ForEach(fields) { field in NativeField(field: field, values: $draft.values, numberInputs: $draft.numberInputs) }
+                            ForEach(fields) { field in NativeField(field: field, values: values, numberInputs: numberInputs) }
                         }
                         Section {
                             if current > 0 { Button("Previous") { draft.stepID = steps[current - 1].id; validation = [] } }
@@ -172,7 +172,7 @@ struct FormEditor: View {
                         }
                     }
                     ForEach(validation, id: \.self) { Text($0).foregroundStyle(.red) }
-                } else { Text(terminalStatus.map { "This request is \($0)." } ?? (request.status == "pending" ? "This request expired." : "This request is \(request.status).")) }
+                } else { Text(draft.closedStatus.map { "This request is \($0)." } ?? (request.status == "pending" ? "This request expired." : "This request is \(request.status).")) }
             }
             .onChange(of: active) { _, active in if !active { draft.clear() } }
             .onChange(of: draft.values) { _, _ in
@@ -181,11 +181,11 @@ struct FormEditor: View {
             }
             .confirmationDialog("Send this response to \(request.callerName)?", isPresented: Binding(get: { confirmation != nil }, set: { if !$0 { confirmation = nil } }), titleVisibility: .visible) {
                 if let action = confirmation { Button(action.label, role: action.type == "decline" ? .destructive : nil) { Task { await model.perform {
-                    let result = try await model.submitForm(request, action: action, draft: draft)
-                    if result.status != "pending" { terminalStatus = result.status }
+                    guard draft.closedStatus == nil else { return }
+                    _ = try await model.submitForm(request, action: action, draft: draft)
                 } }; confirmation = nil } }
             }
-        }.onChange(of: request.id) { _, _ in terminalStatus = nil }
+        }
     }
     private func validateAndConfirm(_ action: FormAction) {
         validation = action.type == "decline" ? [] : request.errors(draft.values)

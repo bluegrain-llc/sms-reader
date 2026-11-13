@@ -70,8 +70,10 @@ final class ResponseDraft: ObservableObject {
     @Published var numberInputs: [String: String] = [:]
     @Published var stepID: String?
     @Published var review = false
+    @Published private(set) var closedStatus: String?
     let submissionID = UUID().uuidString
     func clear() { values = [:]; code = ""; numberInputs = [:]; stepID = nil; review = false }
+    func close(_ status: String = "closed") { closedStatus = status; clear() }
 }
 @MainActor
 final class FormOpeningObservations: ObservableObject {
@@ -153,7 +155,7 @@ final class RelayModel: ObservableObject {
     func formDraft(_ request: FormRequest) -> ResponseDraft {
         let value = draft(request.id, expiresAt: request.expiresAt)
         formDraftIDs.insert(request.id)
-        if request.status != "pending" { discard(request.id) }
+        if request.status != "pending" { discard(request.id, status: request.status) }
         return value
     }
     func prepareFormResponse(_ request: FormRequest, observations: FormOpeningObservations, fromNotification: Bool, receive: (ResponseDraft) -> Void = { _ in }, observe: (String) async throws -> Void) async throws -> ResponseDraft {
@@ -166,24 +168,25 @@ final class RelayModel: ObservableObject {
     func updateSMS(_ request: SMSRequest?) {
         if let old = sms, old.id != request?.id { discard(old.id) }
         sms = request
-        if let request, !request.active { discard(request.id) }
+        if let request, !request.active { discard(request.id, status: request.status) }
     }
     func receiveSMS(_ request: SMSRequest) {
         // Only active-request discovery can replace another request's draft.
         if sms?.id == request.id { sms = request }
-        if !request.active || (request.manualEntryDeadline ?? request.expiresAt) <= Date().timeIntervalSince1970 * 1000 { discard(request.id) }
+        if !request.active { discard(request.id, status: request.status) }
+        else if (request.manualEntryDeadline ?? request.expiresAt) <= Date().timeIntervalSince1970 * 1000 { discard(request.id, status: "expired") }
     }
     func reconcileFormDrafts(pendingIDs: Set<String>, isCurrent: () -> Bool = { true }, fetch: (String) async throws -> FormRequest) async {
         for id in formDraftIDs.subtracting(pendingIDs) {
             guard isCurrent() else { return }
             guard let retained = drafts[id] else { continue }
             // Absence alone is not terminal: the inbox has a bounded result set.
-            if let request = try? await fetch(id), isCurrent(), request.status != "pending", drafts[id] === retained { discard(id) }
+            if let request = try? await fetch(id), isCurrent(), request.status != "pending", drafts[id] === retained { discard(id, status: request.status) }
         }
     }
-    func discard(_ id: String) { drafts[id]?.clear(); drafts.removeValue(forKey: id); expiries.removeValue(forKey: id); formDraftIDs.remove(id) }
-    func clearResponses() { drafts.values.forEach { $0.clear() }; drafts = [:]; expiries = [:]; formDraftIDs = [] }
-    func expireDrafts() { for (id, expiry) in expiries where expiry <= Date().timeIntervalSince1970 * 1000 { discard(id) } }
+    func discard(_ id: String, status: String = "closed") { drafts[id]?.close(status); drafts.removeValue(forKey: id); expiries.removeValue(forKey: id); formDraftIDs.remove(id) }
+    func clearResponses() { drafts.values.forEach { $0.close() }; drafts = [:]; expiries = [:]; formDraftIDs = [] }
+    func expireDrafts() { for (id, expiry) in expiries where expiry <= Date().timeIntervalSince1970 * 1000 { discard(id, status: "expired") } }
     @discardableResult
     func reportResponseFailure(_ failure: Error, fallback: String) -> Bool {
         guard !Task.isCancelled else { return false }
@@ -313,7 +316,7 @@ final class RelayModel: ObservableObject {
         let body: [String: Any] = deny ? ["status":"denied"] : ["status":"completed","source":"manual","code":code]
         let state: SMSRequest = try await api.call("/v1/devices/\(deviceID)/requests/\(request.id)/events", method: "POST", body: body)
         if !state.active {
-            discard(request.id)
+            discard(request.id, status: state.status)
             if state.reason == "handled_on_another_device" { notice = "Handled on another device." }
             else if state.status == "completed" { notice = "Response accepted." }
             else if state.status == "denied" { notice = "Request declined." }
@@ -328,7 +331,7 @@ final class RelayModel: ObservableObject {
         let encoded = try JSONEncoder().encode(values), object = try JSONSerialization.jsonObject(with: encoded)
         let result: FormRequest = try await api.call("/v2/devices/\(deviceID)/requests/\(request.id)/submissions", method: "POST", body: ["submissionId":draft.submissionID,"action":action.id,"values":object])
         if result.status != "pending" {
-            discard(request.id)
+            discard(request.id, status: result.status)
             if ["submitted", "declined"].contains(result.status), let winner = result.completedByDeviceId {
                 notice = winner != deviceID ? "Handled on another device." : result.status == "submitted" ? "Response accepted." : "Request declined."
             } else { notice = "This request is \(result.status). Your response was not sent." }

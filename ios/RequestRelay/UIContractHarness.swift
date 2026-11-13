@@ -16,6 +16,8 @@ struct UIContractHarness: View {
                 Button("Private modal") { previewPhase = .active; privacySheet = true }
                 NavigationLink("Code submission without polling") { TerminalSubmissionHarness(form: false) }
                 NavigationLink("Form submission without polling") { TerminalSubmissionHarness(form: true) }
+                NavigationLink("Cancelled code without polling") { TerminalSubmissionHarness(form: false, external: true) }
+                NavigationLink("Cancelled form without polling") { TerminalSubmissionHarness(form: true, external: true) }
                 NavigationLink("Manual code") {
                     VStack {
                         CodeEditor(request: SMSRequest(requestId: "fixture-code", callerName: "Synthetic agent", title: "Test sign-in", purpose: "Share only by tapping Send.", status: "ready", expiresAt: expiry, manualEntryDeadline: codeExpiry), draft: codeDraft)
@@ -46,25 +48,52 @@ struct UIContractHarness: View {
 
 struct TerminalSubmissionHarness: View {
     let form: Bool
-    @StateObject private var model = RelayModel(api: TerminalSubmissionAPI())
-    @StateObject private var draft = ResponseDraft()
-    private let expiry = (Date().timeIntervalSince1970 + 300) * 1000
+    let external: Bool
+    @StateObject private var api: TerminalSubmissionAPI
+    @StateObject private var model: RelayModel
+    @StateObject private var draft: ResponseDraft
+    private let expiry: Double
+    init(form: Bool, external: Bool = false) {
+        self.form = form; self.external = external
+        let expiry = (Date().timeIntervalSince1970 + 300) * 1000
+        self.expiry = expiry
+        let api = TerminalSubmissionAPI(), model = RelayModel(api: api)
+        model.signedIn = true
+        _api = StateObject(wrappedValue: api); _model = StateObject(wrappedValue: model)
+        _draft = StateObject(wrappedValue: model.draft(form ? "fixture-form" : "fixture-code", expiresAt: expiry))
+    }
     var body: some View {
-        Group {
+        VStack {
             if form {
                 FormEditor(request: FormRequest(requestId: "fixture-form", callerName: "Synthetic agent", title: "Response", body: "Test terminal submission.", status: "pending", expiresAt: expiry,
                     fields: [.init(id: "answer", label: "Answer", type: "text", required: true)], actions: [.init(id: "send", label: "Send response", type: "submit")]), draft: draft)
             } else {
                 CodeEditor(request: SMSRequest(requestId: "fixture-code", callerName: "Synthetic agent", title: "Code", purpose: "Test terminal submission.", status: "ready", expiresAt: expiry), draft: draft)
             }
+            if external { Button("Cancel request on relay") { model.discard(form ? "fixture-form" : "fixture-code", status: "cancelled") } }
+            if api.refreshPending {
+                Text("Refresh is waiting").accessibilityIdentifier("terminal-refresh-pending")
+                Button("Finish refresh") { api.releaseRefresh = true }
+            }
         }.environmentObject(model)
     }
 }
 
 @MainActor
-private final class TerminalSubmissionAPI: RelayCalling {
+private final class TerminalSubmissionAPI: ObservableObject, RelayCalling {
     let origin = URL(string: "https://relay.example")!
+    @Published private(set) var refreshPending = false
+    var releaseRefresh = false
     func call<T: Decodable>(_ path: String, method: String, body: [String: Any]?) async throws -> T {
+        if path == "/v1/devices", method == "GET" {
+            refreshPending = true
+            defer { refreshPending = false }
+            for _ in 0..<300 {
+                if releaseRefresh { break }
+                try await Task.sleep(for: .milliseconds(100))
+            }
+            throw RelayFailure.unavailable
+        }
         guard method == "POST" else { throw RelayFailure.unavailable }
         let response: [String: Any]
         if path.hasSuffix("/submissions") {

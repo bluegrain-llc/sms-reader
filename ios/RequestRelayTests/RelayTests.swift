@@ -72,6 +72,47 @@ extension RelayTests {
 }
 
 extension RelayTests {
+    @MainActor func testTerminalSubmissionClosesRetainedDraftBeforeAuthenticatedRefreshReturns() async throws {
+        let key = "installation:signed-out", original = try PrivateStorage.read("installation:signed-out")
+        defer { if let original { try? PrivateStorage.write(key, original) } else { PrivateStorage.remove(key) } }
+        for form in [false, true] {
+            let gate = SuspendedRelayReply(), api = FixtureRelayAPI(), model = RelayModel(api: api)
+            model.signedIn = true
+            let sms = SMSRequest(requestId: "sms", callerName: "Agent", title: "Code", purpose: "Test", status: "ready", expiresAt: 2000000000000)
+            let request = formState("pending")
+            let draft = form ? model.formDraft(request) : model.draft(sms.id, expiresAt: sms.expiresAt)
+            draft.code = "123456"; draft.values = ["answer": .text("private")]; draft.numberInputs = ["number": "123."]
+            api.respond = { path, method, _ in
+                if path == "/v1/devices", method == "GET" { return try await gate.reply() }
+                XCTAssertEqual(method, "POST")
+                if form { return try JSONEncoder().encode(self.formState("submitted")) }
+                return try JSONEncoder().encode(SMSRequest(requestId: sms.id, callerName: sms.callerName, title: sms.title, purpose: sms.purpose, status: "completed", expiresAt: sms.expiresAt))
+            }
+            let submission = Task {
+                if form { _ = try await model.submitForm(request, action: .init(id: "send", label: "Send", type: "submit"), draft: draft) }
+                else { _ = try await model.submitSMS(sms, code: draft.code) }
+            }
+            defer { gate.resume(.failure(CancellationError())); submission.cancel(); model.clearResponses() }
+            await fulfillment(of: [gate.entered], timeout: 2)
+            XCTAssertEqual(draft.closedStatus, form ? "submitted" : "completed")
+            XCTAssertTrue(draft.code.isEmpty); XCTAssertTrue(draft.values.isEmpty); XCTAssertTrue(draft.numberInputs.isEmpty)
+            model.signedIn = false
+            gate.resume(.failure(RelayFailure.unavailable))
+            try await submission.value
+        }
+    }
+    @MainActor func testExpiryAndAccountClearingCloseRetainedDraftOwnership() {
+        let model = RelayModel()
+        let expired = model.draft("expired", expiresAt: 0); expired.code = "123456"
+        model.expireDrafts()
+        XCTAssertEqual(expired.closedStatus, "expired"); XCTAssertTrue(expired.code.isEmpty)
+        let account = model.formDraft(formState("pending")); account.values = ["answer": .text("private")]
+        model.clearResponses()
+        XCTAssertEqual(account.closedStatus, "closed"); XCTAssertTrue(account.values.isEmpty)
+        let reopened = model.formDraft(formState("pending"))
+        XCTAssertFalse(reopened === account); XCTAssertNil(reopened.closedStatus)
+        model.clearResponses()
+    }
     @MainActor func testSMSSubmissionReportsTheReturnedTerminalOutcome() async throws {
         let key = "installation:signed-out", original = try PrivateStorage.read("installation:signed-out")
         defer { if let original { try? PrivateStorage.write(key, original) } else { PrivateStorage.remove(key) } }
@@ -160,10 +201,12 @@ extension RelayTests {
         let retained = model.formDraft(pending); retained.values = ["answer": .text("private")]
         await model.reconcileFormDrafts(pendingIDs: []) { _ in pending }
         XCTAssertEqual(retained.values["answer"], .text("private"))
+        XCTAssertNil(retained.closedStatus)
         await model.reconcileFormDrafts(pendingIDs: []) { _ in throw RelayFailure.unavailable }
         XCTAssertEqual(retained.values["answer"], .text("private"))
         await model.reconcileFormDrafts(pendingIDs: []) { _ in self.formState("completed") }
         XCTAssertTrue(retained.values.isEmpty)
+        XCTAssertEqual(retained.closedStatus, "completed")
         XCTAssertFalse(model.formDraft(pending) === retained)
         model.clearResponses()
     }
@@ -227,6 +270,7 @@ extension RelayTests {
         XCTAssertTrue(oldDraft.code.isEmpty)
         model.receiveSMS(.init(requestId: current.id, callerName: "Agent", title: "Code", purpose: "Test", status: "completed", expiresAt: current.expiresAt))
         XCTAssertTrue(draft.code.isEmpty); XCTAssertEqual(model.sms?.status, "completed")
+        XCTAssertEqual(draft.closedStatus, "completed")
         model.clearResponses()
     }
     @MainActor func testOnlyExplicitRegistrationReplacesARemotelyDeletedInstallation() async throws {
@@ -269,6 +313,7 @@ extension RelayTests {
         let first = model.draft("first", expiresAt: 2000000000000); first.code = "123456"
         model.updateSMS(request("second"))
         XCTAssertTrue(first.code.isEmpty)
+        XCTAssertEqual(first.closedStatus, "closed")
         XCTAssertFalse(model.draft("first", expiresAt: 2000000000000) === first)
         let second = model.draft("second", expiresAt: 2000000000000); second.code = "654321"
         model.updateSMS(request("second")); XCTAssertEqual(second.code, "654321")
