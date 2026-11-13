@@ -41,7 +41,7 @@ class GateTest(unittest.TestCase):
         evidence = {"result": "passed", "commit": self.record["commit"], "aabSha256": self.record["artifacts"]["aab"]["sha256"], "apkSha256": self.record["artifacts"]["playApk"]["sha256"], "splitSha256": [], "reviewCycles": [{"head": str(index) * 40, "findingsAddressed": True} for index in range(5)], "checks": {name: True for name in (*gate.RECOVERY_CHECKS, *gate.CLOUD_CHECKS)}}
         for label in gate.EVIDENCE:
             path = self.base / (label + ".json")
-            path.write_text(json.dumps(evidence))
+            path.write_text(json.dumps({**evidence, **({"packageName": "com.bluegrain.smsrelay"} if label == "physicalAcceptance" else {})}))
             self.record["evidence"][label] = {"path": path.name, "sha256": gate.sha256(path)}
         self.manifest = "package: name='com.bluegrain.smsrelay' versionCode='11'\ntargetSdkVersion:'36'"
         self.aab_manifest = '<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.bluegrain.smsrelay" android:versionCode="11"><uses-sdk android:targetSdkVersion="36"/><application android:allowBackup="false" android:usesCleartextTraffic="false"/></manifest>'
@@ -276,6 +276,68 @@ class GateTest(unittest.TestCase):
             with self.subTest(attribute=attribute):
                 self.aab_manifest = original.replace('android:' + attribute + '="false"', '')
                 self.assertIn(blocker, self.check()["blockers"])
+
+    def test_aab_stripped_attribute_names_fail_closed(self):
+        original = self.aab_manifest
+        for namespace in ("android:", ""):
+            for location, name, value in (("application", "_0x0101000f_", "true"),
+                                          ("uses-permission", "_0x01010003_", "android.permission.READ_SMS"),
+                                          ("service", "_0x01010006_", "android.permission.BIND_NOTIFICATION_LISTENER_SERVICE"),
+                                          ("application", "_unknown_", "true")):
+                with self.subTest(namespace=namespace, location=location, name=name):
+                    attribute = namespace + name + '="' + value + '"'
+                    if location == "application":
+                        self.aab_manifest = original.replace('<application ', '<application ' + attribute + ' ')
+                    elif location == "uses-permission":
+                        self.aab_manifest = original.replace('</manifest>', '<uses-permission ' + attribute + '/></manifest>')
+                    else:
+                        self.aab_manifest = original.replace('/></manifest>', '><service android:name=".Listener" ' + attribute + '/></application></manifest>')
+                    result = self.check()
+                    self.assertFalse(result["ready"])
+                    self.assertIn("AAB base: unresolved manifest attribute name", result["blockers"])
+
+    def test_aab_namespace_stripping_cannot_hide_security_values(self):
+        original = self.aab_manifest
+        for location, value, blocker in (("application", "true", "AAB base: debuggable application"),
+                                         ("uses-permission", "android.permission.READ_SMS", "AAB base: forbidden broad permissions"),
+                                         ("service", "android.permission.BIND_NOTIFICATION_LISTENER_SERVICE", "AAB base: forbidden broad permissions")):
+            with self.subTest(location=location):
+                if location == "application":
+                    self.aab_manifest = original.replace('<application ', '<application debuggable="' + value + '" ')
+                elif location == "uses-permission":
+                    self.aab_manifest = original.replace('</manifest>', '<uses-permission name="' + value + '"/></manifest>')
+                else:
+                    self.aab_manifest = original.replace('/></manifest>', '><service android:name=".Listener" permission="' + value + '"/></application></manifest>')
+                result = self.check()
+                self.assertFalse(result["ready"])
+                self.assertIn(blocker, result["blockers"])
+        self.aab_manifest = original.replace('/></manifest>', '><service android:name=".Private" permission="com.bluegrain.smsrelay.PRIVATE"/></application></manifest>')
+        self.assertTrue(self.check()["ready"])
+
+    def test_aab_ambiguous_android_attribute_names_fail_closed(self):
+        self.aab_manifest = self.aab_manifest.replace('<application ', '<application android:debuggable="false" debuggable="true" ')
+        result = self.check()
+        self.assertFalse(result["ready"])
+        self.assertIn("aab: required artifact tool or structural verification failed", result["blockers"])
+
+    def test_physical_acceptance_requires_explicit_production_package(self):
+        path = self.base / "physicalAcceptance.json"
+        original = json.loads(path.read_text())
+        for package in (None, "com.bluegrain.smsrelay.staging", "com.example.other"):
+            with self.subTest(package=package):
+                evidence = dict(original)
+                if package is None:
+                    evidence.pop("packageName")
+                else:
+                    evidence["packageName"] = package
+                path.write_text(json.dumps(evidence))
+                self.record["evidence"]["physicalAcceptance"]["sha256"] = gate.sha256(path)
+                result = self.check()
+                self.assertFalse(result["ready"])
+                self.assertIn("physicalAcceptance: production package evidence required", result["blockers"])
+        path.write_text(json.dumps(original))
+        self.record["evidence"]["physicalAcceptance"]["sha256"] = gate.sha256(path)
+        self.assertTrue(self.check()["ready"])
 
     def test_aab_requires_base_application(self):
         self.aab_manifest = self.aab_manifest[:self.aab_manifest.index('<application ')] + '</manifest>'

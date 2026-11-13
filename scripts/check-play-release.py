@@ -20,6 +20,7 @@ import zlib
 from datetime import datetime, timedelta, timezone
 
 REPO = "bluegrain-llc/sms-reader"
+PRODUCTION_PACKAGE = "com.bluegrain.smsrelay"
 EVIDENCE = (
     "physicalAcceptance", "cloudAcceptance", "deploymentRollback", "monitoringDrill",
     "accountDeletion", "capacityCostRestore", "playInstalledSmoke", "pageSizeRuntime",
@@ -127,14 +128,26 @@ def native_alignment(path, apk):
     return errors
 
 
+def android_attribute(element, name):
+    value = element.get(ANDROID_NS + name)
+    if name in element.attrib:
+        if value is not None:
+            raise ValueError("ambiguous Android manifest attribute")
+        return element.get(name)
+    return value
+
+
 def bundle_manifest_errors(manifest, module):
     errors = []
     prefix = "AAB " + module + ": "
-    if any((element.tag.startswith("uses-permission") and element.get(ANDROID_NS + "name") in FORBIDDEN_PERMISSIONS) or
-           element.get(ANDROID_NS + "permission") in FORBIDDEN_PERMISSIONS for element in manifest.iter()):
+    if any(re.fullmatch(r"_(?:0x[0-9a-fA-F]{8}|unknown)_", attribute.rsplit("}", 1)[-1])
+           for element in manifest.iter() for attribute in element.attrib):
+        errors.append(prefix + "unresolved manifest attribute name")
+    if any((element.tag.startswith("uses-permission") and android_attribute(element, "name") in FORBIDDEN_PERMISSIONS) or
+           android_attribute(element, "permission") in FORBIDDEN_PERMISSIONS for element in manifest.iter()):
         errors.append(prefix + "forbidden broad permissions")
     for element in manifest.iter():
-        permission = element.get(ANDROID_NS + "permission")
+        permission = android_attribute(element, "permission")
         if permission and (permission.startswith(("@", "?")) or
                            re.fullmatch(r"0x[0-9a-fA-F]{8}", permission)):
             errors.append(prefix + "unresolved permission resource reference")
@@ -143,11 +156,11 @@ def bundle_manifest_errors(manifest, module):
     if module == "base" and application is None:
         errors.append(prefix + "application missing")
     if application is not None:
-        if application.get(ANDROID_NS + "debuggable") not in (None, "false"):
+        if android_attribute(application, "debuggable") not in (None, "false"):
             errors.append(prefix + "debuggable application")
         for attribute, description in (("allowBackup", "application backup"),
                                        ("usesCleartextTraffic", "cleartext traffic")):
-            value = application.get(ANDROID_NS + attribute)
+            value = android_attribute(application, attribute)
             if (module == "base" and value != "false") or value not in (None, "false"):
                 errors.append(prefix + description + " is not disabled")
     return errors
@@ -262,7 +275,7 @@ def check_record(record, base, offline=False, run=command, now=None):
                         blockers.extend(bundle_manifest_errors(manifest, module))
                     manifest = manifests.get("base", ET.Element("manifest"))
                     ns = ANDROID_NS
-                    require(manifest.get("package") == "com.bluegrain.smsrelay", "AAB package mismatch")
+                    require(manifest.get("package") == PRODUCTION_PACKAGE, "AAB package mismatch")
                     require(manifest.get(ns + "versionCode") == str(record.get("versionCode")), "AAB versionCode mismatch")
                     sdk = manifest.find("uses-sdk")
                     target = sdk.get(ns + "targetSdkVersion") if sdk is not None else None
@@ -274,7 +287,7 @@ def check_record(record, base, offline=False, run=command, now=None):
                     cert, re.MULTILINE)]
                 require(bool(digests) and all(value in signers for value in digests), "Play APK signer mismatch")
                 manifest = run(["aapt", "dump", "badging", str(path)])
-                require("package: name='com.bluegrain.smsrelay'" in manifest, "APK package mismatch")
+                require("package: name='" + PRODUCTION_PACKAGE + "'" in manifest, "APK package mismatch")
                 require("versionCode='" + str(record.get("versionCode")) + "'" in manifest, "APK versionCode mismatch")
                 if kind == "playApk":
                     target = re.search(r"targetSdkVersion:'(\d+)'", manifest)
@@ -295,6 +308,9 @@ def check_record(record, base, offline=False, run=command, now=None):
                     evidence.get("aabSha256") == artifacts.get("aab", {}).get("sha256") and
                     evidence.get("apkSha256") == artifacts.get("playApk", {}).get("sha256") and
                     evidence.get("splitSha256") == [ref.get("sha256") for ref in splits], label + ": evidence does not attest to this exact candidate")
+            if label == "physicalAcceptance":
+                require(evidence.get("packageName") == PRODUCTION_PACKAGE,
+                        "physicalAcceptance: production package evidence required")
             if label == "finalCiAndReviews":
                 cycles = evidence.get("reviewCycles", [])
                 require(len(cycles) >= 5 and all(isinstance(cycle, dict) and cycle.get("findingsAddressed") is True and re.fullmatch(r"[0-9a-f]{40}", cycle.get("head") or "") for cycle in cycles), "five completed review/fix cycles missing")
