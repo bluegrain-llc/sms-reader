@@ -394,6 +394,28 @@ integration('general requests require separate approval and coexist with SMS and
   assert.deepEqual(await relay.forms.events(token), before); // Fetching is never opening.
   assert.equal((await relay.forms.get({ secret: token }, forms[0]!.requestId)).firstOpenedAt, null);
 });
+integration('concurrent form batches retain every request, event and rate increment', { timeout: 60_000 }, async () => {
+  await allowForms();
+  const requests = [];
+  for (let batch = 0; batch < 3; batch++) {
+    const inputs = Array.from({ length: 4 }, (_, i) => formInput(`contention-${batch}-${i}`));
+    const created = await Promise.all(inputs.map(input => relay.forms.create(token, input)));
+    assert.ok(created.every(request => request.status === 'pending'));
+    assert.deepEqual(await relay.forms.create(token, inputs[0]!), created[0]);
+    requests.push(...created);
+  }
+  assert.equal(new Set(requests.map(request => request.requestId)).size, 12);
+  assert.equal((await relay.forms.inbox(uid, did)).length, 12);
+  const events = (await relay.forms.events(token)).events;
+  assert.deepEqual(events.map(event => event.sequence), Array.from({ length: 12 }, (_, i) => i + 1));
+  assert.ok(events.every(event => event.type === 'request.created'));
+  assert.deepEqual(new Set(events.map(event => event.requestId)), new Set(requests.map(request => request.requestId)));
+  const grant = (await db.collection('grants').doc(grantId).get()).data()!;
+  const account = (await db.collection('accounts').doc(uid).get()).data()!;
+  assert.equal(grant.formRate.count, 12);
+  assert.equal(account.formRate.count, 12);
+  assert.equal((await db.collection('deliveryOutbox').get()).size, 24);
+});
 integration('taps and foreground openings dedupe per device and preserve offline observed times', async () => {
   await allowForms(); const r = await relay.forms.create(token, formInput('tap-open-distinct'));
   await relay.forms.observe(uid, did, r.requestId, { type: 'notification.tapped', occurredAt: time });

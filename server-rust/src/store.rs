@@ -409,8 +409,7 @@ impl Store {
             let native = match db.begin_transaction_with_options(options).await {
                 Ok(native) => native,
                 Err(e) if retry(&e) && attempt < 4 => {
-                    tokio::time::sleep(std::time::Duration::from_millis(100 * (1 << attempt)))
-                        .await;
+                    tokio::time::sleep(retry_delay(attempt)).await;
                     continue;
                 }
                 Err(e) => return Err(e.into()),
@@ -443,10 +442,16 @@ impl Store {
                     }
                 }
             }
-            tokio::time::sleep(std::time::Duration::from_millis(100 * (1 << attempt))).await;
+            tokio::time::sleep(retry_delay(attempt)).await;
         }
         unreachable!()
     }
+}
+fn retry_delay(attempt: u32) -> std::time::Duration {
+    // Competing transactions otherwise repeat their reads and lock upgrades in
+    // step, exhausting all attempts even after the original locks are released.
+    let base = 100 * (1u64 << attempt);
+    std::time::Duration::from_millis(rand::random_range(base..=2 * base))
 }
 fn retry(e: &firestore::errors::FirestoreError) -> bool {
     matches!(e,firestore::errors::FirestoreError::DatabaseError(d) if d.retry_possible)
