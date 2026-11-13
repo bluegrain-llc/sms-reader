@@ -80,8 +80,8 @@ test('both runtimes isolate staging Android associations and fallback links', {t
     const configured = {...options,androidPackageName:packageName,androidCertSha256:certificate};
     const selected = [app(relay, configured).listen(0, '127.0.0.1'), rustApp(native as unknown as Relay, configured).listen() as unknown as Server];
     try {
+      await Promise.all(selected.map(server => server.listening ? Promise.resolve() : once(server, 'listening', {signal:AbortSignal.timeout(10000)})));
       for (const server of selected) {
-        if (!server.listening) await once(server, 'listening', {signal:AbortSignal.timeout(10000)});
         const base = `http://127.0.0.1:${(server.address() as {port:number}).port}`;
         const links = await contractFetch(base + '/.well-known/assetlinks.json');
         const page = await contractFetch(base + '/connect?code=ABCDE-FG234');
