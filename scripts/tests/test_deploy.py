@@ -111,6 +111,21 @@ class DeploymentSafety(unittest.TestCase):
         self.assertEqual(manifest['status'], 'staged')
         self.assertEqual(manifest['backend'], 'rust')
 
+    def test_apple_identifiers_reach_each_backend_without_overwriting_unset_configuration(self):
+        identifiers = 'ABCDEFGHIJ.com.bluegrain.smsrelay,0123456789.com.example.companion'
+        for backend in ['typescript', 'rust']:
+            with self.subTest(backend=backend):
+                calls, _, _, _ = self.exercise(BACKEND=backend, APPLE_APP_IDS=identifiers)
+                deploy = next(c for c in calls if c[:3] == ['gcloud', 'run', 'deploy'])
+                values = deploy[deploy.index('--update-env-vars') + 1].removeprefix('^|^').split('|')
+                self.assertIn('APPLE_APP_IDS=' + identifiers, values)
+        calls, _, _, _ = self.exercise(APPLE_APP_IDS='')
+        deploy = next(c for c in calls if c[:3] == ['gcloud', 'run', 'deploy'])
+        self.assertNotIn('APPLE_APP_IDS=', deploy[deploy.index('--update-env-vars') + 1])
+        for invalid in ['invalid', identifiers + '|INJECTED=value', identifiers + ',']:
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                d.config({**self.env, 'APPLE_APP_IDS': invalid})
+
     def test_explicit_rust_promotion_keeps_guarded_canary_steps(self):
         _, traffic, manifest, smokes = self.exercise(BACKEND='rust', TRAFFIC_MODE='live')
         self.assertEqual(len(traffic), 3)

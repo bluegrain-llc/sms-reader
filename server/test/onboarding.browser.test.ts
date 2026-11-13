@@ -2,11 +2,16 @@ import { test, expect } from '@playwright/test';
 import { createServer, type Server } from 'node:http';
 import { readFileSync } from 'node:fs';
 import { once } from 'node:events';
+import express from 'express';
+import { mountAccountPages } from '../src/account-pages.js';
 let server: Server, origin: string;
 const config = { apiKey: 'public', authDomain: 'demo.firebaseapp.com', projectId: 'demo', appId: 'public' };
 test.beforeAll(async () => {
+  const accountPages = express(); mountAccountPages(accountPages,config);
   server = createServer((req,res) => {
-    if (req.url === '/ticket-browser.js') { res.setHeader('Content-Type','application/javascript'); res.end(readFileSync(new URL('../public/ticket-browser.js',import.meta.url))); }
+    if (req.url === '/account/delete') accountPages(req,res);
+    else if (req.url === '/rust/account/delete') { res.setHeader('Content-Type','text/html');res.end(readFileSync(new URL('../../server-rust/compat/account-delete.html',import.meta.url),'utf8').replaceAll('{{NONCE}}','testnonce').replace('{{CONFIG}}',JSON.stringify(config))); }
+    else if (req.url === '/ticket-browser.js') { res.setHeader('Content-Type','application/javascript'); res.end(readFileSync(new URL('../public/ticket-browser.js',import.meta.url))); }
     else if (req.url === '/owned-services.js') { res.setHeader('Content-Type','application/javascript'); res.end(readFileSync(new URL('../public/owned-services.js',import.meta.url))); }
     else if (req.url?.startsWith('/owned-services')) { res.setHeader('Content-Type','text/html'); res.end(readFileSync(new URL('../public/owned-services.html',import.meta.url),'utf8').replaceAll('__NONCE__','testnonce').replace('__CONFIG__',JSON.stringify(config))); }
     else if (req.url === '/onboarding-qr.js') { res.setHeader('Content-Type','application/javascript'); res.end(readFileSync(new URL('../public/onboarding-qr.js',import.meta.url))); }
@@ -18,6 +23,26 @@ test.afterAll(async () => { server.closeAllConnections(); await new Promise<void
 test.beforeEach(async ({ context }) => {
   await context.route('https://www.gstatic.com/firebasejs/**/firebase-app.js',r=>r.fulfill({contentType:'application/javascript',body:'export const initializeApp=()=>({});'}));
   await context.route('https://www.gstatic.com/firebasejs/**/firebase-auth.js',r=>r.fulfill({contentType:'application/javascript',body:`const user={uid:'browser-owner',email:'my-own-account@example.test',getIdToken:async()=> 'owner-session'}; const auth={currentUser:user};export const getAuth=()=>auth;export const signOut=async()=>{};export class GoogleAuthProvider{};export class OAuthProvider{constructor(id){this.providerId=id;}};export const linkWithPopup=async()=>({user});export const signInWithPopup=async()=>({});export const signInWithRedirect=async()=>({});export const getRedirectResult=async()=>({});export const onAuthStateChanged=(a,fn)=>{queueMicrotask(()=>fn(user));};export const setPersistence=async()=>{};export const browserLocalPersistence={};`}));
+});
+for (const path of ['/account/delete','/rust/account/delete']) test(`cancelled provider selection preserves the selected deletion account (${path})`,async({page})=>{
+  const providers:string[]=[];let deletions=0;
+  await page.route('https://www.gstatic.com/firebasejs/**/firebase-auth.js',r=>r.fulfill({contentType:'application/javascript',body:`
+    const user={uid:'google-owner',email:'google-owner@example.test',providerData:[{providerId:'google.com'}],getIdToken:async()=> 'owner-session'};
+    export const getAuth=()=>({currentUser:user});export const setPersistence=async()=>{};export const inMemoryPersistence={};export const signOut=async()=>{};
+    export class GoogleAuthProvider{providerId='google.com';setCustomParameters(){}}
+    export class OAuthProvider{constructor(id){this.providerId=id;}}
+    export const revokeAccessToken=async()=>{};
+    export const signInWithPopup=async(a,p)=>{if(p.providerId==='apple.com')throw Error('cancelled');return {user};};
+    export const reauthenticateWithPopup=async(u,p)=>{await fetch('/test-provider',{method:'POST',body:p.providerId});if(p.providerId!=='google.com')throw Error('wrong-provider');return {user};};
+  `}));
+  await page.route('**/test-provider',async r=>{providers.push(r.request().postData()!);await r.fulfill({json:{ok:true}});});
+  await page.route('**/v1/account',async r=>{expect(r.request().method()).toBe('DELETE');deletions++;await r.fulfill({json:{receipt:'private-receipt'}});});
+  await page.route('**/v1/account-deletion',r=>r.fulfill({json:{status:'completed'}}));
+  await page.goto(origin+path);await page.getByRole('button',{name:'Continue with Google',exact:true}).click();
+  await expect(page.locator('#identity')).toHaveText('google-owner@example.test');await page.locator('#confirm').check();
+  await page.getByRole('button',{name:'Continue with Apple',exact:true}).click();await expect(page.locator('#status')).toHaveText('Sign-in was not completed. Try again.');
+  await expect(page.locator('#identity')).toHaveText('google-owner@example.test');await page.locator('#remove').click();
+  await expect(page.locator('#status')).toHaveText('Account deletion completed.');expect(providers).toEqual(['google.com']);expect(deletions).toBe(1);
 });
 const review = { sessionId:'public-session', serviceId:'public-service', name:'My personal agent', purpose:'Ask for decisions', capabilities:['forms','sms'], status:'pending', expiresAt:Date.now()+600000, expiresInDays:null, comparisonCode:'123456',connectionId:null };
 test('registration offers no owner-access control, needs one confirmation, no phone setup', async ({page})=>{
@@ -261,7 +286,7 @@ test('a delayed retained-ticket read cannot cross an account change',async({page
     const user=uid=>({uid,email:uid+'@example.test',getIdToken:async()=>uid});
     const auth={currentUser:user('owner-a')};let listener;
     window.switchRelayOwner=uid=>{auth.currentUser=user(uid);listener(auth.currentUser);};
-    export const getAuth=()=>auth;export const signOut=async()=>{};export class GoogleAuthProvider{};
+    export const getAuth=()=>auth;export const signOut=async()=>{};export class GoogleAuthProvider{};export class OAuthProvider{constructor(id){this.providerId=id;}};export const linkWithPopup=async()=>({user:auth.currentUser});
     export const signInWithPopup=async()=>({});export const signInWithRedirect=async()=>({});export const getRedirectResult=async()=>({});
     export const onAuthStateChanged=(a,fn)=>{listener=fn;queueMicrotask(()=>fn(a.currentUser));};export const setPersistence=async()=>{};export const browserLocalPersistence={};
   `}));

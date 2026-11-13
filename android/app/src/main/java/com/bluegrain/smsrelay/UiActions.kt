@@ -17,4 +17,22 @@ internal class UiActions(private val state: MutableStateFlow<RelayUiState>, priv
     }
 
     suspend fun credentials(block: suspend () -> Unit) = run(waitForIdle = true, block = block)
+
+    suspend fun reauthenticatedDeletion(
+        expectedOwner: String,
+        currentOwner: () -> String,
+        reauthenticate: suspend () -> String,
+        revoke: suspend () -> Unit,
+        delete: suspend (String) -> Unit,
+    ) = credentials {
+        fun requireOwner() = check(expectedOwner.isNotBlank() && currentOwner() == expectedOwner) {
+            "Sign in to the same account again before deleting."
+        }
+        requireOwner()
+        check(reauthenticate() == expectedOwner) { "Choose the same account before deleting." }
+        requireOwner()
+        revoke()
+        requireOwner()
+        delete(expectedOwner)
+    }
 }

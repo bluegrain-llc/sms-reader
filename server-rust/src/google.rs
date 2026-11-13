@@ -207,9 +207,10 @@ impl Google {
             "invalid_owner_session",
         )?;
         ensure(
-            claims["firebase"]["sign_in_provider"] == "google.com",
+            claims["firebase"]["sign_in_provider"] == "google.com"
+                || claims["firebase"]["sign_in_provider"] == "apple.com",
             401,
-            "google_sign_in_required",
+            "supported_sign_in_required",
         )?;
         Ok(uid)
     }
@@ -291,7 +292,7 @@ impl Delivery for Google {
             if form {
                 data["kind"] = json!("form");
             }
-            self.api(format!("https://fcm.googleapis.com/v1/projects/{}/messages:send",self.project),json!({"message":{"token":crate::js_string::utf8(token),"data":data,"android":{"priority":"HIGH","ttl":format!("{}.{:03}s",ttl.max(0)/1000,ttl.max(0)%1000),"collapse_key":id}}}),false).await?;
+            self.api(format!("https://fcm.googleapis.com/v1/projects/{}/messages:send",self.project),json!({"message":{"token":crate::js_string::utf8(token),"data":data,"android":{"priority":"HIGH","ttl":format!("{}.{:03}s",ttl.max(0)/1000,ttl.max(0)%1000),"collapse_key":id},"apns":{"headers":{"apns-push-type":"alert","apns-priority":"10","apns-expiration":((crate::model::now()+ttl)/1000).to_string(),"apns-collapse-id":id},"payload":{"aps":{"alert":{"title":"Request Relay","body":"Open Inbox to review a request."},"sound":"default"}}}}}),false).await?;
             Ok(())
         })
     }
@@ -395,6 +396,26 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+    #[tokio::test]
+    async fn owner_provider_allowlist_accepts_apple_and_rejects_other_firebase_providers() {
+        let google = verifier().await;
+        for provider in [
+            "google.com",
+            "apple.com",
+            "password",
+            "anonymous",
+            "custom",
+            "phone",
+        ] {
+            let mut c = claims();
+            c["firebase"]["sign_in_provider"] = json!(provider);
+            let verified = google.jwt(&signed(&c, "test-key"), false).await.unwrap();
+            assert_eq!(
+                google.owner_claims(&verified).is_ok(),
+                provider == "google.com" || provider == "apple.com"
+            );
+        }
     }
     #[tokio::test]
     async fn signed_owner_tokens_match_admin_clock_boundaries_without_expiry_leeway() {

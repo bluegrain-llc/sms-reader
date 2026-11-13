@@ -3,6 +3,7 @@ import { getAuth } from 'firebase-admin/auth';
 import { getFirestore } from 'firebase-admin/firestore';
 import { getMessaging } from 'firebase-admin/messaging';
 import { OAuth2Client } from 'google-auth-library';
+import { ownerIdentity } from './owner-identity.js';
 import { app } from './http.js';
 import { taskWakeup } from './tasks.js';
 import { Relay } from './relay.js';
@@ -14,15 +15,17 @@ const credential = applicationDefault();
 initializeApp({ credential, projectId: process.env.GOOGLE_CLOUD_PROJECT });
 const auth = getAuth(), oauth = new OAuth2Client();
 const relay = new Relay(getFirestore(), async (token, requestId, ttl, kind) => {
-  await getMessaging().send({ token, data: { requestId, ...(kind ? { kind } : {}) }, android: { priority: 'high', ttl, collapseKey: requestId } });
+  await getMessaging().send({ token, data: { requestId, ...(kind ? { kind } : {}) }, android: { priority: 'high', ttl, collapseKey: requestId }, apns: {
+    headers: { 'apns-push-type': 'alert', 'apns-priority': '10', 'apns-expiration': String(Math.floor((Date.now() + ttl) / 1000)), 'apns-collapse-id': requestId },
+    payload: { aps: { alert: { title: 'Request Relay', body: 'Open Inbox to review a request.' }, sound: 'default' } },
+  } });
 }, Date.now, taskWakeup(), securityLedger(process.env.SECURITY_LEDGER_BUCKET));
 const gate = new RecoveryGate(getFirestore(), () => credential.getAccessToken());
 const server = app(relay, {
   assertServing: () => gate.assertServing(),
   verifyOwner: async token => {
     const identity = await auth.verifyIdToken(token, true);
-    ensure(identity.firebase.sign_in_provider === 'google.com', 401, 'google_sign_in_required');
-    return { uid: identity.uid, authTime: identity.auth_time };
+    return ownerIdentity(identity);
   },
   deleteIdentity: uid => auth.deleteUser(uid),
   verifyScheduler: async token => {
@@ -34,6 +37,7 @@ const server = app(relay, {
   publicUrl: process.env.SERVICE_URL,
   firebaseWebConfig: process.env.FIREBASE_WEB_CONFIG ? JSON.parse(process.env.FIREBASE_WEB_CONFIG) : undefined,
   privacyContact: process.env.PRIVACY_CONTACT,
+  appleAppIds: (process.env.APPLE_APP_IDS ?? '').split(',').filter(Boolean),
   androidCertSha256: process.env.ANDROID_SIGNING_SHA256,
   androidCertSha256s: process.env.ANDROID_SIGNING_SHA256S ? JSON.parse(process.env.ANDROID_SIGNING_SHA256S) as string[] : undefined,
   trustProxyHops: 1,

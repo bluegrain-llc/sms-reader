@@ -1,4 +1,174 @@
 {
+  "DeviceRegistration": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+      "name": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 80
+      },
+      "fcmToken": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 4096
+      },
+      "wizardVersion": {
+        "type": "number",
+        "const": 1
+      },
+      "platform": {
+        "default": "android",
+        "type": "string",
+        "enum": [
+          "android",
+          "ios"
+        ]
+      }
+    },
+    "required": [
+      "name",
+      "fcmToken"
+    ],
+    "additionalProperties": false
+  },
+  "SmsDeviceEvent": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "anyOf": [
+      {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "const": "ready"
+          },
+          "listenerStartedAt": {
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "maximum": 9007199254740991
+          },
+          "mode": {
+            "default": "listener",
+            "type": "string",
+            "const": "listener"
+          }
+        },
+        "required": [
+          "status",
+          "listenerStartedAt"
+        ],
+        "additionalProperties": false
+      },
+      {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "const": "ready"
+          },
+          "mode": {
+            "type": "string",
+            "const": "manual"
+          }
+        },
+        "required": [
+          "status",
+          "mode"
+        ],
+        "additionalProperties": false
+      },
+      {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "const": "awaiting_consent"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "additionalProperties": false
+      },
+      {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "const": "completed"
+          },
+          "code": {
+            "type": "string",
+            "pattern": "^(?=[A-Za-z0-9]{4,10}$)(?=.*[0-9])[A-Za-z0-9]+$"
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "android_consent",
+              "manual"
+            ]
+          }
+        },
+        "required": [
+          "status",
+          "code"
+        ],
+        "additionalProperties": false
+      },
+      {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "const": "denied"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "additionalProperties": false
+      },
+      {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "const": "cancelled"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "additionalProperties": false
+      },
+      {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "const": "failed"
+          },
+          "reason": {
+            "type": "string",
+            "enum": [
+              "play_services_unavailable",
+              "listener_failed",
+              "process_restarted",
+              "code_extraction_failed",
+              "consent_unavailable",
+              "notifications_disabled",
+              "listener_timeout"
+            ]
+          }
+        },
+        "required": [
+          "status",
+          "reason"
+        ],
+        "additionalProperties": false
+      }
+    ]
+  },
   "OAuthAuthorization": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "type": "object",

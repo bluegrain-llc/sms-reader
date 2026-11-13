@@ -233,14 +233,16 @@ impl Relay {
         name: String,
         fcm: String,
         wizard: bool,
+        platform: String,
     ) -> Result<Value> {
         let s = self.clone();
-        self.store.tx(move|tx|{let(s,uid,id,name,fcm)=(s.clone(),uid.clone(),id.clone(),name.clone(),fcm.clone());Box::pin(async move{
+        self.store.tx(move|tx|{let(s,uid,id,name,fcm,platform)=(s.clone(),uid.clone(),id.clone(),name.clone(),fcm.clone(),platform.clone());Box::pin(async move{
  s.account(tx,&uid).await?;let old=tx.get("devices",&id).await?;let all=tx.query(Query::new("devices").eq("ownerId",uid.clone())).await?;
  ensure(old.is_null()||(text(&old,"ownerId")==uid&&!flag(&old,"deleted")),409,"installation_id_unavailable")?;
  ensure(!old.is_null()||all.iter().filter(|d|!flag(d,"deleted")).count()<20,409,"device_limit_reached")?;
+ ensure(old.is_null()||old.get("platform").and_then(Value::as_str).unwrap_or("android")==platform,409,"device_platform_conflict")?;
  let mut d=if old.is_null(){json!({"id":id,"ownerId":uid,"paused":false,"deleted":false,"activeRequestId":null,"rate":{"start":s.now(),"count":0}})}else{old};
- d["name"]=json!(name);d["fcmToken"]=json!(fcm);d["updatedAt"]=json!(s.now());d["wizardVersion"]=if wizard{json!(1)}else{Value::Null};
+ d["platform"]=json!(platform);d["name"]=json!(name);d["fcmToken"]=json!(fcm);d["updatedAt"]=json!(s.now());d["wizardVersion"]=if wizard{json!(1)}else{Value::Null};
  tx.set("devices",&id,d.clone())?;Ok(json!({"deviceId":id,"name":name,"paused":d["paused"],"activeRequestId":null}))})}).await
     }
     pub async fn create_grant(
@@ -284,7 +286,7 @@ impl Relay {
         };
         Ok(json!(all.into_iter().filter(|d|!flag(d,"deleted")).map(|d|{
  let has=active(text(&r,"status"))&&!flag(&d,"paused")&&ids(&r).contains(&text(&d,"id").into())&&active(text(&phones(&r)[text(&d,"id")],"status"));
- json!({"deviceId":d["id"],"name":d["name"],"paused":d["paused"],"wizardVersion":d["wizardVersion"],"activeRequestId":if has{r["id"].clone()}else{Value::Null}})}).collect::<Vec<_>>()))
+ json!({"deviceId":d["id"],"name":d["name"],"paused":d["paused"],"platform":d.get("platform").cloned().unwrap_or(json!("android")),"wizardVersion":d["wizardVersion"],"activeRequestId":if has{r["id"].clone()}else{Value::Null}})}).collect::<Vec<_>>()))
     }
     pub async fn list_grants(&self, uid: String, device: Option<String>) -> Result<Value> {
         let relay = self.clone();
@@ -690,6 +692,10 @@ impl Relay {
                 v[k] = p[k].clone();
             }
         }
+        v["manualEntryDeadline"] = p.get("manualEntryDeadline").cloned().unwrap_or(Value::Null);
+        if d["platform"] == "ios" {
+            v["listeningDeadline"] = Value::Null;
+        }
         if !text(r, "completedByDeviceId").is_empty() && r["completedByDeviceId"] != d["id"] {
             v["reason"] = json!("handled_on_another_device");
         }
@@ -750,6 +756,11 @@ impl Relay {
             .max();
         r["status"] = json!(status);
         r["listeningDeadline"] = json!(deadline);
+        r["manualEntryDeadline"] = json!(
+            live.iter()
+                .filter_map(|p| p["manualEntryDeadline"].as_i64())
+                .max()
+        );
         tx.set("requests", text(r, "id"), r.clone())?;
         self.audit(tx, r, status)
     }
@@ -761,10 +772,14 @@ impl Relay {
  if !active(text(r,"status")){if let Auth::Phone{device,..}=&auth{if text(r,"status")=="completed"&&target=="completed"&&r.get("completedByDeviceId").unwrap_or(&r["deviceId"])==device{ensure(result["code"]==input["code"],409,"upload_conflict")?;}return Ok(s.phone_view(r,&c.d));}return Ok(view(r));}
  if matches!(auth,Auth::Agent(_)){ensure(target=="cancelled",403,"agent_cannot_submit")?;s.finish(tx,r,&c.a,target,input["reason"].clone())?;return Ok(view(r));}
  let d=&c.d;ensure(!flag(d,"paused")&&text(r,"status")!="queued",409,"request_not_ready")?;r["phones"]=phones(r);let p=&mut r["phones"][text(d,"id")];
- if text(p,"status")==target||!active(text(p,"status")){return Ok(s.phone_view(r,d));}
  let source=input.get("source").and_then(Value::as_str).unwrap_or("android_consent");let mut complete=false;
+ let mode=input.get("mode").and_then(Value::as_str).unwrap_or("listener");
+ if d["platform"]=="ios"{ensure(target!="awaiting_consent"&&(target!="ready"||mode=="manual")&&(target!="completed"||source=="manual")&&target!="failed",400,"ios_manual_entry_required")?;}else{ensure(mode!="manual",400,"manual_readiness_requires_ios")?;}
+ if text(p,"status")==target||!active(text(p,"status")){return Ok(s.phone_view(r,d));}
  match target{
- "ready"=>{ensure(text(p,"status")=="pending_phone",409,"invalid_transition")?;ensure(num(d,"formListenerUntil")<=s.now(),409,"sms_listener_busy")?;let start=if input.get("listenerStartedAt").is_some(){num(&input,"listenerStartedAt")}else{s.now()};ensure(start<=s.now()+5000&&start>s.now()-MINUTE,409,"listener_start_stale")?;let until=num(r,"expiresAt").min(start+5*MINUTE).min(s.now()+5*MINUTE);r["phones"][text(d,"id")]["listeningDeadline"]=json!(until);tx.merge("devices",text(d,"id"),json!({"listenerUntil":until}))?;},
+ "ready"=>{ensure(text(p,"status")=="pending_phone",409,"invalid_transition")?;
+ if mode=="manual"{let until=num(r,"expiresAt").min(s.now()+5*MINUTE);r["phones"][text(d,"id")]["manualEntryDeadline"]=json!(until);r["phones"][text(d,"id")]["listeningDeadline"]=json!(until);}
+ else{ensure(num(d,"formListenerUntil")<=s.now()&&num(d,"listenerUntil")<=s.now(),409,"sms_listener_busy")?;let start=if input.get("listenerStartedAt").is_some(){num(&input,"listenerStartedAt")}else{s.now()};ensure(start<=s.now()+5000&&start>s.now()-MINUTE,409,"listener_start_stale")?;let until=num(r,"expiresAt").min(start+5*MINUTE).min(s.now()+5*MINUTE);r["phones"][text(d,"id")]["listeningDeadline"]=json!(until);tx.merge("devices",text(d,"id"),json!({"listenerUntil":until}))?;}},
  "awaiting_consent"=>{ensure(text(p,"status")=="ready"&&num(p,"listeningDeadline")>s.now(),409,"invalid_transition")?;},
  "completed"=>{ensure((text(p,"status")=="awaiting_consent"||(source=="manual"&&text(p,"status")=="ready"))&&num(p,"listeningDeadline")>s.now(),409,"invalid_transition")?;ensure(code(text(&input,"code")),400,"invalid_input")?;complete=true;},
  _=>ensure(["denied","cancelled","failed"].contains(&target),409,"invalid_transition")?}

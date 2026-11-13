@@ -221,7 +221,7 @@ async fn call(State(h): State<Host>, body: Bytes) -> impl IntoResponse {
                     .await?;
                 Ok(json!({"uid":sms_code_relay::js_string::encode(&identity.uid),"authTime":identity.auth_time}))
             }
-            "register" => r.register(t(0), t(1), t(2), t(3), a(4) == 1).await,
+            "register" => r.register(t(0), t(1), t(2), t(3), a(4) == 1, a(5).as_str().unwrap_or("android").to_owned()).await,
             "createGrant" => {
                 r.create_grant(t(0), t(1), t(2), a(3).as_i64().unwrap())
                     .await
@@ -283,7 +283,7 @@ async fn call(State(h): State<Host>, body: Bytes) -> impl IntoResponse {
             "phoneGet" => r.phone_get(t(0), t(1), t(2)).await,
             "transition" => {
                 let mut input = json!({"status":a(2),"reason":a(3)});
-                for (k, i) in [("code", 4), ("listenerStartedAt", 5), ("source", 6)] {
+                for (k, i) in [("code", 4), ("listenerStartedAt", 5), ("source", 6), ("mode", 7)] {
                     if !a(i).is_null() {
                         input[k] = a(i);
                     }
@@ -441,6 +441,14 @@ async fn start(State(h): State<Host>, Json(v): Json<Value>) -> Json<Value> {
             .unwrap_or(false)
             .then(|| callback(&v) as Arc<dyn http::Serving>),
         public_url: o["publicUrl"].as_str().map(str::to_owned),
+        apple_app_ids: o["appleAppIds"]
+            .as_array()
+            .map(|v| {
+                v.iter()
+                    .filter_map(|s| s.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default(),
         android_cert: o["androidCertSha256"].as_str().map(str::to_owned),
         android_certs: o.get("androidCertSha256s").cloned(),
         firebase_web_config: o.get("firebaseWebConfig").cloned(),

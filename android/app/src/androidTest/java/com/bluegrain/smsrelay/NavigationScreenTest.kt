@@ -49,7 +49,7 @@ class NavigationScreenTest {
         var retried = 0
         val route = RelayDestination.Response(RequestTarget("new", RequestKind.Sms), RequestOrigin.Notification)
         compose.setContent { RelayTheme { RelayScreen(state.copy(request = request), route, responseLoading = loading, onRetry = { retried++ }) } }
-        compose.onNodeWithText("Continue with Google").assertIsDisplayed()
+        compose.onNodeWithText("Continue with Google or Apple").assertIsDisplayed()
         compose.onNodeWithText("Inbox").assertDoesNotExist(); compose.onNodeWithText("Settings").assertDoesNotExist()
         compose.runOnIdle { state = session.copy(registered = false, busy = true) }
         compose.onNodeWithText("Finish connecting").assertIsNotEnabled()
