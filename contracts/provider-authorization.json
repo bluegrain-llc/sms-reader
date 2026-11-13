@@ -35,5 +35,11 @@
     "provider": "google",
     "redirectUri": "https://oauth-redirect.googleusercontent.com/r/relay-conformance",
     "source": "https://developers.google.com/connected-apps/mcp/oauth"
+  },
+  {
+    "name": "Microsoft Azure OpenAI Responses application-managed OAuth bearer",
+    "provider": "microsoft",
+    "redirectUri": "https://8.8.8.8/microsoft-application-owned-callback",
+    "source": "https://learn.microsoft.com/en-us/azure/ai-foundry/openai/how-to/responses#authentication"
   }
 ]
