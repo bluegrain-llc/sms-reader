@@ -22,9 +22,12 @@ test('Cloud Run no-disconnect timeout passes only with exact failed sender lease
   assert.deepEqual(callbackFacts(receipts, proof), { callbackReceiptCount: 2, firstResponseWithheldMs: 11000, senderLeaseFailureObserved: true, senderTimeoutObserved: true });
 });
 test('a delayed204, completed500, client close or unrelated telemetry alone cannot establish sender timeout', () => {
-  for (const missing of [undefined, {}, { failed: true }, { claimed: true }]) {
-    assert.throws(() => callbackReceipts('timeout-once', receipts, missing));
-    assert.throws(() => proveWebhookTimeout(receipts, missing ?? {}, [log], cfg, revision, 500));
+  for (const clientClosedBeforeResponse of [false, true]) {
+    const observedReceipts = [{ ...receipts[0], clientClosedBeforeResponse }, receipts[1]];
+    for (const missing of [undefined, {}, { failed: true }, { claimed: true }]) {
+      assert.throws(() => callbackReceipts('timeout-once', observedReceipts, missing));
+      assert.throws(() => proveWebhookTimeout(observedReceipts, missing ?? {}, [log], cfg, revision, 500));
+    }
   }
   const proof = proveWebhookTimeout(receipts, witness(), [log], cfg, revision, 500);
   for (const patch of [{ status: 500 }, { withheldResponseMs: 10999 }, { withheldResponseMs: undefined }, { withheldResponseMs: Infinity }]) assert.throws(() => callbackReceipts('timeout-once', [{ ...receipts[0], ...patch }, receipts[1]], proof));
