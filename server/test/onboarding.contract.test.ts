@@ -19,10 +19,9 @@ import { RustRelay, rustApp } from './rust-adapter.js';
 import { hash, HISTORY, MINUTE } from '../src/model.js';
 import type { HttpOptions } from '../src/http.js';
 import type { Server } from 'node:http';
-import { capabilityTools, hostedProviderConfig } from '../../integrations/providers.mjs';
+import { capabilityTools, hostedProviderConfig, providerTools } from '../../integrations/providers.mjs';
 import { OAuth } from '../src/oauth.js';
 import { bedrockTools } from '../../integrations/aws.mjs';
-import { providerTools } from '../../integrations/providers.mjs';
 
 if (!process.env.FIRESTORE_EMULATOR_HOST) throw Error('Onboarding contracts require the Firestore emulator');
 process.env.OAUTH_CODE_KEY = '64'.repeat(32); // Isolated contract key, never used for deployment.
@@ -324,20 +323,20 @@ for(const runtime of [0,1])for(const profile of providerProfiles){
     assert.equal(redirect.origin+redirect.pathname,target.origin+target.pathname);assert.deepEqual(redirect.searchParams.getAll('state'),[state]);
     const exchange={grant_type:'authorization_code',client_id:client.client_id,redirect_uri:profile.redirectUri,resource,code:redirect.searchParams.get('code')!,code_verifier:verifier};
     await formCall(runtime,'/oauth/token',{...exchange,code_verifier:randomBytes(32).toString('base64url')},400);
-    if(profile.provider==='xai'){
+    if(['xai','microsoft'].includes(profile.provider)){
       await formCall(runtime,'/oauth/token',{...exchange,redirect_uri:profile.redirectUri+'/unregistered'},400);
       await formCall(runtime,'/oauth/token',{...exchange,resource:'https://relay.example/mcp/services/another'},400);
     }
     const tokens=await formCall(1-runtime,'/oauth/token',exchange);assert.equal(tokens.scope,'forms');assert.equal(tokens.token_type,'Bearer');assert.ok(tokens.refresh_token);
     const config=profile.provider==='google'?{authorization:tokens.access_token}:hostedProviderConfig(profile.provider,{resource,accessToken:tokens.access_token});
-    const softwareToken='authorization' in config?config.authorization:config.mcp_servers[0]!.authorization_token;
+    const softwareToken='headers' in config?config.headers!.Authorization.slice('Bearer '.length):'authorization' in config?config.authorization:config.mcp_servers[0]!.authorization_token;
     assert.ok(typeof softwareToken==='string');
     const tools=await call(runtime,endpoint,softwareToken,{jsonrpc:'2.0',id:'provider-list',method:'tools/list'});
     assert.equal(tools.result.tools.length,5);
     for(const tool of tools.result.tools)assert.deepEqual(tool._meta.securitySchemes,[{type:'oauth2',scopes:['forms']}]);
     await call(runtime,`/v1/devices/${randomUUID()}`,owner(providerRecipient),{name:'Synthetic provider phone',fcmToken:'synthetic',wizardVersion:1},'PUT');
-    if(profile.provider==='xai'){
-      assert.deepEqual(config,{type:'mcp',server_label:'relay',server_url:resource,authorization:tokens.access_token});
+    if(['xai','microsoft'].includes(profile.provider)){
+      assert.deepEqual(config,profile.provider==='microsoft'?{type:'mcp',server_label:'relay',server_url:resource,headers:{Authorization:`Bearer ${tokens.access_token}`},require_approval:'always'}:{type:'mcp',server_label:'relay',server_url:resource,authorization:tokens.access_token});
       assert.ok(tools.result.tools.every((tool: {name:string})=>!tool.name.includes('sms')));
       await call(runtime,'/mcp/services/another',softwareToken,{jsonrpc:'2.0',id:'wrong-resource',method:'tools/list'},'POST',401);
       await call(runtime,'/mcp',softwareToken,{jsonrpc:'2.0',id:'legacy-resource',method:'tools/list'},'POST',401);
@@ -345,7 +344,15 @@ for(const runtime of [0,1])for(const profile of providerProfiles){
       assert.equal(denied.result.isError,true);
       assert.deepEqual(denied.result.content,[{type:'text',text:runtime===0?'MCP error -32602: Tool request_sms_code not found':JSON.stringify({error:'sms_approval_required'})}]);
     }
-    const created=await call(runtime,endpoint,tokens.access_token,{jsonrpc:'2.0',id:'create',method:'tools/call',params:{name:'create_request',arguments:{title:'Review',body:'Provider fixture',fields:[{id:'decision',type:'text',label:'Decision'}],actions:[{id:'send',type:'submit',label:'Send'}],idempotencyKey:randomUUID()}}});
+    const functions=providerTools(capabilityTools(tools.result.tools,['forms']),async(name:string,args:unknown)=>call(runtime,endpoint,softwareToken,{jsonrpc:'2.0',id:'local-function',method:'tools/call',params:{name,arguments:args}}));
+    if(profile.provider==='microsoft'){
+      assert.equal(functions.microsoft.length,5);
+      assert.ok(!JSON.stringify(functions.microsoft).includes(tokens.access_token));
+      await assert.rejects(functions.execute('request_sms_code',{}),/capability_not_approved/);
+      await assert.rejects(functions.execute('register_service',{}),/capability_not_approved/);
+    }
+    const argumentsForRequest={title:'Review',body:'Provider fixture',fields:[{id:'decision',type:'text',label:'Decision'}],actions:[{id:'send',type:'submit',label:'Send'}],idempotencyKey:randomUUID()};
+    const created=profile.provider==='microsoft'?await functions.execute('create_request',argumentsForRequest):await call(runtime,endpoint,tokens.access_token,{jsonrpc:'2.0',id:'create',method:'tools/call',params:{name:'create_request',arguments:argumentsForRequest}});
     const requestId=created.result.structuredContent.requestId;assert.equal(typeof requestId,'string');
     const inspected=await call(runtime,endpoint,tokens.access_token,{jsonrpc:'2.0',id:'inspect',method:'tools/call',params:{name:'inspect_request',arguments:{requestId}}});
     assert.equal(inspected.result.structuredContent.requestId,requestId);
