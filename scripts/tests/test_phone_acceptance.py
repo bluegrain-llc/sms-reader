@@ -1,5 +1,6 @@
 """Acceptance records must fail closed without physical release observations."""
 import copy
+import hashlib
 import importlib.util
 import io
 import json
@@ -15,11 +16,12 @@ spec.loader.exec_module(acceptance)
 
 class PhoneAcceptanceTest(unittest.TestCase):
     def pending(self, devices=0):
-        return {'schemaVersion': 1, 'createdAt': acceptance.now(), 'commit': 'a' * 40,
+        return {'schemaVersion': 2, 'createdAt': acceptance.now(), 'commit': 'a' * 40, 'packageName': 'com.bluegrain.smsrelay',
                 'project': 'relay-staging', 'region': 'us-central1', 'backendRevision': 'relay-00001-abc',
                 'apkSha256': 'b' * 64, 'signerSha256': ['c' * 64],
                 'devices': [{'deviceHash': str(index) * 64, 'model': 'Test device',
-                             'android': '15', 'api': '35', 'playServices': '25.0'} for index in range(devices)],
+                             'android': '15', 'api': '35', 'playServices': '25.0',
+                             'installedApkSha256': 'b' * 64} for index in range(devices)],
                 'cases': {case: {'status': 'pending', 'reason': 'not_run'} for case in acceptance.CASES}}
 
     def passed(self):
@@ -117,8 +119,8 @@ class PhoneAcceptanceTest(unittest.TestCase):
             return {'ro.kernel.qemu': '0', 'ro.serialno': 'hardware-one',
                     'ro.product.model': 'Test phone', 'ro.build.version.release': '15',
                     'ro.build.version.sdk': '35'}[args[-1]]
-        with patch.object(acceptance, 'run', side_effect=metadata):
-            devices = [acceptance.device_metadata('adb', selector)
+        with patch.object(acceptance, 'run', side_effect=metadata), patch.object(acceptance, 'installed_apk_hash', return_value='b' * 64):
+            devices = [acceptance.device_metadata('adb', selector, 'b' * 64)
                        for selector in ('usb-serial', '192.0.2.1:5555', 'model:Test_phone')]
         self.assertEqual(len({device['deviceHash'] for device in devices}), 1)
         value = self.pending()
@@ -126,8 +128,8 @@ class PhoneAcceptanceTest(unittest.TestCase):
         value['cases']['two_phone_first_wins'] = self.passed()
         with self.assertRaises(ValueError):
             acceptance.validate(value)
-        with patch.object(acceptance, 'run', side_effect=lambda args: 'hardware-two' if args[-1] == 'ro.serialno' else metadata(args)):
-            value['devices'][1] = acceptance.device_metadata('adb', 'second-phone')
+        with patch.object(acceptance, 'run', side_effect=lambda args: 'hardware-two' if args[-1] == 'ro.serialno' else metadata(args)), patch.object(acceptance, 'installed_apk_hash', return_value='b' * 64):
+            value['devices'][1] = acceptance.device_metadata('adb', 'second-phone', 'b' * 64)
         acceptance.validate(value)
 
     def test_missing_device_identity_fails_closed_and_boot_serial_is_fallback(self):
@@ -137,12 +139,12 @@ class PhoneAcceptanceTest(unittest.TestCase):
             return {'ro.kernel.qemu': '0', 'ro.serialno': 'unknown',
                     'ro.boot.serialno': 'hardware-one', 'ro.product.model': 'Test phone',
                     'ro.build.version.release': '15', 'ro.build.version.sdk': '35'}[args[-1]]
-        with patch.object(acceptance, 'run', side_effect=metadata):
-            self.assertEqual(len(acceptance.device_metadata('adb', 'usb-serial')['deviceHash']), 64)
+        with patch.object(acceptance, 'run', side_effect=metadata), patch.object(acceptance, 'installed_apk_hash', return_value='b' * 64):
+            self.assertEqual(len(acceptance.device_metadata('adb', 'usb-serial', 'b' * 64)['deviceHash']), 64)
         for unavailable in ('', 'unknown', 'null', 'none', '0', 'not an identity'):
             with self.subTest(identity=unavailable), patch.object(acceptance, 'run', return_value=unavailable):
                 with self.assertRaises(ValueError):
-                    acceptance.device_metadata('adb', 'usb-serial')
+                    acceptance.device_metadata('adb', 'usb-serial', 'b' * 64)
 
     def test_record_binds_explicit_deployment_target(self):
         for key in ('project', 'region', 'backendRevision'):
@@ -176,12 +178,144 @@ class PhoneAcceptanceTest(unittest.TestCase):
     def test_emulator_refused_before_package_inspection(self):
         with patch.object(acceptance, 'run') as run:
             with self.assertRaises(ValueError):
-                acceptance.device_metadata('adb', 'emulator-5554')
+                acceptance.device_metadata('adb', 'emulator-5554', 'b' * 64)
             run.assert_not_called()
         with patch.object(acceptance, 'run', return_value='1') as run:
             with self.assertRaises(ValueError):
-                acceptance.device_metadata('adb', 'physical-looking-serial')
+                acceptance.device_metadata('adb', 'physical-looking-serial', 'b' * 64)
             self.assertEqual(run.call_count, 1)
+
+    def test_installed_apk_is_hashed_and_temporary_copy_removed(self):
+        copied = []
+
+        def adb(args):
+            if args[3:6] == ['shell', 'pm', 'path']:
+                self.assertEqual(args[-1], 'com.bluegrain.smsrelay')
+                return 'package:/data/app/~~install-id/com.bluegrain.smsrelay-id/base.apk\n'
+            self.assertEqual(args[3], 'pull')
+            path = Path(args[-1])
+            self.assertEqual(path.parent.stat().st_mode & 0o777, 0o700)
+            path.write_bytes(b'installed candidate')
+            copied.append(path)
+            return ''
+
+        with patch.object(acceptance, 'run', side_effect=adb):
+            self.assertEqual(acceptance.installed_apk_hash('adb', 'phone'),
+                             hashlib.sha256(b'installed candidate').hexdigest())
+        self.assertEqual(len(copied), 1)
+        self.assertFalse(copied[0].parent.exists())
+
+    def test_missing_split_or_malformed_installation_is_refused_before_pull(self):
+        for paths in ('', 'package:/data/app/example/base.apk\npackage:/data/app/example/split_config.apk\n',
+                      'package:/data/app/../private/base.apk', 'package:/data/app/app/base.apk; private-payload',
+                      'unexpected package metadata'):
+            with self.subTest(paths=paths), patch.object(acceptance, 'run', return_value=paths) as run:
+                with self.assertRaises(ValueError):
+                    acceptance.installed_apk_hash('adb', 'phone')
+                self.assertEqual(run.call_count, 1)
+
+    def test_failed_installed_apk_pull_removes_temporary_copy(self):
+        copied = []
+
+        def adb(args):
+            if args[3] == 'shell':
+                return 'package:/data/app/app/base.apk\n'
+            path = Path(args[-1])
+            path.write_bytes(b'partial APK')
+            copied.append(path)
+            raise ValueError('Metadata command failed')
+
+        with patch.object(acceptance, 'run', side_effect=adb), self.assertRaises(ValueError):
+            acceptance.installed_apk_hash('adb', 'phone')
+        self.assertFalse(copied[0].parent.exists())
+
+    def test_init_binds_each_phone_to_the_selected_apk_and_rejects_old_install(self):
+        for second_apk in (b'new candidate', b'old candidate'):
+            with self.subTest(second_apk=second_apk), tempfile.TemporaryDirectory() as directory:
+                apk = Path(directory) / 'candidate.apk'
+                apk.write_bytes(b'new candidate')
+                record = Path(directory) / 'record.json'
+                copied = []
+
+                def tools(args):
+                    if args[0] == 'aapt':
+                        return "package: name='com.bluegrain.smsrelay' versionCode='11'"
+                    if args[0] == 'signer':
+                        return 'Signer #1 certificate SHA-256 digest: ' + 'c' * 64
+                    if args[3] == 'pull':
+                        path = Path(args[-1])
+                        path.write_bytes(second_apk if args[2] == 'second-phone' else apk.read_bytes())
+                        copied.append(path)
+                        return ''
+                    if args[4:6] == ['pm', 'path']:
+                        return 'package:/data/app/app/base.apk\n'
+                    if args[-1] == 'com.google.android.gms':
+                        return 'versionName=25.0'
+                    return {'ro.kernel.qemu': '0', 'ro.serialno': args[2],
+                            'ro.product.model': 'Test phone', 'ro.build.version.release': '15',
+                            'ro.build.version.sdk': '35'}[args[-1]]
+
+                argv = ['phone-acceptance', 'init', '--file', str(record), '--apk', str(apk),
+                        '--commit', 'a' * 40, '--project', 'relay-staging', '--region', 'us-central1',
+                        '--backend-revision', 'relay-00001-abc', '--apksigner', 'signer', '--aapt', 'aapt',
+                        '--serial', 'first-phone', '--serial', 'second-phone']
+                errors = io.StringIO()
+                with patch('sys.argv', argv), patch.object(acceptance, 'run', side_effect=tools), \
+                        patch('builtins.print'), patch('sys.stderr', errors):
+                    if second_apk == apk.read_bytes():
+                        self.assertEqual(acceptance.main(), 0)
+                        value = json.loads(record.read_text())
+                        self.assertEqual(value['schemaVersion'], 2)
+                        self.assertEqual(len(value['devices']), 2)
+                        self.assertTrue(all(device['installedApkSha256'] == value['apkSha256']
+                                            for device in value['devices']))
+                        self.assertTrue(all(case['status'] == 'pending' for case in value['cases'].values()))
+                    else:
+                        with self.assertRaises(SystemExit) as caught:
+                            acceptance.main()
+                        self.assertEqual(caught.exception.code, 2)
+                        self.assertFalse(record.exists())
+                        self.assertNotIn('second-phone', errors.getvalue())
+                self.assertEqual(len(copied), 2)
+                self.assertTrue(all(not path.parent.exists() for path in copied))
+
+    def test_old_or_unbound_device_records_cannot_pass(self):
+        for invalid in ('old_schema', 'missing_installed_hash', 'different_installed_hash'):
+            with self.subTest(invalid=invalid):
+                value = self.pending(2)
+                value['cases'] = {case: self.passed() for case in acceptance.CASES}
+                if invalid == 'old_schema':
+                    value['schemaVersion'] = 1
+                elif invalid == 'missing_installed_hash':
+                    del value['devices'][1]['installedApkSha256']
+                else:
+                    value['devices'][1]['installedApkSha256'] = 'd' * 64
+                with self.assertRaises(ValueError):
+                    acceptance.validate(value)
+
+    def test_staging_artifact_requires_explicit_package_selection(self):
+        with tempfile.TemporaryDirectory() as directory:
+            apk = Path(directory) / 'staging.apk'
+            apk.write_bytes(b'staging fixture')
+            signer = 'Signer #1 certificate SHA-256 digest: ' + 'c' * 64
+            badging = "package: name='com.bluegrain.smsrelay.staging' versionCode='11'"
+            with patch.object(acceptance, 'run', side_effect=[badging, signer]):
+                with self.assertRaises(ValueError):
+                    acceptance.initial_record(apk, 'a' * 40, 'signer', 'aapt', [], 'relay-staging', 'us-central1', 'relay-00001-abc')
+            with patch.object(acceptance, 'run', side_effect=[badging, signer]):
+                value = acceptance.initial_record(apk, 'a' * 40, 'signer', 'aapt', [], 'relay-staging', 'us-central1', 'relay-00001-abc', 'com.bluegrain.smsrelay.staging')
+            acceptance.validate(value)
+            self.assertEqual(value['packageName'], 'com.bluegrain.smsrelay.staging')
+            with patch.object(acceptance, 'run', return_value=badging + '\napplication-debuggable'):
+                with self.assertRaises(ValueError):
+                    acceptance.initial_record(apk, 'a' * 40, 'signer', 'aapt', [], 'relay-staging', 'us-central1', 'relay-00001-abc', 'com.bluegrain.smsrelay.staging')
+            with patch.object(acceptance, 'run', return_value='') as run:
+                with self.assertRaises(ValueError):
+                    acceptance.installed_apk_hash('adb', 'phone', value['packageName'])
+            self.assertEqual(run.call_args.args[0][-1], 'com.bluegrain.smsrelay.staging')
+            value['packageName'] = 'other.package'
+            with self.assertRaises(ValueError):
+                acceptance.validate(value)
 
     def test_debug_or_unsigned_artifact_is_refused(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -1,0 +1,12 @@
+# Use only STAGING_* inputs for the isolated com.bluegrain.smsrelay.staging build.
+# Store live values privately; never reuse the production package/signing claims.
+STAGING_RELAY_URL=https://your-staging-cloud-run-service.run.app
+STAGING_FIREBASE_APP_ID=1:1234567890:android:your-staging-app-id
+STAGING_FIREBASE_API_KEY=your-staging-android-firebase-api-key
+STAGING_FIREBASE_PROJECT_ID=your-staging-firebase-project
+STAGING_FIREBASE_SENDER_ID=1234567890
+STAGING_GOOGLE_WEB_CLIENT_ID=1234567890-example.apps.googleusercontent.com
+STAGING_RELAY_KEYSTORE=/absolute/private/path/relay-staging-only.jks
+STAGING_RELAY_KEY_ALIAS=staging-only
+STAGING_RELAY_STORE_PASSWORD=provide-privately
+STAGING_RELAY_KEY_PASSWORD=provide-privately
