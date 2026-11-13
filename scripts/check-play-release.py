@@ -50,6 +50,13 @@ FORBIDDEN_PERMISSIONS = {
     )
 }
 ANDROID_NS = "{http://schemas.android.com/apk/res/android}"
+# Every Android attribute consumed below must retain this framework identity in
+# the protobuf manifest; bundletool's text dump omits resource IDs.
+ANDROID_ATTRIBUTE_IDS = {
+    "name": 0x01010003, "permission": 0x01010006, "debuggable": 0x0101000F,
+    "allowBackup": 0x01010280, "usesCleartextTraffic": 0x010104EC,
+    "versionCode": 0x0101021B, "targetSdkVersion": 0x01010270,
+}
 
 
 def sha256(path):
@@ -129,6 +136,8 @@ def native_alignment(path, apk):
 
 
 def android_attribute(element, name):
+    if name not in ANDROID_ATTRIBUTE_IDS:
+        raise ValueError("unregistered Android manifest attribute")
     value = element.get(ANDROID_NS + name)
     if name in element.attrib:
         if value is not None:
@@ -137,13 +146,17 @@ def android_attribute(element, name):
     return value
 
 
+def local_name(element):
+    return element.tag.rsplit("}", 1)[-1]
+
+
 def bundle_manifest_errors(manifest, module):
     errors = []
     prefix = "AAB " + module + ": "
     if any(re.fullmatch(r"_(?:0x[0-9a-fA-F]{8}|unknown)_", attribute.rsplit("}", 1)[-1])
            for element in manifest.iter() for attribute in element.attrib):
         errors.append(prefix + "unresolved manifest attribute name")
-    if any((element.tag.startswith("uses-permission") and android_attribute(element, "name") in FORBIDDEN_PERMISSIONS) or
+    if any((local_name(element).startswith("uses-permission") and android_attribute(element, "name") in FORBIDDEN_PERMISSIONS) or
            android_attribute(element, "permission") in FORBIDDEN_PERMISSIONS for element in manifest.iter()):
         errors.append(prefix + "forbidden broad permissions")
     for element in manifest.iter():
@@ -152,10 +165,10 @@ def bundle_manifest_errors(manifest, module):
                            re.fullmatch(r"0x[0-9a-fA-F]{8}", permission)):
             errors.append(prefix + "unresolved permission resource reference")
             break
-    application = manifest.find("application")
-    if module == "base" and application is None:
+    applications = [element for element in manifest if local_name(element) == "application"]
+    if module == "base" and not applications:
         errors.append(prefix + "application missing")
-    if application is not None:
+    for application in applications:
         if android_attribute(application, "debuggable") not in (None, "false"):
             errors.append(prefix + "debuggable application")
         for attribute, description in (("allowBackup", "application backup"),
@@ -268,17 +281,21 @@ def check_record(record, base, offline=False, run=command, now=None):
                         modules = sorted({match[1] for name in archive.namelist()
                                           if (match := re.fullmatch(r"([^/]+)/manifest/AndroidManifest\.xml", name))})
                     require("base" in modules, "AAB base manifest missing")
+                    run(["java", "--class-path", bundletool,
+                         str(Path(__file__).with_name("CheckBundleManifest.java")), str(path),
+                         str(len(ANDROID_ATTRIBUTE_IDS)),
+                         *[f"{name}={resource_id:08x}" for name, resource_id in ANDROID_ATTRIBUTE_IDS.items()],
+                         *modules])
                     manifests = {}
                     for module in modules:
                         manifest = ET.fromstring(run(["java", "-jar", bundletool, "dump", "manifest", "--bundle=" + str(path), "--module=" + module]))
                         manifests[module] = manifest
                         blockers.extend(bundle_manifest_errors(manifest, module))
                     manifest = manifests.get("base", ET.Element("manifest"))
-                    ns = ANDROID_NS
                     require(manifest.get("package") == PRODUCTION_PACKAGE, "AAB package mismatch")
-                    require(manifest.get(ns + "versionCode") == str(record.get("versionCode")), "AAB versionCode mismatch")
-                    sdk = manifest.find("uses-sdk")
-                    target = sdk.get(ns + "targetSdkVersion") if sdk is not None else None
+                    require(android_attribute(manifest, "versionCode") == str(record.get("versionCode")), "AAB versionCode mismatch")
+                    sdks = [element for element in manifest if local_name(element) == "uses-sdk"]
+                    target = android_attribute(sdks[0], "targetSdkVersion") if len(sdks) == 1 else None
                     require(target is not None and target.isdigit() and type(minimum) is int and int(target) >= minimum, "AAB target API below requirement")
             else:
                 cert = run(["apksigner", "verify", "--verbose", "--print-certs", str(path)])

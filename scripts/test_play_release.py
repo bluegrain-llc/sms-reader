@@ -80,6 +80,32 @@ class GateTest(unittest.TestCase):
     def test_complete_synthetic_record_passes(self):
         self.assertEqual(self.check()["blockers"], [])
 
+    def test_namespaced_permission_elements_cannot_hide_forbidden_permissions(self):
+        original = self.aab_manifest
+        for tag in ("uses-permission", "uses-permission-sdk-23", "uses-permission-sdk-m"):
+            with self.subTest(tag=tag):
+                self.aab_manifest = original.replace("<uses-sdk", '<x:' + tag + ' xmlns:x="urn:test" android:name="android.permission.READ_SMS"/><uses-sdk')
+                self.assertIn("AAB base: forbidden broad permissions", self.check()["blockers"])
+
+    def test_namespaced_or_later_application_cannot_hide_unsafe_flags(self):
+        for extra in ('<x:application xmlns:x="urn:test" android:debuggable="true"/>',
+                      '<application android:allowBackup="true"/>'):
+            with self.subTest(extra=extra):
+                original = self.aab_manifest
+                self.aab_manifest = original.replace("</manifest>", extra + "</manifest>")
+                self.assertFalse(self.check()["ready"])
+                self.aab_manifest = original
+
+    def test_raw_manifest_identity_verification_failure_blocks_clean_dump(self):
+        calls = []
+        def run(args):
+            calls.append(args)
+            if any(str(value).endswith("CheckBundleManifest.java") for value in args):
+                raise subprocess.CalledProcessError(1, args)
+            return self.tools(args)
+        self.assertIn("aab: required artifact tool or structural verification failed", self.check(run=run)["blockers"])
+        self.assertFalse(any(args[0] == "java" and "dump" in args for args in calls))
+
     def test_offline_never_authorizes_publication(self):
         result = self.check(offline=True)
         self.assertFalse(result["ready"])
@@ -401,15 +427,24 @@ class GateTest(unittest.TestCase):
             evidence.write_text(json.dumps(data))
             self.record["evidence"][label]["sha256"] = gate.sha256(evidence)
         calls = []
+        raw_calls = []
+        events = []
         def run(args):
+            if any(str(value).endswith("CheckBundleManifest.java") for value in args):
+                raw_calls.append(args)
+                events.append("raw")
             if args[0] == "java" and "dump" in args:
                 calls.append(args[-1])
+                events.append("dump")
                 if args[-1] == "--module=feature":
                     return '<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.bluegrain.smsrelay"><uses-permission android:name="android.permission.READ_SMS"/></manifest>'
             return self.tools(args)
         result = self.check(run=run)
         self.assertIn("AAB feature: forbidden broad permissions", result["blockers"])
         self.assertEqual(calls, ["--module=base", "--module=feature"])
+        self.assertEqual(events, ["raw", "dump", "dump"])
+        self.assertEqual(len(raw_calls), 1)
+        self.assertEqual(raw_calls[0][-2:], ["base", "feature"])
         def safe_feature(args):
             if args[0] == "java" and "dump" in args and args[-1] == "--module=feature":
                 return '<manifest package="com.bluegrain.smsrelay"/>'
@@ -527,6 +562,137 @@ class GateTest(unittest.TestCase):
         def run(args):
             return "jar verified. This jar contains unsigned entries" if args[0] == "jarsigner" else self.tools(args)
         self.assertIn("AAB JAR signature missing or invalid", self.check(run=run)["blockers"])
+
+
+@unittest.skipUnless(os.environ.get("BUNDLETOOL_JAR"), "BUNDLETOOL_JAR required for real AAPT protobuf tests")
+class RawManifestTest(unittest.TestCase):
+    """Use the real bundletool schema; fixtures encode the published AAPT wire format."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.temp = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(cls.temp.cleanup)
+        cls.base = Path(cls.temp.name)
+        cls.jar = str(Path(os.environ["BUNDLETOOL_JAR"]).resolve())
+        cls.source = Path(__file__).with_name("CheckBundleManifest.java")
+        subprocess.run(["javac", "-cp", cls.jar, "-d", str(cls.base), str(cls.source)],
+                       check=True, capture_output=True, text=True, timeout=60)
+
+    @staticmethod
+    def varint(value):
+        data = bytearray()
+        while value > 127:
+            data.append((value & 127) | 128)
+            value >>= 7
+        return bytes(data + bytes([value]))
+
+    @classmethod
+    def field(cls, number, value):
+        if isinstance(value, str):
+            value = value.encode()
+        if isinstance(value, int):
+            return cls.varint(number << 3) + cls.varint(value)
+        return cls.varint((number << 3) | 2) + cls.varint(len(value)) + value
+
+    @classmethod
+    def attribute(cls, name, resource_id, value="false", namespace=gate.ANDROID_NS[1:-1], boolean=False):
+        # XmlAttribute: namespace=1, name=2, value=3, resource_id=5,
+        # compiled_item=6 -> Item.prim=7 -> Primitive.boolean_value=8.
+        compiled = cls.field(2, cls.field(1, value)) if boolean is None else cls.field(7, cls.field(8, int(boolean)))
+        return (cls.field(1, namespace) + cls.field(2, name) + cls.field(3, value) +
+                cls.field(5, resource_id) + cls.field(6, compiled))
+
+    @classmethod
+    def element(cls, name, attributes=(), children=(), namespace=""):
+        return cls.field(1, cls.field(2, namespace) + cls.field(3, name) +
+                         b"".join(cls.field(4, attr) for attr in attributes) +
+                         b"".join(cls.field(5, child) for child in children))
+
+    def inspect(self, data, module="base", source_launch=False, modules=("base",)):
+        bundle = self.base / "candidate.aab"
+        with zipfile.ZipFile(bundle, "w") as archive:
+            for name, manifest in (data.items() if isinstance(data, dict) else ((module, data),)):
+                archive.writestr(name + "/manifest/AndroidManifest.xml", manifest)
+        args = ["java", "--class-path", self.jar + os.pathsep + str(self.base),
+                str(self.source) if source_launch else "CheckBundleManifest", str(bundle),
+                str(len(gate.ANDROID_ATTRIBUTE_IDS)),
+                *[f"{name}={rid:08x}" for name, rid in gate.ANDROID_ATTRIBUTE_IDS.items()], *modules]
+        return subprocess.run(args, capture_output=True, text=True, timeout=60)
+
+    def dump(self):
+        return subprocess.run(["java", "-jar", self.jar, "dump", "manifest",
+                               "--bundle=" + str(self.base / "candidate.aab"), "--module=base"],
+                              check=True, capture_output=True, text=True, timeout=60).stdout
+
+    def test_source_launch_accepts_canonical_and_namespace_stripped_identities(self):
+        for namespace in (gate.ANDROID_NS[1:-1], ""):
+            with self.subTest(namespace=namespace):
+                manifest = self.element("manifest", children=[self.element("application", [
+                    self.attribute("debuggable", 0x0101000F, namespace=namespace),
+                    self.attribute("allowBackup", 0x01010280, namespace=namespace),
+                    self.attribute("usesCleartextTraffic", 0x010104EC, namespace=namespace),
+                ])])
+                result = self.inspect(manifest, source_launch=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_nonempty_alias_cannot_hide_true_debuggable_resource_id(self):
+        alias = self.attribute("optimized", 0x0101000F, value="true", boolean=True)
+        result = self.inspect(self.element("manifest", children=[self.element("application", [alias])]))
+        self.assertNotEqual(result.returncode, 0)
+        dumped = self.dump()
+        self.assertIn('android:optimized="true"', dumped)
+        self.assertNotIn("debuggable", dumped)
+
+    def test_namespaced_permission_is_rejected_after_actual_bundletool_dump(self):
+        permission = self.element("uses-permission", [self.attribute(
+            "name", 0x01010003, value="android.permission.READ_SMS", boolean=None)], namespace="urn:test")
+        result = self.inspect(self.element("manifest", children=[permission]))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        manifest = gate.ET.fromstring(self.dump())
+        self.assertIn("AAB base: forbidden broad permissions", gate.bundle_manifest_errors(manifest, "base"))
+
+    def test_raw_identity_checks_all_requested_modules(self):
+        manifests = {"base": self.element("manifest"), "feature": self.element("manifest", children=[
+            self.element("application", [self.attribute("optimized", 0x0101000F, value="true", boolean=True)])])}
+        self.assertNotEqual(self.inspect(manifests, modules=("base", "feature")).returncode, 0)
+
+    def test_named_security_attribute_requires_matching_resource_id_and_namespace(self):
+        for attribute in (self.attribute("allowBackup", 0x01010001),
+                          self.attribute("allowBackup", 0),
+                          self.attribute("allowBackup", 0x01010280, namespace="urn:foreign"),
+                          self.attribute("releaseFlag", 0x01010280)):
+            with self.subTest(attribute=attribute):
+                result = self.inspect(self.element("manifest", children=[self.element("application", [attribute])]))
+                self.assertNotEqual(result.returncode, 0)
+
+    def test_every_guarded_identity_rejects_name_and_id_aliases(self):
+        expected = {"name": 0x01010003, "permission": 0x01010006, "debuggable": 0x0101000F,
+                    "allowBackup": 0x01010280, "usesCleartextTraffic": 0x010104EC,
+                    "versionCode": 0x0101021B, "targetSdkVersion": 0x01010270}
+        for name, resource_id in expected.items():
+            with self.subTest(name=name):
+                self.assertEqual(self.inspect(self.element("manifest", [self.attribute(name, resource_id)])).returncode, 0)
+                self.assertNotEqual(self.inspect(self.element("manifest", [self.attribute("alias", resource_id)])).returncode, 0)
+                self.assertNotEqual(self.inspect(self.element("manifest", [self.attribute(name, 0x01010001)])).returncode, 0)
+
+    def test_duplicate_attributes_cannot_be_overwritten_by_xml_dump(self):
+        cases = (
+            [self.attribute("debuggable", 0x0101000F, value="true", boolean=True),
+             self.attribute("debuggable", 0x0101000F)],
+            [self.attribute("debuggable", 0x0101000F), self.attribute("debuggable", 0x0101000F, namespace="")],
+            [self.attribute("custom", 0), self.attribute("custom", 0)],
+        )
+        for attributes in cases:
+            with self.subTest(attributes=attributes):
+                self.assertNotEqual(self.inspect(self.element("manifest", attributes)).returncode, 0)
+        separate_nodes = [self.element("service", [self.attribute("name", 0x01010003)]) for _ in range(2)]
+        self.assertEqual(self.inspect(self.element("manifest", children=separate_nodes)).returncode, 0)
+
+    def test_missing_malformed_or_nonmanifest_nodes_fail_closed(self):
+        for data, module in ((b"\x0a\xff", "base"), (b"", "base"),
+                             (self.element("application"), "base"), (self.element("manifest"), "feature")):
+            with self.subTest(data=data, module=module):
+                self.assertNotEqual(self.inspect(data, module=module).returncode, 0)
 
 
 class NativeTest(unittest.TestCase):
