@@ -30,6 +30,10 @@ Environment variables:
 
 Environment secrets: `RELAY_KEYSTORE_BASE64`, `RELAY_STORE_PASSWORD`, `RELAY_KEY_PASSWORD`, and `RELAY_SMOKE_TOKEN`. The smoke token belongs to a dedicated paired caller. Smoke only lists tools and checks an absent request; it never creates a request or triggers SMS. Signing material is written to a private temporary file and removed on success or failure.
 
+The workflow checks that every required variable and secret is present before installing dependencies, authenticating to Google Cloud or writing signing material. It loads the preflight from the workflow revision, then checks out the tested candidate, so older candidates can still be deployed. Missing values are reported together by setting name; their contents are never printed. `GCP_REGION` and `GCP_SERVICE` retain their defaults. Presence does not prove that a credential is valid: the existing cloud, signing and deployment checks still apply.
+
+For a local configuration check, export the same required settings and run `python3 scripts/check-release-prerequisites.py`. Do not put secret values on the command line or commit them. A newly configured protected environment cannot deploy until these credentials and public settings have been supplied.
+
 ## Release procedure
 
 1. Wait for the `CI and delivery` push run on `main` to succeed. Its tested container archive includes a SHA-256 checksum and an OCI commit label.

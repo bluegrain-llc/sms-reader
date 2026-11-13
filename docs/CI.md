@@ -28,6 +28,8 @@ ghcr.io/bluegrain-llc/sms-reader:latest
 
 Publishing uses the repository's temporary `GITHUB_TOKEN` with `packages: write`; no registry secret is required. New container packages are private by default. The image's source label links package access to this repository. Keep package visibility private in the organization's package settings.
 
+Protect `main` with up-to-date required status checks from the GitHub Actions app, applying the rules to administrators as well. Require every validation job in `check.yml`, including each Android API variant, plus `Play release gate unit tests` from `play-readiness.yml`. Do not require `Publish tested container` before merging: that job runs only after a push to `main`. Require pull requests and resolved review conversations, and prohibit branch deletion and force pushes. Repository settings enforce these requirements; workflow YAML alone does not configure them.
+
 Delivery publishes installable/build artifacts; deploying to the existing Cloud Run service uses the explicit project and signing fingerprint procedure in [DEPLOYMENT.md](DEPLOYMENT.md). Signed pilot APKs require the private signing key and release configuration described there. These credentials are never needed by CI.
 
 The Android UI job removes unused .NET and Android NDK installations from its disposable hosted runner before starting the emulator. API 36 images can require over 7 GiB for userdata despite the requested 2 GiB data-partition setting; a low-space runner can exit before ADB starts. This cleanup preserves the Java/Kotlin toolchain and Android SDK packages used by the tests.

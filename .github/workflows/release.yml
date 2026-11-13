@@ -53,6 +53,28 @@ jobs:
           PY
       - uses: actions/checkout@v4
         with:
+          # Keep preflight available when deploying an older tested candidate.
+          ref: ${{ github.sha }}
+      - name: Check production release prerequisites
+        env:
+          GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+          GCP_WORKLOAD_IDENTITY_PROVIDER: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          GCP_RELEASE_SERVICE_ACCOUNT: ${{ vars.GCP_RELEASE_SERVICE_ACCOUNT }}
+          SECURITY_LEDGER_BUCKET: ${{ vars.SECURITY_LEDGER_BUCKET }}
+          ANDROID_SIGNING_SHA256S: ${{ vars.ANDROID_SIGNING_SHA256S }}
+          ANDROID_UPLOAD_SHA256: ${{ vars.ANDROID_UPLOAD_SHA256 }}
+          RELAY_KEY_ALIAS: ${{ vars.RELAY_KEY_ALIAS }}
+          RELAY_URL: ${{ vars.RELAY_URL }}
+          FIREBASE_APP_ID: ${{ vars.FIREBASE_APP_ID }}
+          FIREBASE_API_KEY: ${{ vars.FIREBASE_API_KEY }}
+          FIREBASE_SENDER_ID: ${{ vars.FIREBASE_SENDER_ID }}
+          GOOGLE_WEB_CLIENT_ID: ${{ vars.GOOGLE_WEB_CLIENT_ID }}
+          RELAY_KEYSTORE_BASE64: ${{ secrets.RELAY_KEYSTORE_BASE64 }}
+          RELAY_STORE_PASSWORD: ${{ secrets.RELAY_STORE_PASSWORD }}
+          RELAY_KEY_PASSWORD: ${{ secrets.RELAY_KEY_PASSWORD }}
+        run: python3 scripts/check-release-prerequisites.py
+      - uses: actions/checkout@v4
+        with:
           ref: ${{ steps.source.outputs.sha }}
       - uses: actions/setup-node@v4
         with:
