@@ -210,6 +210,28 @@ test('a failed private storage write is retried before any provisioning request'
   const download=page.waitForEvent('download');await submit.click();await download;expect(provisions).toBe(1);
 });
 
+test('unavailable private ticket storage preserves existing agent management and prevents provisioning',async({page})=>{
+  await page.addInitScript(()=>{
+    indexedDB.open=()=>{throw new DOMException('Synthetic database failure','SecurityError');};
+  });
+  let active=true,deleted=false,provisions=0,updates=0;
+  await page.route('**/v3/**',async r=>{
+    if(r.request().method()==='POST'){provisions++;await r.fulfill({status:201,json:{serviceId:'new-agent'}});}
+    else if(r.request().method()==='PATCH'){updates++;active=false;await r.fulfill({json:{ok:true}});}
+    else if(r.request().method()==='DELETE'){deleted=true;await r.fulfill({json:{ok:true}});}
+    else await r.fulfill({json:deleted?[]:[{serviceId:'owned',name:'Existing agent',purpose:'Decisions',capabilities:['forms'],active,servicePath:'/services/owned'}]});
+  });
+  await page.goto(origin+'/owned-services');await expect(page.locator('#list')).toBeVisible();
+  await page.locator('#create-agent').click();await page.locator('#agent-name').fill('New agent');await page.locator('#agent-purpose').fill('Decisions');
+  await page.getByRole('button',{name:'Create agent and save ticket',exact:true}).click();
+  await expect(page.locator('#retry')).toBeVisible();expect(provisions).toBe(0);
+  await page.locator('#cancel-create').click();await page.getByRole('button',{name:'Existing agent · Enabled',exact:true}).click();
+  await expect(page.locator('#detail')).toBeVisible();await page.locator('#toggle').click();
+  await expect(page.locator('#toggle')).toHaveText('Enable service');expect(updates).toBe(1);
+  page.once('dialog',dialog=>dialog.accept());await page.locator('#delete').click();
+  await expect(page.locator('#list')).toBeVisible();expect(deleted).toBe(true);expect(provisions).toBe(0);
+});
+
 
 test('two already-open tabs cannot replace another retained private ticket',async({page,context})=>{
   const declarations:any[]=[];

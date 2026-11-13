@@ -74,4 +74,17 @@ class AgentTicketTest {
             assertNull(current.load())
         } finally { current.load()?.let { current.clear(it.getString("serviceCredential")) } }
     }
+    @Test fun deletedAccountClearsOnlyItsOwnRetainedTicket() {
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        val owner = "test-ticket-" + UUID.randomUUID()
+        val deleted = AgentTicket(context, owner); val other = AgentTicket(context, owner + "-other")
+        val ticket = AgentTicket.create("Deleted owner", "Decisions", listOf("forms"))
+        val otherTicket = AgentTicket.create("Other owner", "Decisions", listOf("forms"))
+        try {
+            deleted.saveNew(ticket); other.saveNew(otherTicket)
+            deleted.clearForDeletedAccount()
+            assertNull(deleted.load())
+            assertEquals(otherTicket.toString(), other.load()!!.toString())
+        } finally { deleted.clearForDeletedAccount(); other.clearForDeletedAccount() }
+    }
 }

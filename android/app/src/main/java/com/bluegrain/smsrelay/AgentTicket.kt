@@ -54,6 +54,7 @@ class AgentTicket(private val context: Context, ownerId: String) {
         else if (retained.getString("serviceCredential") != expectedCredential) false
         else { file.delete(); true }
     }
+    fun clearForDeletedAccount() = synchronized(retentionLock) { file.delete() }
     companion object {
         private val retentionLock = Any()
         private fun encode(bytes: ByteArray) = Base64.getUrlEncoder().withoutPadding().encodeToString(bytes)

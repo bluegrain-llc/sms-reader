@@ -128,7 +128,7 @@ except ValueError:pass
   assert.equal(result.status,0,result.stderr);assert.equal(result.stdout,'');
 });
 
-test('Python exports legacy whitespace declarations and more than 100 completed rotations',()=>{
+test('Python exports legacy whitespace declarations after 100 completed rotations',()=>{
   const program=`import copy
 import request_relay as relay
 class Store:

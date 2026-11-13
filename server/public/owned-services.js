@@ -37,8 +37,11 @@ async function render() {
 }
 async function load() {
   if(!auth.currentUser)return;$('signin').hidden=true;$('signout').hidden=false;$('identity').textContent=`Signed in as ${auth.currentUser.email || 'your account'}`;
-  pendingTicket=await retained(auth.currentUser.uid);$('ticket-state').hidden=!pendingTicket;
+  let storageUnavailable=false;
+  try { pendingTicket=await retained(auth.currentUser.uid); } catch { storageUnavailable=true; }
+  $('ticket-state').hidden=!pendingTicket;
   services=await api('/v3/services');$('retry').hidden=true;await render();
+  if(storageUnavailable){status('Private ticket storage is unavailable. You can still manage existing agents.');$('retry').hidden=false;}
 }
 $('create-agent').onclick=()=>{$('create-form').hidden=false;};
 $('cancel-create').onclick=()=>{$('create-form').hidden=true;};
