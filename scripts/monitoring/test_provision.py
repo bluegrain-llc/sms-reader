@@ -33,6 +33,15 @@ class ProvisionTest(unittest.TestCase):
         second = provision.resources('demo-sms-relay', 'other-service', [], '1234', 'ABCDEF-ABCDEF-ABCDEF')
         self.assertTrue(set(m['name'] for m in first['metrics']).isdisjoint(m['name'] for m in second['metrics']))
 
+    def test_startup_probes_do_not_count_as_user_errors_or_latency(self):
+        metrics = {m['name'].rsplit('/', 1)[-1]: m for m in self.config()['metrics']}
+        for name in ['http_requests', 'http_latency_ms']:
+            self.assertIn('jsonPayload.route!="/startup"', metrics[name]['filter'])
+            self.assertIn('jsonPayload.route!="/health"', metrics[name]['filter'])
+            self.assertNotIn('jsonPayload.status_class!="5xx"', metrics[name]['filter'])
+            self.assertNotIn('jsonPayload.route!="/v1/devices"', metrics[name]['filter'])
+        self.assertIn('jsonPayload.event="deletion_failed"', metrics['worker_failures']['filter'])
+
     def test_unusable_channels_fail_before_writes(self):
         valid = {'type': 'email', 'verificationStatus': 'VERIFIED', 'enabled': True}
         for channel in [

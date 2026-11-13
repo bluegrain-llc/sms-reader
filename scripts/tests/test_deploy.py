@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import re
 from pathlib import Path
 import tempfile
 import unittest
@@ -39,6 +40,7 @@ class DeploymentSafety(unittest.TestCase):
                     calls, _, _, _ = self.exercise(**options)
                     deploy = next(c for c in calls if c[:3] == ['gcloud', 'run', 'deploy'])
                     self.assertIn('ANDROID_PACKAGE_NAME=' + package, deploy[deploy.index('--update-env-vars') + 1])
+                    self.assertEqual(deploy[deploy.index('--startup-probe') + 1], 'httpGet.path=/startup,httpGet.port=8080,periodSeconds=2,timeoutSeconds=1,failureThreshold=60')
 
     def exercise(self, failure=None, **options):
         calls = []
@@ -116,6 +118,14 @@ class DeploymentSafety(unittest.TestCase):
         self.assertEqual(manifest['status'], 'promoted')
         self.assertNotIn('private-fixture', json.dumps(manifest))
         self.assertEqual(set(manifest['previousImages']), {'old-a', 'old-b'})
+        error_reads = [c for c in calls if c[:3] == ['gcloud', 'logging', 'read']]
+        self.assertTrue(error_reads)
+        self.assertTrue(all('httpRequest.status>=500' in c[3] and 'NOT httpRequest.requestUrl=~"^https?://[^/?#]+/startup/?([?].*)?$"' in c[3] for c in error_reads))
+        probe_pattern = re.search(r'NOT httpRequest.requestUrl=~"([^"]+)"', error_reads[0][3]).group(1)
+        for url in ['https://relay.example/startup', 'http://relay.example:8080/startup/', 'https://relay.example/startup?probe=1']:
+            self.assertRegex(url, probe_pattern)
+        for url in ['https://relay.example/v2/foo?x=/startup', 'https://relay.example/v2/startup', 'https://relay.example/startup-more', 'https://relay.example?x=/startup']:
+            self.assertNotRegex(url, probe_pattern)
 
     def test_rust_defaults_to_zero_traffic_after_verified_smoke(self):
         _, traffic, manifest, smokes = self.exercise(BACKEND='rust')

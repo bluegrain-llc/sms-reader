@@ -121,6 +121,7 @@ def deploy(c):
         run(['gcloud', 'run', 'deploy', service, *scope, '--image', c['IMAGE_URI'], '--revision-suffix', revision[len(service)+1:],
              '--service-account', f'sms-relay-server@{project}.iam.gserviceaccount.com', '--allow-unauthenticated',
              '--port', '8080', '--memory', '512Mi', '--timeout', '120', '--max-instances', '10', '--min-instances', '0',
+             '--startup-probe', 'httpGet.path=/startup,httpGet.port=8080,periodSeconds=2,timeoutSeconds=1,failureThreshold=60',
              '--update-env-vars', values, '--no-traffic', '--tag', 'candidate', '--quiet'], capture=False)
         live = json.loads(run(['gcloud', 'run', 'services', 'describe', service, *scope, '--format=json']))
         candidate = next(t['url'] for t in live['status']['traffic'] if t.get('tag') == 'candidate' and t.get('revisionName') == revision)
@@ -148,7 +149,7 @@ def deploy(c):
             save(f'observing-{percent}')
             time.sleep(c['HOLD'])
             smoke()
-            errors = run(['gcloud', 'logging', 'read', f'resource.type="cloud_run_revision" AND resource.labels.service_name="{service}" AND resource.labels.revision_name="{revision}" AND httpRequest.status>=500 AND timestamp>="{started}"', '--project', project, '--limit=1', '--format=value(insertId)'])
+            errors = run(['gcloud', 'logging', 'read', f'resource.type="cloud_run_revision" AND resource.labels.service_name="{service}" AND resource.labels.revision_name="{revision}" AND httpRequest.status>=500 AND NOT httpRequest.requestUrl=~"^https?://[^/?#]+/startup/?([?].*)?$" AND timestamp>="{started}"', '--project', project, '--limit=1', '--format=value(insertId)'])
             if errors:
                 raise RuntimeError('Candidate recorded HTTP 5xx during observation')
         save('promoted')

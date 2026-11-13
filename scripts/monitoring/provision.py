@@ -11,7 +11,7 @@ import urllib.request
 
 def resources(project, service, channels, number, billing):
     scope = f'resource.type="cloud_run_revision" resource.labels.project_id="{project}" resource.labels.service_name="{service}" jsonPayload.component="relay"'
-    valid_http = 'jsonPayload.event="http_completed" jsonPayload.route!~"^/internal/" jsonPayload.route!="/health" jsonPayload.route!="/healthz" jsonPayload.route!="/v2/events/stream" jsonPayload.route!="unmatched" jsonPayload.status_class!="4xx"'
+    valid_http = 'jsonPayload.event="http_completed" jsonPayload.route!~"^/internal/" jsonPayload.route!="/health" jsonPayload.route!="/healthz" jsonPayload.route!="/startup" jsonPayload.route!="/v2/events/stream" jsonPayload.route!="unmatched" jsonPayload.status_class!="4xx"'
     definitions = [
         ('http_requests', valid_http, None, ['status_class']),
         ('http_latency_ms', valid_http, 'duration_ms', []),

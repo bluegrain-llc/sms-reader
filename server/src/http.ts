@@ -49,6 +49,10 @@ export function app(relay: Relay, options: HttpOptions) {
   });
   app.use(express.json({ limit: '256kb', strict: true }));
   app.get(['/health', '/healthz'], (_req, res) => { res.json({ ok: true }); });
+  app.get('/startup', (_req, res) => {
+    try { options.assertServing?.(); res.json({ ok: true }); }
+    catch { res.status(503).json({ ok: false }); }
+  });
   app.use((req, _res, next) => {
     if (req.get('authorization') || (req.method === 'POST' && /^\/v1\/connections\/?$/i.test(req.path)) || req.path.startsWith('/oauth/')) options.assertServing?.();
     next();
