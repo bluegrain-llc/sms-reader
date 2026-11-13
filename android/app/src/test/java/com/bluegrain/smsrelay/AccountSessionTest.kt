@@ -11,6 +11,33 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class AccountSessionTest {
+    @Test(timeout = 5000) fun linkRejectsOwnerChangedWhileCredentialsArePending() = runBlocking {
+        var owner = "owner-a"
+        val credentials = CompletableDeferred<Unit>()
+        var linked = false
+        var rejected = false
+        val operation = launch(start = CoroutineStart.UNDISPATCHED) {
+            credentials.await()
+            try { linkForOwner("owner-a", { owner }) { linked = true; owner } }
+            catch (_: IllegalStateException) { rejected = true }
+        }
+        try {
+            owner = "owner-b"; credentials.complete(Unit); operation.join()
+            assertTrue(rejected); assertFalse(linked)
+        } finally { credentials.complete(Unit); operation.cancelAndJoin() }
+    }
+
+    @Test(timeout = 5000) fun linkRemainsBoundToTheConsentingOwnerAcrossItsResult() = runBlocking {
+        var owner = "owner-a"
+        var linked = false
+        linkForOwner("owner-a", { owner }) { linked = true; "owner-a" }
+        assertTrue(linked)
+        var rejected = false
+        try { linkForOwner("owner-a", { owner }) { owner = "owner-b"; "owner-a" } }
+        catch (_: IllegalStateException) { rejected = true }
+        assertTrue(rejected)
+    }
+
     @Test(timeout = 5000) fun signOutRetainsInstallationUntilServerDisconnectCompletes() = runBlocking {
         val disconnected = CompletableDeferred<Unit>()
         var installation: String? = "device-a"

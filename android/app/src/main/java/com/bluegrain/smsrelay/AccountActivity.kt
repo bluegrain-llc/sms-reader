@@ -49,9 +49,9 @@ abstract class AccountActivity : ComponentActivity() {
             options += "Continue with Apple" to { authenticateApple() }
         } else {
             if (user.providerData.any { it.providerId == "google.com" }) options += "Verify Google account" to { authenticate(false) }
-            else options += "Link Google account" to { confirmLink { authenticate(false, link = true) } }
+            else options += "Link Google account" to { confirmLink { authenticate(false, link = true, expectedLinkOwner = user.uid) } }
             if (user.providerData.any { it.providerId == "apple.com" }) options += "Verify Apple account" to { authenticateApple() }
-            else options += "Link Apple account" to { confirmLink { authenticateApple(link = true) } }
+            else options += "Link Apple account" to { confirmLink { authenticateApple(link = true, expectedLinkOwner = user.uid) } }
             options += "Sign out" to { vm.signOut(user.uid) }
         }
         android.app.AlertDialog.Builder(this).setTitle(if (user == null) "Sign in" else "Account sign-in methods")
@@ -62,7 +62,7 @@ abstract class AccountActivity : ComponentActivity() {
             .setMessage("I consent to connect this provider to my current relay account. Accounts are never merged by email.")
             .setPositiveButton("Link account") { _, _ -> action() }.setNegativeButton("Cancel", null).show()
     }
-    private fun authenticateApple(deleteAfter: Boolean = false, link: Boolean = false) {
+    private fun authenticateApple(deleteAfter: Boolean = false, link: Boolean = false, expectedLinkOwner: String? = null) {
         val auth = com.google.firebase.auth.FirebaseAuth.getInstance()
         val user = auth.currentUser
         val owner = user?.uid
@@ -76,9 +76,13 @@ abstract class AccountActivity : ComponentActivity() {
                         accessToken = (result.credential as? com.google.firebase.auth.OAuthCredential)?.accessToken ?: error("apple_token_required")
                         result.user?.uid.orEmpty()
                     }, revoke = { auth.revokeAccessToken(checkNotNull(accessToken)).await() })
+                } else if (link) {
+                    linkForOwner(checkNotNull(expectedLinkOwner), { auth.currentUser?.uid }) {
+                        checkNotNull(user).startActivityForLinkWithProvider(this@AccountActivity, provider).await().user?.uid
+                    }
+                    vm.refresh().join()
                 } else {
                     val result = when {
-                        link -> checkNotNull(user).startActivityForLinkWithProvider(this@AccountActivity, provider)
                         user != null -> user.startActivityForReauthenticateWithProvider(this@AccountActivity, provider)
                         else -> auth.startActivityForSignInWithProvider(this@AccountActivity, provider)
                     }.await()
@@ -89,10 +93,13 @@ abstract class AccountActivity : ComponentActivity() {
             catch (_: Exception) { vm.error("Apple sign-in was not completed. Use the same account and retry. Link providers only through Link account.") }
         }
     }
-    private fun authenticate(deleteAfter: Boolean, link: Boolean = false) {
+    private fun authenticate(deleteAfter: Boolean, link: Boolean = false, expectedLinkOwner: String? = null) {
         val expectedOwner = (application as RelayApplication).repository.ownerId
+        val auth = com.google.firebase.auth.FirebaseAuth.getInstance()
+        val linkUser = auth.currentUser
         lifecycleScope.launch {
             try {
+                if (link) check(expectedLinkOwner != null && linkUser?.uid == expectedLinkOwner)
                 val option = GetGoogleIdOption.Builder().setServerClientId(BuildConfig.GOOGLE_WEB_CLIENT_ID)
                     .setFilterByAuthorizedAccounts(false).setAutoSelectEnabled(false).build()
                 val result = CredentialManager.create(this@AccountActivity).getCredential(this@AccountActivity,
@@ -101,10 +108,10 @@ abstract class AccountActivity : ComponentActivity() {
                 if (credential.type == GoogleIdTokenCredential.TYPE_GOOGLE_ID_TOKEN_CREDENTIAL) {
                     val token = GoogleIdTokenCredential.createFrom(credential.data).idToken
                     if (link) {
-                        val auth = com.google.firebase.auth.FirebaseAuth.getInstance()
-                        val owner = auth.currentUser?.uid ?: error("sign_in_required")
-                        val linked = auth.currentUser!!.linkWithCredential(com.google.firebase.auth.GoogleAuthProvider.getCredential(token, null)).await()
-                        check(linked.user?.uid == owner); vm.refresh().join()
+                        linkForOwner(checkNotNull(expectedLinkOwner), { auth.currentUser?.uid }) {
+                            checkNotNull(linkUser).linkWithCredential(com.google.firebase.auth.GoogleAuthProvider.getCredential(token, null)).await().user?.uid
+                        }
+                        vm.refresh().join()
                     } else vm.signedIn(token, deleteAfter, expectedOwner)
                 } else vm.error("Choose a Google account to continue.")
             } catch (e: CancellationException) { throw e }
