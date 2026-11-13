@@ -333,6 +333,7 @@ for(const runtime of [0,1])for(const profile of providerProfiles){
     const tools=await call(runtime,endpoint,softwareToken,{jsonrpc:'2.0',id:'provider-list',method:'tools/list'});
     assert.equal(tools.result.tools.length,5);
     for(const tool of tools.result.tools)assert.deepEqual(tool._meta.securitySchemes,[{type:'oauth2',scopes:['forms']}]);
+    await call(runtime,`/v1/devices/${randomUUID()}`,owner(providerRecipient),{name:'Synthetic provider phone',fcmToken:'synthetic',wizardVersion:1},'PUT');
     if(profile.provider==='xai'){
       assert.deepEqual(config,{type:'mcp',server_label:'relay',server_url:resource,authorization:tokens.access_token});
       assert.ok(tools.result.tools.every((tool: {name:string})=>!tool.name.includes('sms')));
@@ -340,8 +341,8 @@ for(const runtime of [0,1])for(const profile of providerProfiles){
       await call(runtime,'/mcp',softwareToken,{jsonrpc:'2.0',id:'legacy-resource',method:'tools/list'},'POST',401);
       const denied=await call(runtime,endpoint,softwareToken,{jsonrpc:'2.0',id:'sms-denied',method:'tools/call',params:{name:'request_sms_code',arguments:{title:'Not approved',purpose:'No SMS grant',idempotencyKey:randomUUID()}}});
       assert.equal(denied.result.isError,true);
+      assert.deepEqual(denied.result.content,[{type:'text',text:runtime===0?'MCP error -32602: Tool request_sms_code not found':JSON.stringify({error:'sms_approval_required'})}]);
     }
-    await call(runtime,`/v1/devices/${randomUUID()}`,owner(providerRecipient),{name:'Synthetic provider phone',fcmToken:'synthetic',wizardVersion:1},'PUT');
     const created=await call(runtime,endpoint,tokens.access_token,{jsonrpc:'2.0',id:'create',method:'tools/call',params:{name:'create_request',arguments:{title:'Review',body:'Provider fixture',fields:[{id:'decision',type:'text',label:'Decision'}],actions:[{id:'send',type:'submit',label:'Send'}],idempotencyKey:randomUUID()}}});
     const requestId=created.result.structuredContent.requestId;assert.equal(typeof requestId,'string');
     const inspected=await call(runtime,endpoint,tokens.access_token,{jsonrpc:'2.0',id:'inspect',method:'tools/call',params:{name:'inspect_request',arguments:{requestId}}});
