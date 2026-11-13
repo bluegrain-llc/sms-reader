@@ -4,7 +4,7 @@ This adapter targets Microsoft's developer Azure OpenAI Responses API. Its [func
 
 ## Local execution
 
-Use the [shared CLI onboarding flow](../docs/ONBOARDING.md) to register a service and connect the selected recipient. Owner self-access is off by default; enabling it requires approval in the registration confirmation. Recipients can choose forms and/or SMS, expiry, and disconnect later. Select forms unless SMS is necessary. A connection for a particular external account must start with a temporary pairing session whose opaque account reference comes from your authenticated backend; reusable links cannot target an account.
+Use the [shared CLI onboarding flow](../docs/ONBOARDING.md) to register a service. Registration grants no recipient access, including to the registering owner. After registration, run `relay service connect --profile my-agent` and have the selected recipient approve the separate connection link. To connect your own account, approve that link while signed in to your account; there is no self-access option in the registration confirmation. Recipients can choose forms and/or SMS, expiry, and disconnect later. Select forms unless SMS is necessary. A connection for a particular external account must start with a temporary pairing session whose opaque account reference comes from your authenticated backend; reusable links cannot target an account.
 
 Keep CLI storage, credentials and delivery private keys in private application software. Registration, locally generated QR codes, pairing, encrypted delivery consumption and acknowledgement stay outside the model tool loop. The public setup URL and QR contain no credentials.
 
