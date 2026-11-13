@@ -1,7 +1,36 @@
 #!/usr/bin/env python3
 """Render recovery infrastructure commands. Apply requires explicit immutable retention acknowledgement."""
-import argparse,json,re,subprocess,tempfile
+import argparse,json,re,subprocess,sys
 from pathlib import Path
+from urllib.request import Request, urlopen
+
+def lock_ledger(bucket):
+    if not re.fullmatch(r'[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]',bucket): raise ValueError('invalid bucket')
+    token=subprocess.run(['gcloud','auth','print-access-token'],check=True,capture_output=True,text=True,timeout=30).stdout.strip()
+    if not token: raise ValueError('cloud_access_token_missing')
+    url='https://storage.googleapis.com/storage/v1/b/'+bucket
+    def request(method, endpoint):
+        with urlopen(Request(endpoint,method=method,headers={'Authorization':'Bearer '+token},
+                             data=b'' if method=='POST' else None),timeout=30) as response:
+            return json.load(response)
+    def private_policy(value):
+        iam=value.get('iamConfiguration',{})
+        if iam.get('uniformBucketLevelAccess',{}).get('enabled') is not True or iam.get('publicAccessPrevention')!='enforced':
+            raise ValueError('ledger_access_policy_unsafe')
+        return value.get('retentionPolicy',{})
+    metadata=request('GET',url);policy=private_policy(metadata)
+    if policy.get('isLocked') is True:
+        if not re.fullmatch(r'[0-9]+',str(policy.get('retentionPeriod',''))) or int(policy['retentionPeriod'])<604800:
+            raise ValueError('ledger_retention_lock_unverified')
+        return
+    # The explicit provisioning acknowledgement covers the planned seven-day
+    # lock only. Never permanently lock an unexpected policy after a race.
+    if policy.get('retentionPeriod')!='604800' or not re.fullmatch(r'[1-9][0-9]*',str(metadata.get('metageneration',''))):
+        raise ValueError('ledger_retention_policy_unexpected')
+    request('POST',url+'/lockRetentionPolicy?ifMetagenerationMatch='+str(metadata['metageneration']))
+    policy=private_policy(request('GET',url))
+    if policy.get('isLocked') is not True or policy.get('retentionPeriod')!='604800':
+        raise ValueError('ledger_retention_lock_unverified')
 
 def commands(c, root):
     required=['project','recovery_project','region','backup_bucket','ledger_bucket','runtime_account','backup_account','scheduler_account','image_digest']
@@ -20,7 +49,8 @@ def commands(c, root):
         rows += [['gcloud','storage','buckets','create',bucket,'--project='+c['recovery_project'],'--location='+c['region'],'--uniform-bucket-level-access'],
                  ['gcloud','storage','buckets','update',bucket,'--public-access-prevention','--soft-delete-duration=0'],
                  ['gcloud','storage','buckets','update',bucket,'--lifecycle-file='+str(root/('ledger-lifecycle.json' if key=='ledger_bucket' else 'lifecycle.json'))]]
-        if key=='ledger_bucket': rows += [['gcloud','storage','buckets','update',bucket,'--retention-period=7d'],['gcloud','storage','buckets','update',bucket,'--lock-retention-period']]
+        if key=='ledger_bucket': rows += [['gcloud','storage','buckets','update',bucket,'--retention-period=7d'],
+            [sys.executable,str(Path(__file__).resolve()),'--lock-ledger-bucket',c[key],'--acknowledge-irreversible-ledger-lock']]
     rows += [['gcloud','storage','cp',str(root/'manifest.json'),'gs://'+c['ledger_bucket']+'/manifest.json','--if-generation-match=0']]
     for account, key, role in [(c['runtime_account'],'ledger_bucket','roles/storage.objectCreator'),(c['runtime_account'],'ledger_bucket','roles/storage.legacyBucketReader'),(c['runtime_account'],'ledger_bucket','roles/storage.objectViewer'),(c['backup_account'],'backup_bucket','roles/storage.objectCreator'),(c['backup_account'],'ledger_bucket','roles/storage.objectViewer'),(c['backup_account'],'ledger_bucket','roles/storage.legacyBucketReader')]:
         rows += [['gcloud','storage','buckets','add-iam-policy-binding','gs://'+c[key],'--member=serviceAccount:'+account,'--role='+role]]
@@ -32,7 +62,13 @@ def commands(c, root):
     return rows
 
 def main():
-    p=argparse.ArgumentParser();p.add_argument('--config',type=Path,required=True);p.add_argument('--output',type=Path,required=True);p.add_argument('--apply',action='store_true');p.add_argument('--acknowledge-irreversible-ledger-lock',action='store_true');a=p.parse_args()
+    p=argparse.ArgumentParser();p.add_argument('--config',type=Path);p.add_argument('--output',type=Path);p.add_argument('--apply',action='store_true');p.add_argument('--acknowledge-irreversible-ledger-lock',action='store_true');p.add_argument('--lock-ledger-bucket');a=p.parse_args()
+    if a.lock_ledger_bucket:
+        if not a.acknowledge_irreversible_ledger_lock: p.error('immutable bucket retention lock acknowledgement required')
+        if a.config or a.output or a.apply: p.error('ledger locking cannot be combined with provisioning options')
+        lock_ledger(a.lock_ledger_bucket)
+        print(json.dumps({'ledgerBucket':a.lock_ledger_bucket,'retentionLocked':True}));return
+    if not a.config or not a.output: p.error('--config and --output are required for provisioning')
     c=json.loads(a.config.read_text());a.output.mkdir(parents=True,exist_ok=True)
     import time
     (a.output/'manifest.json').write_text(json.dumps({'version':1,'project':c['project'],'createdAt':int(time.time()*1000)}))
