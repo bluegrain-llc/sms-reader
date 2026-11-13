@@ -10,12 +10,15 @@ record tool verifies APK signing and rejects debuggable or non-relay APKs. It
 collects physical device model, Android/API and Google Play-services version using
 fixed ADB metadata commands. Device-reported hardware serials are replaced with
 SHA-256 hashes, so USB and network aliases of one phone share an identity. Phones
-without a usable hardware serial are refused. The tool never reads SMS, app files,
-screen contents, account identities or credentials.
-The artifact hash identifies the APK selected by the operator; the tool does not
-prove that this exact APK is installed. Install that candidate on both phones
-before testing. Bind the record to the explicitly selected project, region and
-backend revision from the private deployment record.
+without a usable hardware serial are refused. For each selected phone it pulls
+only the installed relay package APK into a private temporary directory, compares
+its SHA-256 with the selected candidate and removes the temporary copy. Missing,
+different or split APK installations are refused. The tool never reads SMS, app
+data, screen contents, account identities or credentials, and does not install or
+modify the app. Install the standalone candidate on both phones before testing.
+This check records the installed artifact at initialization; keep that candidate
+installed throughout the run. Bind the record to the explicitly selected project,
+region and backend revision from the private deployment record.
 
 ```sh
 python3 scripts/phone-acceptance.py init \
@@ -32,6 +35,9 @@ The initial matrix is entirely pending. Use a new record for each new candidate;
 initialization refuses to overwrite records. Omitting serials can prepare a
 pending matrix, but passing observations then fail validation. Emulator devices
 are refused, and two-phone cases require two distinct physical device identities.
+Schema version 2 binds every device to the verified installed APK hash. Older
+version 1 records remain historical evidence and cannot pass this tool's gate;
+initialize a fresh record rather than copying old outcomes to a new candidate.
 
 After performing each case below, record the observed result explicitly:
 
