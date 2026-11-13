@@ -162,6 +162,30 @@ pub fn entry(event: Value) -> Option<Value> {
             }
             record
         }
+        "fcm_send" => {
+            let phase = text(&event, "phase");
+            let kind = text(&event, "kind");
+            let id = text(&event, "attempt_id");
+            if !["started", "http_started", "completed"].contains(&phase)
+                || !["sms", "form"].contains(&kind)
+                || uuid::Uuid::parse_str(id).is_err()
+            {
+                return None;
+            }
+            let mut record = json!({"event":name,"phase":phase,"kind":kind,"attempt_id":id,
+                "duration_ms":nonnegative(&event["duration_ms"]),"http_attempts":nonnegative(&event["http_attempts"]).min(1.0)});
+            if phase == "completed" {
+                let outcome = text(&event, "outcome");
+                if !["accepted", "failed"].contains(&outcome) {
+                    return None;
+                }
+                record["outcome"] = json!(outcome);
+                if outcome == "failed" {
+                    record["category"] = json!(safe_category(text(&event, "category")));
+                }
+            }
+            record
+        }
         "onboarding_outcome" => {
             let phase = text(&event, "phase");
             let outcome = text(&event, "outcome");
@@ -210,7 +234,7 @@ pub fn entry(event: Value) -> Option<Value> {
     record["component"] = json!("relay");
     record["severity"] = json!(if name.ends_with("_failed") {
         "ERROR"
-    } else if name == "delivery_attempt" && event["outcome"] == "failed" {
+    } else if ["delivery_attempt", "fcm_send"].contains(&name) && event["outcome"] == "failed" {
         "WARNING"
     } else {
         "INFO"
@@ -434,6 +458,21 @@ pub fn onboarding_outcome(path: &str, method: &str, status: u16, value: &Value) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fcm_lifecycle_keeps_only_attempt_metadata() {
+        let id = uuid::Uuid::new_v4().to_string();
+        let value = entry(
+            json!({"event":"fcm_send","phase":"completed","attempt_id":id,"kind":"form",
+            "duration_ms":12,"http_attempts":1,"outcome":"failed","category":"timeout",
+            "token":"private-token","ownerId":"private-owner","body":"private-response"}),
+        )
+        .unwrap();
+        assert_eq!(value["severity"], "WARNING");
+        assert_eq!(value["attempt_id"], id);
+        assert!(!value.to_string().contains("private"));
+        assert!(entry(json!({"event":"fcm_send","phase":"completed","attempt_id":"private-owner","kind":"form"})).is_none());
+    }
 
     #[test]
     fn records_drop_private_context_and_derive_fixed_fields() {

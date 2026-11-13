@@ -1,7 +1,6 @@
 import { applicationDefault, initializeApp } from 'firebase-admin/app';
 import { getAuth } from 'firebase-admin/auth';
 import { getFirestore } from 'firebase-admin/firestore';
-import { getMessaging } from 'firebase-admin/messaging';
 import { OAuth2Client } from 'google-auth-library';
 import { ownerIdentity } from './owner-identity.js';
 import { app } from './http.js';
@@ -10,16 +9,13 @@ import { Relay } from './relay.js';
 import { RecoveryGate } from './recovery-gate.js';
 import { securityLedger } from './security-ledger.js';
 import { ensure } from './model.js';
+import { FcmNotifier } from './fcm.js';
 
 const credential = applicationDefault();
-initializeApp({ credential, projectId: process.env.GOOGLE_CLOUD_PROJECT });
+const firebase = initializeApp({ credential, projectId: process.env.GOOGLE_CLOUD_PROJECT });
 const auth = getAuth(), oauth = new OAuth2Client();
-const relay = new Relay(getFirestore(), async (token, requestId, ttl, kind) => {
-  await getMessaging().send({ token, data: { requestId, ...(kind ? { kind } : {}) }, android: { priority: 'high', ttl, collapseKey: requestId }, apns: {
-    headers: { 'apns-push-type': 'alert', 'apns-priority': '10', 'apns-expiration': String(Math.floor((Date.now() + ttl) / 1000)), 'apns-collapse-id': requestId },
-    payload: { aps: { alert: { title: 'Request Relay', body: 'Open Inbox to review a request.' }, sound: 'default' } },
-  } });
-}, Date.now, taskWakeup(), securityLedger(process.env.SECURITY_LEDGER_BUCKET));
+const notifier = new FcmNotifier({ projectId: firebase.options.projectId });
+const relay = new Relay(getFirestore(), notifier.notify, Date.now, taskWakeup(), securityLedger(process.env.SECURITY_LEDGER_BUCKET));
 const gate = new RecoveryGate(getFirestore(), () => credential.getAccessToken());
 const server = app(relay, {
   assertServing: () => gate.assertServing(),
@@ -44,4 +40,4 @@ const server = app(relay, {
   trustProxyHops: 1,
   origins: (process.env.ALLOWED_ORIGINS ?? '').split(',').filter(Boolean),
 }).listen(Number(process.env.PORT ?? 8080), '0.0.0.0', () => console.info('sms_relay_listening'));
-process.on('SIGTERM', () => { gate.close(); server.close(); });
+process.on('SIGTERM', () => { notifier.close(); gate.close(); server.close(); });
