@@ -4,6 +4,7 @@ import android.content.Context
 import android.os.Build
 import androidx.core.content.edit
 import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.auth.FirebaseAuthInvalidUserException
 import com.google.firebase.auth.GoogleAuthProvider
 import com.google.firebase.messaging.FirebaseMessaging
 import kotlinx.coroutines.Dispatchers
@@ -112,11 +113,17 @@ class RelayRepository(private val context: Context) {
     suspend fun unregister(id: String = deviceId) { call("DELETE", "/v1/devices/$id"); if (id == deviceId) { reset(); autoConnect = false } }
     suspend fun signOut(owner: String) {
         check(owner.isNotBlank() && ownerId == owner) { "Sign in to the same account before signing out." }
+        val user = checkNotNull(auth.currentUser)
+        var sessionUnavailable = false
         disconnectBeforeSignOut(prefs.getString("id", null), unregister = { id ->
             call("DELETE", "/v1/devices/$id", expectedOwner = owner)
         }, finish = {
-            check(ownerId == owner) { "The signed-in account changed." }
-            auth.signOut(); reset(); autoConnect = false
+            finishSignOutForOwner(owner, auth.currentUser?.uid, sessionUnavailable) {
+                auth.signOut(); reset(); autoConnect = false
+            }
+        }, sessionUnavailable = { failure ->
+            unavailableSignOutSession(failure, { it is FirebaseAuthInvalidUserException }, { user.reload().await() })
+                .also { sessionUnavailable = it }
         })
     }
     suspend fun deleteAccount(expectedOwner: String) {

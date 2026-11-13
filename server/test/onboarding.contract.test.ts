@@ -28,9 +28,10 @@ process.env.OAUTH_CODE_KEY = '64'.repeat(32); // Isolated contract key, never us
 const firebase = initializeApp({ projectId: 'demo-sms-relay' }, 'onboarding-contract'), db = getFirestore(firebase);
 let time = 1_800_000_000_000;
 const uid = 'onboarding-operator', recipient = 'onboarding-recipient';
+const missingIdentities = new Set<string>();
 const secrets = (prefix: string) => `${prefix}_${randomBytes(32).toString('base64url')}`;
 const relay = new Relay(db, async () => {}, () => time), native = new RustRelay(db, async () => {}, () => time);
-const options: HttpOptions = { verifyOwner: async t => { assert.ok(t.startsWith('owner:') || t.startsWith('owner64:')); return { uid: t.startsWith('owner64:') ? Buffer.from(t.slice(8),'base64url').toString('utf8') : t.slice(6), authTime: time / 1000 }; }, verifyScheduler: async () => {}, deleteIdentity: async () => {}, publicUrl: 'https://relay.example', appleAppIds: ['ABCDEFGHIJ.com.bluegrain.smsrelay','invalid'], firebaseWebConfig: { apiKey: 'public', authDomain: 'demo-sms-relay.firebaseapp.com', projectId: 'demo-sms-relay', appId: 'public' } };
+const options: HttpOptions = { verifyOwner: async t => { assert.ok(t.startsWith('owner:') || t.startsWith('owner64:')); const uid = t.startsWith('owner64:') ? Buffer.from(t.slice(8),'base64url').toString('utf8') : t.slice(6); if (missingIdentities.has(uid)) throw Object.assign(Error('No user record'), {code:'auth/user-not-found'}); return { uid, authTime: time / 1000 }; }, verifyScheduler: async () => {}, deleteIdentity: async () => {}, publicUrl: 'https://relay.example', appleAppIds: ['ABCDEFGHIJ.com.bluegrain.smsrelay','invalid'], firebaseWebConfig: { apiKey: 'public', authDomain: 'demo-sms-relay.firebaseapp.com', projectId: 'demo-sms-relay', appId: 'public' } };
 let servers: Server[] = [], bases: string[] = [];
 const contractFetch: typeof fetch = (input, init) => fetch(input, { ...init, signal: init?.signal ? AbortSignal.any([init.signal, AbortSignal.timeout(10000)]) : AbortSignal.timeout(10000) });
 async function call(runtime: number, path: string, token: string, body?: unknown, method = body === undefined ? 'GET' : 'POST', expected = 200) {
@@ -83,6 +84,16 @@ test('contract HTTP deadline aborts an unfinished response body', {timeout:15000
   } finally { stalled.closeAllConnections(); await new Promise<void>(resolve => stalled.close(() => resolve())); }
 });
 for (const runtime of [0, 1]) {
+  test(`runtime ${runtime}: deleted identity rejects disconnect before account tombstone lookup`, async () => {
+    const deletedOwner = `deleted-signout-owner-${runtime}`;
+    const account = db.collection('accounts').doc(deletedOwner);
+    await account.set({deleting:true});
+    try {
+      assert.equal((await call(runtime, '/v1/devices/deleted-installation', owner(deletedOwner), undefined, 'DELETE', 403)).error, 'account_deleted');
+      missingIdentities.add(deletedOwner);
+      assert.equal((await call(runtime, '/v1/devices/deleted-installation', owner(deletedOwner), undefined, 'DELETE', 401)).error, 'invalid_owner_session');
+    } finally { missingIdentities.delete(deletedOwner); await account.delete(); }
+  });
   test(`runtime ${runtime}: approved registration recovers after session retention without new consent or duplicate service`, async () => {
     for (const self of [false, true]) {
       const s = await register(runtime, self);
