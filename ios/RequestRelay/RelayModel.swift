@@ -125,6 +125,8 @@ final class RelayModel: ObservableObject {
     private var authListener: AuthStateDidChangeListenerHandle?
     private var owner: String?
     private var drafts: [String: ResponseDraft] = [:]
+    private var closedResponses: [String: String] = [:]
+    private var responseLoads: [String: UUID] = [:]
     private var expiries: [String: Double] = [:]
     private var formDraftIDs = Set<String>()
     init(api: (any RelayCalling)? = nil) {
@@ -148,20 +150,21 @@ final class RelayModel: ObservableObject {
     }
     func closeDestination() { destination = nil; UserDefaults.standard.removeObject(forKey: "public-destination") }
     func draft(_ id: String, expiresAt: Double) -> ResponseDraft {
+        if let draft = drafts[id] { expiries[id] = expiresAt; return draft }
+        if let status = closedResponses[id] { let draft = ResponseDraft(); draft.close(status); return draft }
         expiries[id] = expiresAt
-        if let draft = drafts[id] { return draft }
         let draft = ResponseDraft(); drafts[id] = draft; return draft
     }
     func formDraft(_ request: FormRequest) -> ResponseDraft {
         let value = draft(request.id, expiresAt: request.expiresAt)
-        formDraftIDs.insert(request.id)
+        if value.closedStatus == nil { formDraftIDs.insert(request.id) }
         if request.status != "pending" { discard(request.id, status: request.status) }
         return value
     }
     func prepareFormResponse(_ request: FormRequest, observations: FormOpeningObservations, fromNotification: Bool, receive: (ResponseDraft) -> Void = { _ in }, observe: (String) async throws -> Void) async throws -> ResponseDraft {
         let value = formDraft(request)
         receive(value)
-        guard request.status == "pending" else { return value }
+        guard request.status == "pending", value.closedStatus == nil else { return value }
         try await observations.report(fromNotification: fromNotification, observe: observe)
         return value
     }
@@ -172,6 +175,7 @@ final class RelayModel: ObservableObject {
     }
     func receiveSMS(_ request: SMSRequest) {
         // Only active-request discovery can replace another request's draft.
+        if request.active, closedResponses[request.id] != nil { return }
         if sms?.id == request.id { sms = request }
         if !request.active { discard(request.id, status: request.status) }
         else if (request.manualEntryDeadline ?? request.expiresAt) <= Date().timeIntervalSince1970 * 1000 { discard(request.id, status: "expired") }
@@ -184,8 +188,12 @@ final class RelayModel: ObservableObject {
             if let request = try? await fetch(id), isCurrent(), request.status != "pending", drafts[id] === retained { discard(id, status: request.status) }
         }
     }
-    func discard(_ id: String, status: String = "closed") { drafts[id]?.close(status); drafts.removeValue(forKey: id); expiries.removeValue(forKey: id); formDraftIDs.remove(id) }
-    func clearResponses() { drafts.values.forEach { $0.close() }; drafts = [:]; expiries = [:]; formDraftIDs = [] }
+    func discard(_ id: String, status: String = "closed") {
+        if closedResponses[id] == nil || closedResponses[id] == "closed" { closedResponses[id] = status }
+        drafts[id]?.close(closedResponses[id] ?? status)
+        drafts.removeValue(forKey: id); expiries.removeValue(forKey: id); formDraftIDs.remove(id); responseLoads.removeValue(forKey: id)
+    }
+    func clearResponses() { drafts.values.forEach { $0.close() }; drafts = [:]; closedResponses = [:]; responseLoads = [:]; expiries = [:]; formDraftIDs = [] }
     func expireDrafts() { for (id, expiry) in expiries where expiry <= Date().timeIntervalSince1970 * 1000 { discard(id, status: "expired") } }
     @discardableResult
     func reportResponseFailure(_ failure: Error, fallback: String) -> Bool {
@@ -302,13 +310,40 @@ final class RelayModel: ObservableObject {
         }
         await refresh()
     }
-    func loadSMS(_ id: String) async throws -> SMSRequest {
-        var request: SMSRequest = try await api.call("/v1/devices/\(deviceID)/requests/\(id)")
-        if request.status == "pending_phone" {
-            request = try await api.call("/v1/devices/\(deviceID)/requests/\(id)/events", method: "POST", body: ["status":"ready","mode":"manual"])
+    private func beginResponseLoad(_ id: String) -> () -> Bool {
+        let token = UUID(), installation = deviceID, revision = registrationRevision, authenticated = signedIn
+        responseLoads[id] = token
+        return { !Task.isCancelled && self.responseLoads[id] == token && self.deviceID == installation && self.registrationRevision == revision && self.signedIn == authenticated }
+    }
+    func loadSMS(_ id: String) async throws -> (request: SMSRequest, draft: ResponseDraft) {
+        let isCurrent = beginResponseLoad(id), installation = deviceID
+        do {
+            var request: SMSRequest = try await api.call("/v1/devices/\(installation)/requests/\(id)")
+            guard isCurrent() else { throw CancellationError() }
+            if request.status == "pending_phone", closedResponses[id] == nil {
+                request = try await api.call("/v1/devices/\(installation)/requests/\(id)/events", method: "POST", body: ["status":"ready","mode":"manual"])
+                guard isCurrent() else { throw CancellationError() }
+            }
+            receiveSMS(request)
+            return (request, draft(id, expiresAt: request.manualEntryDeadline ?? request.expiresAt))
+        } catch {
+            guard isCurrent() else { throw CancellationError() }
+            throw error
         }
-        receiveSMS(request)
-        return request
+    }
+    func loadFormResponse(_ id: String, observations: FormOpeningObservations, fromNotification: Bool, receive: (FormRequest, ResponseDraft) -> Void) async throws {
+        let isCurrent = beginResponseLoad(id), installation = deviceID
+        do {
+            let request: FormRequest = try await api.call("/v2/devices/\(installation)/requests/\(id)")
+            guard isCurrent() else { throw CancellationError() }
+            _ = try await prepareFormResponse(request, observations: observations, fromNotification: fromNotification, receive: { receive(request, $0) }) { event in
+                guard isCurrent() else { throw CancellationError() }
+                let _: EmptyReply = try await self.api.call("/v2/devices/\(installation)/requests/\(id)/events", method: "POST", body: ["type":event])
+            }
+        } catch {
+            guard isCurrent() else { throw CancellationError() }
+            throw error
+        }
     }
     @discardableResult
     func submitSMS(_ request: SMSRequest, code: String, deny: Bool = false) async throws -> SMSRequest {

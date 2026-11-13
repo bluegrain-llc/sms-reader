@@ -73,9 +73,9 @@ struct TerminalSubmissionHarness: View {
             if external { Button("Cancel request on relay") { model.discard(form ? "fixture-form" : "fixture-code", status: "cancelled") } }
             if api.refreshPending {
                 Text("Refresh is waiting").accessibilityIdentifier("terminal-refresh-pending")
-                Button("Finish refresh") { api.releaseRefresh = true }
+                Button("Finish refresh") { api.finishRefresh() }
             }
-        }.environmentObject(model)
+        }.environmentObject(model).onDisappear { api.finishRefresh() }
     }
 }
 
@@ -83,15 +83,23 @@ struct TerminalSubmissionHarness: View {
 private final class TerminalSubmissionAPI: ObservableObject, RelayCalling {
     let origin = URL(string: "https://relay.example")!
     @Published private(set) var refreshPending = false
-    var releaseRefresh = false
+    private var releaseRefresh = false
+    private var refreshContinuation: CheckedContinuation<Void, Never>?
+    func finishRefresh() {
+        releaseRefresh = true
+        refreshContinuation?.resume(); refreshContinuation = nil
+    }
     func call<T: Decodable>(_ path: String, method: String, body: [String: Any]?) async throws -> T {
         if path == "/v1/devices", method == "GET" {
             refreshPending = true
             defer { refreshPending = false }
-            for _ in 0..<300 {
-                if releaseRefresh { break }
-                try await Task.sleep(for: .milliseconds(100))
-            }
+            await withTaskCancellationHandler {
+                await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                    if releaseRefresh || Task.isCancelled { continuation.resume() }
+                    else { refreshContinuation = continuation }
+                }
+            } onCancel: { Task { @MainActor in self.finishRefresh() } }
+            try Task.checkCancellation()
             throw RelayFailure.unavailable
         }
         guard method == "POST" else { throw RelayFailure.unavailable }

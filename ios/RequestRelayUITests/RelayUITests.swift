@@ -55,7 +55,9 @@ extension RelayUITests {
 extension RelayUITests {
     func testTerminalCodeSubmissionClosesEditorWithoutPolling() {
         continueAfterFailure = false
+        executionTimeAllowance = 60
         let app = XCUIApplication(); app.launchArguments = ["--ui-contract"]; app.launch()
+        defer { app.terminate() }
         app.buttons["Code submission without polling"].tap()
         let input = app.textFields["code-input"]
         XCTAssertTrue(input.waitForExistence(timeout: 5)); input.tap(); input.typeText("123456")
@@ -63,11 +65,14 @@ extension RelayUITests {
         XCTAssertTrue(app.staticTexts["terminal-refresh-pending"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["This request is completed."].waitForExistence(timeout: 5))
         XCTAssertFalse(input.exists); XCTAssertFalse(app.buttons["send-code"].exists); XCTAssertFalse(app.buttons["Decline"].exists)
+        XCTAssertTrue(app.staticTexts["terminal-refresh-pending"].exists)
         app.buttons["Finish refresh"].tap()
     }
     func testTerminalFormSubmissionClosesEditorWithoutPolling() {
         continueAfterFailure = false
+        executionTimeAllowance = 60
         let app = XCUIApplication(); app.launchArguments = ["--ui-contract"]; app.launch()
+        defer { app.terminate() }
         app.buttons["Form submission without polling"].tap()
         let input = app.textFields["Answer"]
         XCTAssertTrue(input.waitForExistence(timeout: 5)); input.tap(); input.typeText("Synthetic answer")
@@ -78,6 +83,7 @@ extension RelayUITests {
         XCTAssertTrue(app.staticTexts["This request is submitted."].waitForExistence(timeout: 5))
         XCTAssertFalse(input.exists); XCTAssertFalse(app.buttons["Edit response"].exists); XCTAssertFalse(app.buttons["review-response"].exists)
         XCTAssertFalse(app.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", "Synthetic answer")).firstMatch.exists)
+        XCTAssertTrue(app.staticTexts["terminal-refresh-pending"].exists)
         app.buttons["Finish refresh"].tap()
     }
     func testExternalCancellationClosesBothMountedEditorsWithoutPolling() {

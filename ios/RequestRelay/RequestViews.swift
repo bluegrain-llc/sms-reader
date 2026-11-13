@@ -52,9 +52,8 @@ struct CodeResponse: View {
             failed = false
             while !Task.isCancelled {
                 do {
-                    let result = try await model.loadSMS(id); request = result
-                    draft = model.draft(id, expiresAt: result.manualEntryDeadline ?? result.expiresAt)
-                    if !result.active { draft?.clear(); break }
+                    let result = try await model.loadSMS(id); request = result.request; draft = result.draft
+                    if !result.request.active || result.draft.closedStatus != nil { break }
                 } catch { failed = model.reportResponseFailure(error, fallback: "Could not open the request. Try again."); break }
                 try? await Task.sleep(for: .seconds(3))
             }
@@ -111,11 +110,10 @@ struct FormResponse: View {
             failed = false
             while !Task.isCancelled {
                 do {
-                    let result: FormRequest = try await model.api.call("/v2/devices/\(model.deviceID)/requests/\(id)")
-                    draft = try await model.prepareFormResponse(result, observations: observations, fromNotification: fromNotification, receive: { value in request = result; draft = value }) { event in
-                        let _: EmptyReply = try await model.api.call("/v2/devices/\(model.deviceID)/requests/\(id)/events", method: "POST", body: ["type":event])
+                    try await model.loadFormResponse(id, observations: observations, fromNotification: fromNotification) { result, value in
+                        request = result; draft = value
                     }
-                    if result.status != "pending" { break }
+                    if request?.status != "pending" || draft?.closedStatus != nil { break }
                 } catch { failed = model.reportResponseFailure(error, fallback: "Could not refresh the request. Try again."); break }
                 try? await Task.sleep(for: .seconds(3))
             }

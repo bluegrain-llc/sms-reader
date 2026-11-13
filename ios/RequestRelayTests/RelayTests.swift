@@ -113,6 +113,77 @@ extension RelayTests {
         XCTAssertFalse(reopened === account); XCTAssertNil(reopened.closedStatus)
         model.clearResponses()
     }
+    @MainActor func testDelayedDetailLoadsCannotReopenClosedOrReplacedResponseOwnership() async throws {
+        let key = "installation:signed-out", original = try PrivateStorage.read("installation:signed-out")
+        defer { if let original { try? PrivateStorage.write(key, original) } else { PrivateStorage.remove(key) } }
+        for form in [false, true] {
+            for transition in ["submission", "discard", "account-clear", "newer-load", "task-cancel"] {
+                let gate = SuspendedRelayReply(), api = FixtureRelayAPI(), model = RelayModel(api: api)
+                model.signedIn = true
+                let sms = SMSRequest(requestId: "sms", callerName: "Agent", title: "Code", purpose: "Test", status: "ready", expiresAt: 2000000000000)
+                let request = formState("pending"), id = form ? request.id : sms.id
+                let retained = form ? model.formDraft(request) : model.draft(id, expiresAt: sms.expiresAt)
+                retained.code = "123456"; retained.values = ["answer": .text("private")]
+                let pending: Data
+                if form { pending = try JSONEncoder().encode(request) }
+                else { pending = try JSONEncoder().encode(sms) }
+                var detailReads = 0, installed = false, observations = 0
+                api.respond = { path, method, _ in
+                    if method == "GET", path.hasSuffix("/requests/\(id)") {
+                        detailReads += 1
+                        if detailReads == 1 { return try await gate.reply() }
+                        return pending
+                    }
+                    if path == "/v1/devices" { throw RelayFailure.unavailable }
+                    if form, path.hasSuffix("/events") { observations += 1; return Data("{}".utf8) }
+                    XCTAssertEqual(method, "POST")
+                    if form { return try JSONEncoder().encode(self.formState("submitted")) }
+                    return try JSONEncoder().encode(SMSRequest(requestId: id, callerName: "Agent", title: "Code", purpose: "Test", status: "completed", expiresAt: sms.expiresAt))
+                }
+                let load = Task {
+                    do {
+                        if form {
+                            try await model.loadFormResponse(id, observations: FormOpeningObservations(), fromNotification: true) { _, _ in installed = true }
+                        } else { _ = try await model.loadSMS(id); installed = true }
+                        return false
+                    } catch is CancellationError { return true }
+                    catch { XCTFail("Expected obsolete detail load cancellation: \(error)"); return false }
+                }
+                defer { gate.resume(.failure(CancellationError())); load.cancel(); model.clearResponses() }
+                await fulfillment(of: [gate.entered], timeout: 2)
+                switch transition {
+                case "submission":
+                    if form { _ = try await model.submitForm(request, action: .init(id: "send", label: "Send", type: "submit"), draft: retained) }
+                    else { _ = try await model.submitSMS(sms, code: retained.code) }
+                case "discard": model.discard(id, status: "cancelled")
+                case "account-clear": model.clearResponses()
+                case "newer-load":
+                    if form { try await model.loadFormResponse(id, observations: FormOpeningObservations(), fromNotification: false) { _, _ in } }
+                    else { _ = try await model.loadSMS(id) }
+                default: load.cancel()
+                }
+                let acceptedObservations = observations
+                gate.resume(.success(pending))
+                let cancelled = await load.value
+                XCTAssertTrue(cancelled, "\(form): \(transition)")
+                XCTAssertFalse(installed, "\(form): \(transition)")
+                XCTAssertEqual(observations, acceptedObservations)
+                if ["submission", "discard"].contains(transition) {
+                    let expected = transition == "discard" ? "cancelled" : form ? "submitted" : "completed"
+                    XCTAssertEqual(retained.closedStatus, expected)
+                    XCTAssertTrue(retained.code.isEmpty); XCTAssertTrue(retained.values.isEmpty)
+                    if form {
+                        try await model.loadFormResponse(id, observations: FormOpeningObservations(), fromNotification: true) { _, draft in XCTAssertEqual(draft.closedStatus, expected) }
+                    } else { let result = try await model.loadSMS(id); XCTAssertEqual(result.draft.closedStatus, expected) }
+                    XCTAssertEqual(observations, acceptedObservations)
+                    XCTAssertNil(model.draft("different-request", expiresAt: sms.expiresAt).closedStatus)
+                } else if transition == "account-clear" {
+                    XCTAssertEqual(retained.closedStatus, "closed")
+                    XCTAssertNil(model.draft(id, expiresAt: sms.expiresAt).closedStatus)
+                } else { XCTAssertNil(retained.closedStatus); XCTAssertEqual(retained.code, "123456") }
+            }
+        }
+    }
     @MainActor func testSMSSubmissionReportsTheReturnedTerminalOutcome() async throws {
         let key = "installation:signed-out", original = try PrivateStorage.read("installation:signed-out")
         defer { if let original { try? PrivateStorage.write(key, original) } else { PrivateStorage.remove(key) } }
@@ -208,6 +279,7 @@ extension RelayTests {
         XCTAssertTrue(retained.values.isEmpty)
         XCTAssertEqual(retained.closedStatus, "completed")
         XCTAssertFalse(model.formDraft(pending) === retained)
+        XCTAssertEqual(model.formDraft(pending).closedStatus, "completed")
         model.clearResponses()
     }
     @MainActor func testTerminalFormLoadClearsBeforeAnyOpeningObservation() async throws {
@@ -220,6 +292,8 @@ extension RelayTests {
         }
         XCTAssertTrue(terminal === retained); XCTAssertTrue(terminal.values.isEmpty); XCTAssertTrue(terminal.numberInputs.isEmpty)
         XCTAssertFalse(model.formDraft(formState("pending")) === retained)
+        XCTAssertEqual(model.formDraft(formState("pending")).closedStatus, "cancelled")
+        model.clearResponses()
         var observations: [String] = []
         var received = false
         do {
@@ -315,6 +389,7 @@ extension RelayTests {
         XCTAssertTrue(first.code.isEmpty)
         XCTAssertEqual(first.closedStatus, "closed")
         XCTAssertFalse(model.draft("first", expiresAt: 2000000000000) === first)
+        XCTAssertEqual(model.draft("first", expiresAt: 2000000000000).closedStatus, "closed")
         let second = model.draft("second", expiresAt: 2000000000000); second.code = "654321"
         model.updateSMS(request("second")); XCTAssertEqual(second.code, "654321")
         model.updateSMS(nil); XCTAssertTrue(second.code.isEmpty)
