@@ -49,6 +49,12 @@ func (c Client) Invoke(ctx context.Context, operation string, input any, connect
 	}
 	return result.Value, err
 }
+func (c Client) ImportTicket(ctx context.Context, input any, connectionID string) (json.RawMessage, error) {
+	return c.Invoke(ctx, "importTicket", input, connectionID)
+}
+func (c Client) ExportTicket(ctx context.Context, input any, connectionID string) (json.RawMessage, error) {
+	return c.Invoke(ctx, "exportTicket", input, connectionID)
+}
 func (c Client) StartRegistration(ctx context.Context, input any, connectionID string) (json.RawMessage, error) {
 	return c.Invoke(ctx, "startRegistration", input, connectionID)
 }

@@ -912,6 +912,13 @@ async fn route(s: App, request: Request) -> Result<Response> {
             )
                 .into_response());
         }
+        ("GET", ["ticket-browser.js"]) => {
+            return Ok((
+                [("Content-Type", "application/javascript")],
+                include_str!("../../server/public/ticket-browser.js"),
+            )
+                .into_response());
+        }
         ("GET", ["onboarding.js"]) => {
             return Ok((
                 [("Content-Type", "application/javascript")],

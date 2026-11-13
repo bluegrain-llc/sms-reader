@@ -43,7 +43,7 @@ class OnboardingScreenTest {
         compose.onNodeWithText("Also allow this service to send requests to me").assertDoesNotExist()
         compose.onNodeWithText("Information and decisions through forms").assertDoesNotExist()
         assertTrue(decisions.isEmpty())
-        compose.onNode(hasText("Register service") and hasClickAction()).performScrollTo().performClick()
+        compose.onNode(hasText("Register agent") and hasClickAction()).performScrollTo().performClick()
         compose.onNodeWithText("Service registered. Return to the CLI to finish setup. A receiving phone is not required.").assertIsDisplayed()
         assertEquals(1, decisions.size)
         assertFalse(decisions.single().getBoolean("selfAccess"))

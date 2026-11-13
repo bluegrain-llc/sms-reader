@@ -6,7 +6,8 @@ let server: Server, origin: string;
 const config = { apiKey: 'public', authDomain: 'demo.firebaseapp.com', projectId: 'demo', appId: 'public' };
 test.beforeAll(async () => {
   server = createServer((req,res) => {
-    if (req.url === '/owned-services.js') { res.setHeader('Content-Type','application/javascript'); res.end(readFileSync(new URL('../public/owned-services.js',import.meta.url))); }
+    if (req.url === '/ticket-browser.js') { res.setHeader('Content-Type','application/javascript'); res.end(readFileSync(new URL('../public/ticket-browser.js',import.meta.url))); }
+    else if (req.url === '/owned-services.js') { res.setHeader('Content-Type','application/javascript'); res.end(readFileSync(new URL('../public/owned-services.js',import.meta.url))); }
     else if (req.url?.startsWith('/owned-services')) { res.setHeader('Content-Type','text/html'); res.end(readFileSync(new URL('../public/owned-services.html',import.meta.url),'utf8').replaceAll('__NONCE__','testnonce').replace('__CONFIG__',JSON.stringify(config))); }
     else if (req.url === '/onboarding-qr.js') { res.setHeader('Content-Type','application/javascript'); res.end(readFileSync(new URL('../public/onboarding-qr.js',import.meta.url))); }
     else if (req.url === '/onboarding.js') { res.setHeader('Content-Type','application/javascript'); res.end(readFileSync(new URL('../public/onboarding.js',import.meta.url))); }
@@ -14,9 +15,9 @@ test.beforeAll(async () => {
   }).listen(0,'127.0.0.1'); await once(server,'listening'); origin = `http://127.0.0.1:${(server.address() as {port:number}).port}`;
 });
 test.afterAll(async () => { server.closeAllConnections(); await new Promise<void>(resolve=>server.close(()=>resolve())); });
-test.beforeEach(async ({ page }) => {
-  await page.route('https://www.gstatic.com/firebasejs/**/firebase-app.js',r=>r.fulfill({contentType:'application/javascript',body:'export const initializeApp=()=>({});'}));
-  await page.route('https://www.gstatic.com/firebasejs/**/firebase-auth.js',r=>r.fulfill({contentType:'application/javascript',body:`const user={email:'my-own-account@example.test',getIdToken:async()=> 'owner-session'}; const auth={currentUser:user};export const getAuth=()=>auth;export class GoogleAuthProvider{};export const signInWithPopup=async()=>({});export const signInWithRedirect=async()=>({});export const getRedirectResult=async()=>({});export const onAuthStateChanged=(a,fn)=>{queueMicrotask(()=>fn(user));};export const setPersistence=async()=>{};export const browserLocalPersistence={};`}));
+test.beforeEach(async ({ context }) => {
+  await context.route('https://www.gstatic.com/firebasejs/**/firebase-app.js',r=>r.fulfill({contentType:'application/javascript',body:'export const initializeApp=()=>({});'}));
+  await context.route('https://www.gstatic.com/firebasejs/**/firebase-auth.js',r=>r.fulfill({contentType:'application/javascript',body:`const user={uid:'browser-owner',email:'my-own-account@example.test',getIdToken:async()=> 'owner-session'}; const auth={currentUser:user};export const getAuth=()=>auth;export const signOut=async()=>{};export class GoogleAuthProvider{};export class OAuthProvider{constructor(id){this.providerId=id;}};export const linkWithPopup=async()=>({user});export const signInWithPopup=async()=>({});export const signInWithRedirect=async()=>({});export const getRedirectResult=async()=>({});export const onAuthStateChanged=(a,fn)=>{queueMicrotask(()=>fn(user));};export const setPersistence=async()=>{};export const browserLocalPersistence={};`}));
 });
 const review = { sessionId:'public-session', serviceId:'public-service', name:'My personal agent', purpose:'Ask for decisions', capabilities:['forms','sms'], status:'pending', expiresAt:Date.now()+600000, expiresInDays:null, comparisonCode:'123456',connectionId:null };
 test('registration offers no owner-access control, needs one confirmation, no phone setup', async ({page})=>{
@@ -169,4 +170,135 @@ test('cancelled and disconnected permanent links allow a fresh explicit confirma
   await page.reload();await expect(page.locator('#review')).toBeVisible();expect(attempts[1]).not.toBe(attempts[0]);expect(approvals).toBe(0);
   await page.locator('#confirm').click();await expect(page.locator('#status')).toContainText('Setup complete');
   revoked=true;await page.reload();await expect(page.locator('#review')).toBeVisible();expect(attempts[2]).not.toBe(attempts[1]);expect(approvals).toBe(1);
+});
+
+test('manual creation retains one private ticket across interrupted provisioning and reload',async({page})=>{
+  const attempts:any[]=[];let fail=true;
+  await page.route('**/v3/services',async r=>{
+    if(r.request().method()==='POST'){
+      const body=r.request().postDataJSON();attempts.push(body);
+      expect(body).not.toHaveProperty('serviceCredential');expect(body.deliveryPublicKey).not.toHaveProperty('d');
+      await r.fulfill(fail?{status:503,json:{error:'unavailable'}}:{status:201,json:{serviceId:'new-agent'}});
+    } else await r.fulfill({json:[]});
+  });
+  await page.goto(origin+'/owned-services');await expect(page.locator('#list')).toBeVisible();
+  await page.locator('#create-agent').click();await page.locator('#agent-name').fill('Portable agent');await page.locator('#agent-purpose').fill('Ask for decisions');
+  await page.getByRole('button',{name:'Create agent and save ticket',exact:true}).click();await expect(page.locator('#retry')).toBeVisible();
+  await page.reload();await expect(page.locator('#save-ticket')).toBeVisible();fail=false;
+  const download=page.waitForEvent('download');await page.locator('#save-ticket').click();await download;
+  expect(attempts).toHaveLength(2);expect(attempts[0]).toEqual(attempts[1]);
+  await expect(page.locator('body')).not.toContainText('smss_');await expect(page.locator('body')).not.toContainText('privateKey');
+});
+
+test('a failed private storage write is retried before any provisioning request',async({page})=>{
+  await page.addInitScript(()=>{
+    const put=IDBObjectStore.prototype.put;let fail=true;
+    IDBObjectStore.prototype.put=function(this:IDBObjectStore,value:unknown,key?:IDBValidKey){
+      if(fail){fail=false;throw new DOMException('Synthetic storage failure','QuotaExceededError');}
+      return key===undefined ? put.call(this,value) : put.call(this,value,key);
+    };
+  });
+  let provisions=0;
+  await page.route('**/v3/services',async r=>{
+    if(r.request().method()==='POST'){provisions++;await r.fulfill({status:201,json:{serviceId:'agent'}});}
+    else await r.fulfill({json:[]});
+  });
+  await page.goto(origin+'/owned-services');await expect(page.locator('#list')).toBeVisible();
+  await page.locator('#create-agent').click();await page.locator('#agent-name').fill('Retry agent');await page.locator('#agent-purpose').fill('Decisions');
+  const submit=page.getByRole('button',{name:'Create agent and save ticket',exact:true});
+  await submit.click();await expect(page.locator('#retry')).toBeVisible();expect(provisions).toBe(0);
+  const download=page.waitForEvent('download');await submit.click();await download;expect(provisions).toBe(1);
+});
+
+test('unavailable private ticket storage preserves existing agent management and prevents provisioning',async({page})=>{
+  await page.addInitScript(()=>{
+    indexedDB.open=()=>{throw new DOMException('Synthetic database failure','SecurityError');};
+  });
+  let active=true,deleted=false,provisions=0,updates=0;
+  await page.route('**/v3/**',async r=>{
+    if(r.request().method()==='POST'){provisions++;await r.fulfill({status:201,json:{serviceId:'new-agent'}});}
+    else if(r.request().method()==='PATCH'){updates++;active=false;await r.fulfill({json:{ok:true}});}
+    else if(r.request().method()==='DELETE'){deleted=true;await r.fulfill({json:{ok:true}});}
+    else await r.fulfill({json:deleted?[]:[{serviceId:'owned',name:'Existing agent',purpose:'Decisions',capabilities:['forms'],active,servicePath:'/services/owned'}]});
+  });
+  await page.goto(origin+'/owned-services');await expect(page.locator('#list')).toBeVisible();
+  await page.locator('#create-agent').click();await page.locator('#agent-name').fill('New agent');await page.locator('#agent-purpose').fill('Decisions');
+  await page.getByRole('button',{name:'Create agent and save ticket',exact:true}).click();
+  await expect(page.locator('#retry')).toBeVisible();expect(provisions).toBe(0);
+  await page.locator('#cancel-create').click();await page.getByRole('button',{name:'Existing agent · Enabled',exact:true}).click();
+  await expect(page.locator('#detail')).toBeVisible();await page.locator('#toggle').click();
+  await expect(page.locator('#toggle')).toHaveText('Enable service');expect(updates).toBe(1);
+  page.once('dialog',dialog=>dialog.accept());await page.locator('#delete').click();
+  await expect(page.locator('#list')).toBeVisible();expect(deleted).toBe(true);expect(provisions).toBe(0);
+});
+
+
+test('two already-open tabs cannot replace another retained private ticket',async({page,context})=>{
+  const declarations:any[]=[];
+  await context.route('**/v3/services',async r=>{
+    if(r.request().method()==='POST'){
+      declarations.push(r.request().postDataJSON());
+      await r.fulfill({status:503,json:{error:'interrupted'}});
+    }else await r.fulfill({json:[]});
+  });
+  const other=await context.newPage();
+  await Promise.all([page.goto(origin+'/owned-services'),other.goto(origin+'/owned-services')]);
+  for(const tab of [page,other])await expect(tab.locator('#list')).toBeVisible();
+  async function create(tab:typeof page,name:string){
+    await tab.locator('#create-agent').click();await tab.locator('#agent-name').fill(name);await tab.locator('#agent-purpose').fill('Decisions');
+    await tab.getByRole('button',{name:'Create agent and save ticket',exact:true}).click();await expect(tab.locator('#retry')).toBeVisible();
+  }
+  await create(page,'First agent');await create(other,'Second agent');
+  expect(declarations).toHaveLength(1);
+  await other.reload();await expect(other.locator('#ticket-state')).toBeVisible();
+  await other.locator('#save-ticket').click();
+  await expect.poll(()=>declarations.length).toBe(2);
+  expect(declarations[1]).toEqual(declarations[0]);
+});
+
+test('a delayed retained-ticket read cannot cross an account change',async({page})=>{
+  await page.route('https://www.gstatic.com/firebasejs/**/firebase-auth.js',r=>r.fulfill({contentType:'application/javascript',body:`
+    const user=uid=>({uid,email:uid+'@example.test',getIdToken:async()=>uid});
+    const auth={currentUser:user('owner-a')};let listener;
+    window.switchRelayOwner=uid=>{auth.currentUser=user(uid);listener(auth.currentUser);};
+    export const getAuth=()=>auth;export const signOut=async()=>{};export class GoogleAuthProvider{};
+    export const signInWithPopup=async()=>({});export const signInWithRedirect=async()=>({});export const getRedirectResult=async()=>({});
+    export const onAuthStateChanged=(a,fn)=>{listener=fn;queueMicrotask(()=>fn(a.currentUser));};export const setPersistence=async()=>{};export const browserLocalPersistence={};
+  `}));
+  await page.route('**/ticket-browser-real.js',r=>r.fulfill({contentType:'application/javascript',body:readFileSync(new URL('../public/ticket-browser.js',import.meta.url),'utf8')}));
+  await page.route('**/ticket-browser.js',r=>r.fulfill({contentType:'application/javascript',body:`
+    import * as real from '/ticket-browser-real.js';
+    export const {createTicket,declaration,downloadTicket}=real;
+    export async function retained(uid,...args){
+      const value=await real.retained(uid,...args);
+      if(args.length===0&&sessionStorage.getItem('gate-owner-reads')){
+        await new Promise(resolve=>{window[uid==='owner-a'?'releaseOwnerA':'releaseOwnerB']=resolve;});
+        if(uid==='owner-a')setTimeout(()=>{window.ownerAReadFlushed=true;},0);
+      }
+      return value;
+    }
+  `}));
+  let ownerBPosts=0;
+  await page.route('**/v3/services',async r=>{
+    if(r.request().method()==='POST'){
+      if(r.request().headers().authorization==='Bearer owner-b')ownerBPosts++;
+      await r.fulfill({status:503,json:{error:'interrupted'}});
+    }else await r.fulfill({json:[]});
+  });
+  await page.goto(origin+'/owned-services');await expect(page.locator('#list')).toBeVisible();
+  await page.locator('#create-agent').click();await page.locator('#agent-name').fill('Owner A agent');await page.locator('#agent-purpose').fill('Decisions');
+  await page.getByRole('button',{name:'Create agent and save ticket',exact:true}).click();await expect(page.locator('#retry')).toBeVisible();
+  await page.evaluate(()=>sessionStorage.setItem('gate-owner-reads','yes'));await page.reload();
+  await page.waitForFunction(()=>typeof (window as any).releaseOwnerA==='function');
+  await page.evaluate(()=>(window as any).switchRelayOwner('owner-b'));
+  await page.waitForFunction(()=>typeof (window as any).releaseOwnerB==='function');
+  await expect(page.locator('#identity')).toContainText('owner-b@example.test');
+  await page.evaluate(()=>(window as any).releaseOwnerA());await page.waitForFunction(()=>(window as any).ownerAReadFlushed);
+  if(await page.locator('#ticket-state').isVisible()){
+    await page.locator('#save-ticket').click();await expect(page.locator('#retry')).toBeVisible();
+  }
+  const ownerBHasTicket=await page.evaluate(async()=>!!await (await import(location.origin+'/ticket-browser-real.js')).retained('owner-b'));
+  await page.evaluate(()=>(window as any).releaseOwnerB());
+  expect(ownerBPosts).toBe(0);expect(ownerBHasTicket).toBe(false);
+  await expect(page.locator('#ticket-state')).toBeHidden();
 });

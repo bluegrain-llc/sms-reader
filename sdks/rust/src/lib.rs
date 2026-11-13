@@ -11,6 +11,8 @@ impl Client {
  let output=child.wait_with_output()?;let result:Value=serde_json::from_slice(&output.stdout)?;
  if result["ok"]!=true{return Err(result["error"].as_str().unwrap_or("relay operation failed").to_owned().into());}Ok(result["value"].clone())
  }
+ pub fn import_ticket(&self,input:Value,connection_id:Option<&str>)->Result<Value,Box<dyn std::error::Error>>{self.invoke("importTicket",input,connection_id)}
+ pub fn export_ticket(&self,input:Value,connection_id:Option<&str>)->Result<Value,Box<dyn std::error::Error>>{self.invoke("exportTicket",input,connection_id)}
  pub fn start_registration(&self,input:Value,connection_id:Option<&str>)->Result<Value,Box<dyn std::error::Error>>{self.invoke("startRegistration",input,connection_id)}
  pub fn poll_registration(&self,input:Value,connection_id:Option<&str>)->Result<Value,Box<dyn std::error::Error>>{self.invoke("pollRegistration",input,connection_id)}
  pub fn wait_for_registration(&self,input:Value,connection_id:Option<&str>)->Result<Value,Box<dyn std::error::Error>>{self.invoke("waitForRegistration",input,connection_id)}

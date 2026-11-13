@@ -1,5 +1,7 @@
 """Software-only onboarding and request client. Never expose lifecycle methods as model tools."""
 import base64
+import copy
+import re
 import hashlib
 import json
 import secrets
@@ -115,6 +117,43 @@ class RelayClient:
             self.sleep(max(1, result.get("interval", 5)))
 
 
+def _validate_ticket(ticket):
+    if not isinstance(ticket, dict) or set(ticket) != {"version", "relayOrigin", "agent", "serviceCredential", "deliveryKeys"} or ticket["version"] != 1:
+        raise ValueError("Invalid session ticket")
+    agent = ticket["agent"]
+    if not isinstance(agent, dict) or set(agent) != {"name", "purpose", "capabilities"} or not isinstance(agent["name"], str) or not 1 <= len(agent["name"].strip()) <= 80 or not isinstance(agent["purpose"], str) or not 1 <= len(agent["purpose"].strip()) <= 240:
+        raise ValueError("Invalid agent declaration")
+    caps = agent["capabilities"]
+    if not isinstance(caps, list) or not 1 <= len(caps) <= 2 or any(c not in ("forms", "sms") for c in caps) or len(set(caps)) != len(caps) or not re.fullmatch(r"smss_[A-Za-z0-9_-]{43}", ticket["serviceCredential"]):
+        raise ValueError("Invalid ticket authority")
+    keys = ticket["deliveryKeys"]
+    if not isinstance(keys, list) or not keys:
+        raise ValueError("Missing delivery keys")
+    ids = set()
+    for key in keys:
+        if not isinstance(key, dict) or set(key) != {"id", "publicKey", "privateKey"}:
+            raise ValueError("Invalid delivery key")
+        pub, private = key["publicKey"], key["privateKey"]
+        if set(pub) != {"kty", "crv", "x", "y"} or set(private) != {"kty", "crv", "x", "y", "d"} or pub["kty"] != "EC" or pub["crv"] != "P-256" or any(private.get(k) != v for k, v in pub.items()):
+            raise ValueError("Invalid delivery key")
+        for value in (pub["x"], pub["y"], private["d"]):
+            if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9_-]{43}", value):
+                raise ValueError("Invalid delivery key")
+        derived = ec.derive_private_key(int.from_bytes(_decode(private["d"]), "big"), ec.SECP256R1()).public_key().public_numbers()
+        canonical = {"kty": "EC", "crv": "P-256", "x": pub["x"], "y": pub["y"]}
+        if derived.x != int.from_bytes(_decode(pub["x"]), "big") or derived.y != int.from_bytes(_decode(pub["y"]), "big") or _hash(_json(canonical)) != key["id"] or key["id"] in ids:
+            raise ValueError("Delivery key binding does not match")
+        ids.add(key["id"])
+
+
+def _verify_ticket(client, ticket):
+    _validate_ticket(ticket)
+    service = client.request("/v3/service", ticket["serviceCredential"])
+    if not service["active"] or any(service[k] != ticket["agent"][k] for k in ("name", "purpose")) or sorted(service["capabilities"]) != sorted(ticket["agent"]["capabilities"]) or service["deliveryKeyId"] not in [k["id"] for k in ticket["deliveryKeys"]]:
+        raise ValueError("Ticket does not match the active agent")
+    return service
+
+
 class ServiceSession:
     def __init__(self, state, storage, **options):
         self.state, self.storage = state, storage
@@ -122,10 +161,31 @@ class ServiceSession:
 
     @classmethod
     def create(cls, base_url, name, purpose, storage, capabilities=None, **options):
+        if storage.load() is not None:
+            raise ValueError("Profile is occupied")
         client = RelayClient(base_url, **options)
-        state = {"version": 1, "baseUrl": client.base_url, "name": name, "purpose": purpose, "capabilities": ["forms"] if capabilities is None else capabilities, "serviceToken": _secret("smss"), "registrationToken": _secret("smsreg"), "keys": [delivery_key()], "connections": {}}
+        state = {"version": 1, "baseUrl": client.base_url, "name": name.strip(), "purpose": purpose.strip(), "capabilities": ["forms"] if capabilities is None else capabilities, "serviceToken": _secret("smss"), "registrationToken": _secret("smsreg"), "keys": [delivery_key()], "connections": {}}
         storage.save(state)
         return cls(state, storage, **options)
+
+    @classmethod
+    def import_ticket(cls, ticket, storage, **options):
+        if storage.load() is not None:
+            raise ValueError("Profile is occupied")
+        _validate_ticket(ticket)
+        client = RelayClient(ticket["relayOrigin"], **options)
+        service = _verify_ticket(client, ticket)
+        state = {"version": 1, "baseUrl": client.base_url, **ticket["agent"], "serviceToken": ticket["serviceCredential"], "keys": copy.deepcopy(ticket["deliveryKeys"]), "connections": {}, "registered": True, "serviceId": service["serviceId"], "servicePath": service["servicePath"]}
+        storage.save(state)
+        return cls(state, storage, **options)
+
+    def export_ticket(self):
+        s = self.state
+        if not s.get("registered") or s.get("nextServiceToken") or s.get("nextKey"):
+            raise ValueError("Complete registration or pending rotation before exporting")
+        ticket = {"version": 1, "relayOrigin": s["baseUrl"], "agent": {"name": s["name"].strip(), "purpose": s["purpose"].strip(), "capabilities": s["capabilities"]}, "serviceCredential": s["serviceToken"], "deliveryKeys": s["keys"]}
+        _verify_ticket(self.client, ticket)
+        return copy.deepcopy(ticket)
 
     @classmethod
     def resume(cls, storage, **options):
@@ -158,6 +218,8 @@ class ServiceSession:
 
     def start_pairing(self, capabilities=None, expires_in_days=None, external_account_ref=None):
         s = self.state
+        if not s.get("registered"):
+            raise ValueError("Complete and save registration before pairing")
         if not s.get("pairingInput"):
             s["pairingInput"] = {"capabilities": s["capabilities"] if capabilities is None else capabilities, "expiresInDays": expires_in_days, "idempotencyKey": str(uuid.uuid4())}
             if external_account_ref:

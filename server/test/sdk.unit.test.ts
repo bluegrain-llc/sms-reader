@@ -92,3 +92,68 @@ test('Python key rotation resumes the saved retirement intent',()=>{
   const program=`import copy\nfrom request_relay import ServiceSession\nclass Store:\n state=None\n def load(self):return copy.deepcopy(self.state)\n def save(self,state):self.state=copy.deepcopy(state)\nstore=Store()\ns=ServiceSession.create('https://relay.example','Agent','Decisions',store)\ndef interrupted(path,token,body,method=None):\n assert store.state['nextRetireKeyId']=='compromised'\n assert body['retireKeyId']=='compromised'\n raise RuntimeError('interrupted')\ns.client.request=interrupted\ntry:\n s.rotate_key('compromised')\n raise AssertionError('interruption expected')\nexcept RuntimeError:pass\nr=ServiceSession.resume(store)\ndef completed(path,token,body,method=None):\n assert body['retireKeyId']=='compromised'\n return {}\nr.client.request=completed\nr.rotate_key()\nassert 'nextKey' not in store.state and 'nextRetireKeyId' not in store.state\nassert len(store.state['keys'])==2\n`;
   const r=spawnSync('python3',['-c',program],{env:{...process.env,PYTHONPATH:new URL('../../sdks/python',import.meta.url).pathname},encoding:'utf8',timeout:10000});assert.equal(r.status,0,r.stderr);
 });
+
+test('Python imports portable JS tickets, persists before pairing, and rejects tampered keys and occupied profiles',async()=>{
+  const key=await deliveryKey(),ticket={version:1,relayOrigin:'https://relay.example',agent:{name:'Agent',purpose:'Decisions',capabilities:['forms']},serviceCredential:credential('smss'),deliveryKeys:[key]};
+  const program=`import copy,json,sys
+import request_relay as relay
+ticket=json.load(sys.stdin)
+class Store:
+ state=None
+ fail=False
+ def load(self):return copy.deepcopy(self.state)
+ def save(self,state):
+  if self.fail:raise RuntimeError('storage unavailable')
+  self.state=copy.deepcopy(state)
+store=Store()
+def request(self,path,token,*args,**kwargs):
+ assert path=='/v3/service' and token==ticket['serviceCredential']
+ return {'serviceId':'agent','name':'Agent','purpose':'Decisions','capabilities':['forms'],'active':True,'deliveryKeyId':ticket['deliveryKeys'][0]['id'],'servicePath':'/services/agent'}
+relay.RelayClient.request=request
+store.fail=True
+try:relay.ServiceSession.import_ticket(ticket,store);raise AssertionError('storage failure ignored')
+except RuntimeError:pass
+assert store.state is None
+store.fail=False
+service=relay.ServiceSession.import_ticket(ticket,store)
+assert store.state['registered'] and store.state['connections']=={}
+assert service.export_ticket()==ticket
+try:relay.ServiceSession.import_ticket(ticket,store);raise AssertionError('occupied profile overwritten')
+except ValueError:pass
+bad=copy.deepcopy(ticket);bad['deliveryKeys'][0]['privateKey']['d']='A'*43
+try:relay.ServiceSession.import_ticket(bad,Store());raise AssertionError('tampered private key accepted')
+except ValueError:pass
+`;
+  const result=spawnSync('python3',['-c',program],{env:{...process.env,PYTHONPATH:new URL('../../sdks/python',import.meta.url).pathname},input:JSON.stringify(ticket),timeout:10000,encoding:'utf8'});
+  assert.equal(result.status,0,result.stderr);assert.equal(result.stdout,'');
+});
+
+test('Python exports legacy whitespace declarations after 100 completed rotations',()=>{
+  const program=`import copy
+import request_relay as relay
+class Store:
+ state=None
+ def load(self):return copy.deepcopy(self.state)
+ def save(self,state):self.state=copy.deepcopy(state)
+store=Store()
+s=relay.ServiceSession.create('https://relay.example','Agent','Decisions',store)
+s.state.update(registered=True,serviceId='agent',servicePath='/services/agent',name=' Agent ',purpose=' Decisions ')
+active=s.state['keys'][0]['id']
+def request(path,token,body=None,method=None):
+ global active
+ if method=='PATCH':
+  active=relay._hash(relay._json(body['deliveryPublicKey']))
+  return {}
+ return {'serviceId':'agent','servicePath':'/services/agent','name':'Agent','purpose':'Decisions','capabilities':['forms'],'active':True,'deliveryKeyId':active}
+s.client.request=request
+assert s.export_ticket()['agent']=={'name':'Agent','purpose':'Decisions','capabilities':['forms']}
+for _ in range(100):s.rotate_key()
+assert len(s.state['keys'])==101
+ticket=s.export_ticket()
+assert len(ticket['deliveryKeys'])==101
+assert len(relay._verify_ticket(s.client,ticket))>0
+assert s.state['name']==' Agent '
+`;
+  const result=spawnSync('python3',['-c',program],{env:{...process.env,PYTHONPATH:new URL('../../sdks/python',import.meta.url).pathname},timeout:15000,encoding:'utf8'});
+  assert.equal(result.status,0,result.stderr);assert.equal(result.stdout,'');
+});

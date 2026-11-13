@@ -1,19 +1,21 @@
 #!/usr/bin/env node
+import { readFile } from 'node:fs/promises';
 import { parseArgs } from 'node:util';
 import { spawn } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 import QRCode from 'qrcode';
-import { PrivateStore } from './store.mjs';
+import { PrivateStore, exportPrivateFile } from './store.mjs';
 import { ServiceSession } from './service.mjs';
 import { credential } from './client.mjs';
 const usage = `relay service register --name "My agent" --relay https://RELAY [--purpose TEXT] [--sms]
 relay service connect | link | hosted-link | manage | deliveries | rotate-credential | rotate-key [--retire-key ID]
+relay service import-ticket --file PATH | export-ticket --file PATH
 relay status | resume
 Use --profile NAME for each service; --store DIR selects private storage. --no-open keeps the browser closed.
 Only public links and status are printed. Use relay-mcp --profile NAME --connection ID for model tools.`;
 export async function main(args = process.argv.slice(2)) {
   const { values: v, positionals: p } = parseArgs({ args, allowPositionals: true, options: {
-    name: { type: 'string' }, purpose: { type: 'string' }, relay: { type: 'string' }, profile: { type: 'string', default: 'default' }, store: { type: 'string' }, sms: { type: 'boolean' }, 'no-open': { type: 'boolean' }, 'new-session': { type: 'boolean' }, 'retire-key': { type: 'string' }, 'external-account-ref': { type: 'string' }, 'expires-in-days': { type: 'string' }, help: { type: 'boolean' }, 'allow-http-loopback': { type: 'boolean' } } });
+    file: { type: 'string' }, name: { type: 'string' }, purpose: { type: 'string' }, relay: { type: 'string' }, profile: { type: 'string', default: 'default' }, store: { type: 'string' }, sms: { type: 'boolean' }, 'no-open': { type: 'boolean' }, 'new-session': { type: 'boolean' }, 'retire-key': { type: 'string' }, 'external-account-ref': { type: 'string' }, 'expires-in-days': { type: 'string' }, help: { type: 'boolean' }, 'allow-http-loopback': { type: 'boolean' } } });
   if (v.help || !p.length) { console.log(usage); return; }
   const store = new PrivateStore(v.store, v.profile), unlock = await store.lock();
   const abort = new AbortController(); const stop = () => abort.abort(); process.once('SIGINT', stop); process.once('SIGTERM', stop);
@@ -23,6 +25,16 @@ export async function main(args = process.argv.slice(2)) {
     const save = async () => store.write(state);
     if (command === 'resume' && state?.nextServiceToken) command = 'rotate-credential';
     else if (command === 'resume' && state?.nextKey) command = 'rotate-key';
+    if (command === 'import-ticket') {
+      if (state) throw Error('This profile is occupied. Choose a different --profile.');
+      if (!v.file) throw Error('Import needs --file PATH.');
+      let ticket;
+      try { ticket = JSON.parse(await readFile(v.file, 'utf8')); }
+      catch (error) { if (error instanceof SyntaxError) throw Error('Invalid session ticket JSON.'); throw error; }
+      const imported = await ServiceSession.importTicket(ticket, store,
+        {signal:abort.signal,allowHttpLoopback:v['allow-http-loopback']});
+      console.log(`Agent imported. ${imported.state.serviceId}`); return;
+    }
     if (command === 'register') {
       if (!state) {
         if (!v.name || !(v.relay || process.env.RELAY_URL)) throw Error('Registration needs --name and --relay.');
@@ -43,7 +55,7 @@ export async function main(args = process.argv.slice(2)) {
     const consume = () => service.consumeDeliveries();
     const registration = async () => {
       const started = await service.startRegistration();
-      await show(started.registrationPath);
+      console.log("Register agent"); await show(started.registrationPath);
       await service.waitForRegistration();
       console.log('Service registered. Permanent connection link:'); await show(state.servicePath);
     };
@@ -55,12 +67,17 @@ export async function main(args = process.argv.slice(2)) {
         options = { capabilities: state.capabilities, expiresInDays: days, externalAccountRef: v['external-account-ref'] };
       }
       const started = v['new-session'] ? await service.restartPairing(options) : await service.startPairing(options);
-      console.log(`Compare code ${started.comparisonCode}`); await show(started.connectionPath);
+      console.log(`Connect to agent · Compare code ${started.comparisonCode}`); await show(started.connectionPath);
       const connectionId = await service.waitForPairing();
       console.log(`Access granted. Connection ${connectionId}`);
       if (state.connections[connectionId]) console.log((await service.connection(connectionId).status()).setup);
     };
-    if (command === 'register' || (command === 'resume' && !state.registered)) await registration();
+    if (command === 'export-ticket') {
+      if (!v.file) throw Error('Export needs --file PATH.');
+      const ticket = await service.exportTicket();
+      await exportPrivateFile(v.file, ticket);
+      console.log('Private session ticket saved. Supply it only to your agent.');
+    } else if (command === 'register' || (command === 'resume' && !state.registered)) await registration();
     else if (command === 'connect' || (command === 'resume' && state.pairingInput)) await pairing();
     else if (command === 'hosted-link') { if (!state.registered) throw Error('Register this service first.'); console.log(new URL(`/mcp/services/${state.serviceId}`, state.baseUrl).href); }
     else if (command === 'manage') await show('/owned-services');

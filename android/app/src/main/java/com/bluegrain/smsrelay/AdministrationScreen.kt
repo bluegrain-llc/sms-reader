@@ -31,6 +31,7 @@ fun AdministrationScreen(
     onApproveForms: (String, Boolean) -> Unit = { _, _ -> },
     onReviewConnection: (String) -> Unit = {}, onConnectionDecision: (String, Boolean) -> Unit = { _, _ -> }, onDismissConnection: () -> Unit = {},
 ) {
+    val context = androidx.compose.ui.platform.LocalContext.current
     val uriHandler = LocalUriHandler.current
     var connectionCode by remember(state.connectionCode) { mutableStateOf(state.connectionCode.orEmpty()) }
     var deletion by remember { mutableStateOf<String?>(null) }
@@ -64,6 +65,7 @@ fun AdministrationScreen(
                 } else {
                     when (section) {
                         AdministrationSection.Access -> {
+                            item { Button(onClick = { context.startActivity(android.content.Intent(context, AgentsActivity::class.java)) }, modifier = Modifier.fillMaxWidth()) { Text("Agents · Create and manage") } }
                             state.connection?.let { connection -> item {
                                 ConnectionPanel(connection, state, onConnectionDecision, onDismissConnection)
                             } }

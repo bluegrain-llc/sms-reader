@@ -10,6 +10,8 @@ public sealed class RelayClient(string? broker=null,string profile="default",str
   var output=await process.StandardOutput.ReadToEndAsync(cancellationToken);await process.WaitForExitAsync(cancellationToken);using var result=JsonDocument.Parse(output);
   if(!result.RootElement.GetProperty("ok").GetBoolean())throw new InvalidOperationException(result.RootElement.GetProperty("error").GetString());return result.RootElement.GetProperty("value").Clone();
  }
+ public Task<JsonElement> ImportTicketAsync(object? input=null,string? connectionId=null,CancellationToken cancellationToken=default)=>InvokeAsync("importTicket",input,connectionId,cancellationToken);
+ public Task<JsonElement> ExportTicketAsync(object? input=null,string? connectionId=null,CancellationToken cancellationToken=default)=>InvokeAsync("exportTicket",input,connectionId,cancellationToken);
  public Task<JsonElement> StartRegistrationAsync(object? input=null,string? connectionId=null,CancellationToken cancellationToken=default)=>InvokeAsync("startRegistration",input,connectionId,cancellationToken);
  public Task<JsonElement> PollRegistrationAsync(object? input=null,string? connectionId=null,CancellationToken cancellationToken=default)=>InvokeAsync("pollRegistration",input,connectionId,cancellationToken);
  public Task<JsonElement> WaitForRegistrationAsync(object? input=null,string? connectionId=null,CancellationToken cancellationToken=default)=>InvokeAsync("waitForRegistration",input,connectionId,cancellationToken);

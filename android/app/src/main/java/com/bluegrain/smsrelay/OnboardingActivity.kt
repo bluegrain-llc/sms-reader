@@ -156,7 +156,7 @@ private fun OnboardingContent(target: OnboardingLink, attempt: String, account: 
     Surface(Modifier.fillMaxSize()) {
         Column(Modifier.fillMaxSize().safeDrawingPadding().verticalScroll(rememberScrollState()).padding(24.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
             TextButton(onClick = onClose) { Text("Close") }
-            Text(if (registration) "Register service" else if (management) "Manage connection" else "Connect to service", style = MaterialTheme.typography.labelLarge)
+            Text(if (registration) "Register agent" else if (management) "Manage connection" else "Connect to agent", style = MaterialTheme.typography.labelLarge)
             Text(session?.optString("name") ?: "Review access", style = MaterialTheme.typography.headlineLarge)
             session?.optString("purpose")?.let { Text(it) }
             if (!account.configured) Text("Configure this relay before signing in.")
@@ -167,6 +167,7 @@ private fun OnboardingContent(target: OnboardingLink, attempt: String, account: 
                 if (oauth && session != null) Text("Requested by ${session.optString("clientName")} (${session.optString("clientOrigin")}). These app details are supplied by the app operator.")
                 session?.nullString("comparisonCode")?.let { Text("Compare code $it", style = MaterialTheme.typography.titleLarge) }
                 if (pending) {
+                    if (registration) Text("Registration gives this agent no account access. Connect separately to share responses.")
                     if (!registration) {
                         Text("Allow requests for", style = MaterialTheme.typography.titleMedium)
                         if ("forms" in caps) Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).toggleable(forms, enabled = !busy, role = Role.Checkbox, onValueChange = { forms = it })) { Checkbox(checked = forms, onCheckedChange = null, enabled = !busy); Text("Information and decisions through forms", Modifier.padding(top = 12.dp)) }
@@ -179,7 +180,7 @@ private fun OnboardingContent(target: OnboardingLink, attempt: String, account: 
                         }
                         Text("Every response still needs your approval.")
                     }
-                    Button(onClick = { decide(true) }, enabled = !busy, modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp)) { Text(if (registration) "Register service" else if (management) "Save permissions" else "Connect") }
+                    Button(onClick = { decide(true) }, enabled = !busy, modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp)) { Text(if (registration) "Register agent" else if (management) "Save permissions" else "Connect") }
                     TextButton(onClick = { decide(false) }, enabled = !busy) { Text(if (management) "Disconnect" else "Cancel") }
                 if (management && statusText.isNotBlank()) Text(statusText)
                 } else when (session?.optString("status")) {

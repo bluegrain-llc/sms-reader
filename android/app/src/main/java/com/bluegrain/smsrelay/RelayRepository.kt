@@ -37,7 +37,7 @@ data class ConnectionReview(val code: String, val caller: String, val purpose: S
             j.getString("status"), j.getLong("expiresAt"), j.getInt("expiresInDays"))
     }
 }
-class RelayRepository(context: Context) {
+class RelayRepository(private val context: Context) {
     private val prefs = context.getSharedPreferences("installation", Context.MODE_PRIVATE)
     private val auth get() = FirebaseAuth.getInstance()
     private val client = OkHttpClient.Builder().callTimeout(15, TimeUnit.SECONDS).build()
@@ -91,6 +91,7 @@ class RelayRepository(context: Context) {
     suspend fun formObservation(id: String, body: JSONObject) = JSONObject(call("POST", "/v2/devices/$deviceId/requests/$id/events", body))
     suspend fun submitForm(id: String, body: JSONObject) = RequestForm.from(JSONObject(call("POST", "/v2/devices/$deviceId/requests/$id/submissions", body)))
     suspend fun approveForms(id: String, approved: Boolean) { call("PUT", "/v2/grants/$id/forms", JSONObject().put("approved", approved)) }
+    suspend fun services() = JSONArray(call("GET", "/v3/services"))
     suspend fun devices() = JSONArray(call("GET", "/v1/devices"))
     suspend fun grants() = JSONArray(call("GET", "/v1/callers"))
     suspend fun reviewConnection(code: String) = ConnectionReview.from(JSONObject(call("POST", "/v1/connections/review", JSONObject().put("userCode", code))))
@@ -106,7 +107,7 @@ class RelayRepository(context: Context) {
         return JSONObject(call("POST", "/v1/devices/$deviceId/requests/$id/events", b))
     }
     suspend fun unregister(id: String = deviceId) { call("DELETE", "/v1/devices/$id"); if (id == deviceId) { reset(); autoConnect = false } }
-    suspend fun deleteAccount() { call("DELETE", "/v1/account"); auth.signOut(); reset() }
+    suspend fun deleteAccount() { call("DELETE", "/v1/account"); AgentTicket(context, ownerId).clearForDeletedAccount(); auth.signOut(); reset() }
     private fun reset() {
         val previousListenerDeadline = listenerUntil
         prefs.edit(commit = true) { clear(); putLong("listenerUntil", previousListenerDeadline) }

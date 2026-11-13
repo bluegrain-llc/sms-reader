@@ -25,7 +25,7 @@ Registration saves local credentials and a P-256 delivery key before starting it
 
 Temporary links show a comparison code. Permanent service links contain only a stable service ID; after sign-in they start an owner-bound approval session. Opening either never approves access, opens SMS reception, or sends a request notification. A recipient may narrow permissions and duration. Approval is transactional and idempotent. Another recipient cannot take over an already decided or owner-bound session.
 
-After approval, Android/browser show access granted, waiting for service, phone setup needed, or setup complete. A suitable unpaused registered phone on the account is sufficient; the current phone need not be registered. A browser provides an Android intent handoff and installation guidance from the relay operator. Management links at `/connections/ID` permit an explicit permission change, expiry change, or disconnect; Android Administration links new scoped grants to this focused screen. Code entry remains a secondary legacy troubleshooting path.
+After approval, Android/browser show access granted, waiting for service, phone setup needed, or setup complete. A suitable unpaused registered phone on the account is sufficient; the current phone need not be registered. A browser provides HTTPS handoff and Android/iOS installation guidance from the relay operator. After installation, reopen or rescan the public link. Management links at `/connections/ID` permit an explicit permission change, expiry change, or disconnect; Android Administration links new scoped grants to this focused screen. Code entry remains a secondary legacy troubleshooting path.
 
 On Android, `/register/ID`, `/pair/ID`, `/services/ID` and `/connections/ID` open a dedicated task and validate the configured HTTPS host/path. Inbox drafts and Administration navigation remain independent. The camera app scans QR codes; no camera permission is added. Pending public destinations/attempt IDs survive rotation and task recreation. Approval retry checks the same server session. Expired attempts require a fresh session and approval.
 
@@ -74,7 +74,7 @@ See [provider connection setup](../integrations/README.md#hosted-connections). P
 
 Deploy compatible backends and Firestore indexes before directing released Android/CLI clients to these entry points. Configure the existing Firebase web configuration, canonical HTTPS `SERVICE_URL`, Google sign-in origin, Android signing fingerprints, and verified App Links. Run staging against both backend images. Existing credentials and pairings remain valid.
 
-Automated coverage includes cross-runtime registration, optional owner access, narrowed permissions, racing approvals, reusable links, owner binding, expiry, offline delivery, acknowledgement, rotation, service disablement, operator deletion, CLI durable storage, QR decoding, browser confirmation/retry, SDK JWE interoperability, and provider declaration isolation. Browser sign-in tests stub Firebase modules; they do not prove live Google sign-in. The eight-family emulator conformance matrix drives the maintained clients against both real backends, including private storage-hook failure, delivery acknowledgement, request/results/events, callbacks, rotation, resume and isolation. Six families use the shared Node broker; this does not claim standalone native HTTP implementations.
+Earlier automated coverage included cross-runtime registration, optional owner access (now replaced by separately approved owner pairing), narrowed permissions, racing approvals, reusable links, owner binding, expiry, offline delivery, acknowledgement, rotation, service disablement, operator deletion, CLI durable storage, QR decoding, browser confirmation/retry, SDK JWE interoperability, and provider declaration isolation. Browser sign-in tests stub Firebase modules; they do not prove live Google sign-in. The eight-family emulator conformance matrix drives the maintained clients against both real backends, including private storage-hook failure, delivery acknowledgement, request/results/events, callbacks, rotation, resume and isolation. Six families use the shared Node broker; this does not claim standalone native HTTP implementations.
 
 Remaining release gates:
 
@@ -94,3 +94,37 @@ The checks use synthetic accounts/credentials and emulator storage. Backend cont
 The final focused local checks include 44 TypeScript unit tests, six CLI tests, ten browser flows and seven Android onboarding instrumentation tests. The SDK matrix has 16 family/runtime cases; the native stream regression also verifies an observed future expiry before advancing its injected clock. These results do not replace the live sign-in, provider or physical-device gates above.
 
 The static-credential update passes 87 cross-runtime contracts with no TODO profiles, including 400-day access without refresh, concurrent retry returning identical credentials, scope narrowing, legacy refresh upgrades and explicit revocation. The shared integration suite passes 59 scenarios per runtime. The Google profile uses synthetic credentials and callback validation; it does not establish live provider acceptance.
+
+
+
+## Portable agent session tickets
+
+Android **Administration → Access → Agents** and browser `/owned-services` offer **Create agent**. Enter a name, description and forms/SMS capabilities. The client generates the `smss_` credential and P-256 delivery keys locally and durably retains provisioning state before calling owner-authenticated `POST /v3/services`. Only the credential hash and public key reach the relay. Repeating an identical declaration/hash returns the same agent; conflicting reuse returns 409, including reuse by another owner. The owner’s login session and recipient credentials are never part of a ticket.
+
+The private version-1 JSON format is:
+
+```json
+{
+  "version": 1,
+  "relayOrigin": "https://relay.example",
+  "agent": { "name": "My agent", "purpose": "Ask for decisions", "capabilities": ["forms"] },
+  "serviceCredential": "smss_<32 random bytes as unpadded base64url>",
+  "deliveryKeys": [{
+    "id": "<SHA-256 of ordered public JWK JSON: kty, crv, x, y>",
+    "publicKey": { "kty": "EC", "crv": "P-256", "x": "<base64url>", "y": "<base64url>" },
+    "privateKey": { "kty": "EC", "crv": "P-256", "x": "<base64url>", "y": "<base64url>", "d": "<base64url>" }
+  }]
+}
+```
+
+`purpose` is the existing API field used for the description. Coordinates and private scalars are exactly 32 bytes. A ticket is secret software configuration; never encode it in a QR, public URL, model tool result, log or notification. Both registration and pairing QRs contain ordinary HTTPS public links, labelled **Register agent** (`/register/ID`) and **Connect to agent** (`/pair/ID`). Reusable `/services/ID` links and resource-scoped hosted OAuth remain compatible.
+
+```sh
+relay service import-ticket --file /private/agent-ticket.json --profile my-agent
+relay service connect --profile my-agent
+relay service export-ticket --file /private/current-ticket.json --profile my-agent
+```
+
+Import refuses an occupied profile, derives the public key from each private scalar, checks key identifiers and verifies the credential/declaration/current delivery-key binding with ticket-authenticated `GET /v3/service`. It saves atomically before any pairing. Export contains no recipient connection state, uses mode 0600, publishes complete files atomically and supports identical retry without overwriting unrelated files. Complete pending credential/key rotations before exporting. Refresh exported tickets after rotation; older credentials or tickets lacking the current delivery key cannot import. Service disablement, deletion and owner deletion block ticket operations. Re-enabling an agent restores its current credential’s authority.
+
+JavaScript and Python expose private `importTicket`/`exportTicket` and `import_ticket`/`export_ticket` operations. The six process-based SDKs expose `importTicket`/`exportTicket` with `{file: PATH}`; the private broker reads/writes the file and returns only status. Storage hooks must durably commit before resolving and serialize concurrent users of the same profile. Browser provisioning uses owner-scoped IndexedDB; Android uses encrypted device-only files backed by Keystore. Retained tickets can be saved again after network, process or document-provider failure. Clear retained provisioning state only after saving the ticket or deleting the agent.
