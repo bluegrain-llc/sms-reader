@@ -61,6 +61,78 @@ extension RelayTests {
 }
 
 extension RelayTests {
+    @MainActor func testSMSSubmissionReportsTheReturnedTerminalOutcome() async throws {
+        let key = "installation:signed-out", original = try PrivateStorage.read("installation:signed-out")
+        defer { if let original { try? PrivateStorage.write(key, original) } else { PrivateStorage.remove(key) } }
+        let request = SMSRequest(requestId: "sms", callerName: "Agent", title: "Code", purpose: "Test", status: "ready", expiresAt: 2000000000000)
+        let cases: [(String, String?, String)] = [
+            ("expired", "request_timeout", "This request is expired. Your code was not sent."),
+            ("cancelled", nil, "This request is cancelled. Your code was not sent."),
+            ("failed", nil, "This request is failed. Your code was not sent."),
+            ("denied", nil, "Request declined."),
+            ("completed", nil, "Response accepted."),
+            ("cancelled", "handled_on_another_device", "Handled on another device.")
+        ]
+        for (status, reason, expected) in cases {
+            let api = FixtureRelayAPI()
+            let subject = RelayModel(api: api), installation = subject.deviceID
+            XCTAssertFalse(installation.isEmpty)
+            defer { subject.clearResponses() }
+            let draft = subject.draft(request.id, expiresAt: request.expiresAt); draft.code = "123456"
+            api.respond = { path, method, body in
+                XCTAssertEqual(path, "/v1/devices/\(installation)/requests/sms/events"); XCTAssertEqual(method, "POST")
+                XCTAssertEqual(body?["code"] as? String, "123456")
+                return try JSONEncoder().encode(SMSRequest(requestId: request.id, callerName: request.callerName, title: request.title, purpose: request.purpose, status: status, expiresAt: request.expiresAt, reason: reason))
+            }
+            try await subject.submitSMS(request, code: draft.code)
+            XCTAssertEqual(subject.notice, expected, status); XCTAssertTrue(draft.code.isEmpty, status)
+        }
+    }
+    @MainActor func testFormSubmissionReportsExpiryCancellationAndActualWinners() async throws {
+        let key = "installation:signed-out", original = try PrivateStorage.read("installation:signed-out")
+        defer { if let original { try? PrivateStorage.write(key, original) } else { PrivateStorage.remove(key) } }
+        let cases: [(String, String?, String)] = [
+            ("expired", nil, "This request is expired. Your response was not sent."),
+            ("cancelled", nil, "This request is cancelled. Your response was not sent."),
+            ("submitted", "self", "Response accepted."),
+            ("declined", "self", "Request declined."),
+            ("submitted", "other", "Handled on another device."),
+            ("declined", "other", "Handled on another device.")
+        ]
+        for (status, winner, expected) in cases {
+            let api = FixtureRelayAPI(), subject = RelayModel(api: api), request = formState("pending")
+            let installation = subject.deviceID, draft = subject.formDraft(request)
+            XCTAssertFalse(installation.isEmpty)
+            defer { subject.clearResponses() }
+            draft.values = ["answer": .text("private")]
+            var result = formState(status); result.completedByDeviceId = winner == "self" ? installation : winner
+            api.respond = { path, method, body in
+                XCTAssertEqual(path, "/v2/devices/\(installation)/requests/form/submissions"); XCTAssertEqual(method, "POST")
+                XCTAssertEqual(body?["submissionId"] as? String, draft.submissionID)
+                return try JSONEncoder().encode(result)
+            }
+            _ = try await subject.submitForm(request, action: .init(id: "send", label: "Send", type: "submit"), draft: draft)
+            XCTAssertEqual(subject.notice, expected, status); XCTAssertTrue(draft.values.isEmpty, status)
+        }
+    }
+    @MainActor func testResponsePollingCancellationDoesNotPublishNavigationErrors() async {
+        for cancelled in [false, true] {
+            let gate = SuspendedRelayReply(), api = FixtureRelayAPI(), model = RelayModel()
+            api.respond = { _, _, _ in try await gate.reply() }
+            let poll = Task {
+                do { let _: EmptyReply = try await api.call("/response"); XCTFail("The suspended request must fail") }
+                catch { return model.reportResponseFailure(error, fallback: "Could not refresh the request. Try again.") }
+                return false
+            }
+            defer { gate.resume(.failure(CancellationError())); poll.cancel() }
+            await fulfillment(of: [gate.entered], timeout: 2)
+            if cancelled { poll.cancel() }
+            gate.resume(.failure(RelayFailure.unavailable))
+            let failed = await poll.value
+            XCTAssertEqual(failed, !cancelled)
+            if cancelled { XCTAssertNil(model.error) } else { XCTAssertEqual(model.error, RelayFailure.unavailable.localizedDescription) }
+        }
+    }
     func testFinitePermissionsUseIntegerMillisecondsAndDenialCanReturn() throws {
         let now = Date(timeIntervalSince1970: 1794570000.1235)
         let expiry = try XCTUnwrap(connectionExpiry(days: 7, now: now))

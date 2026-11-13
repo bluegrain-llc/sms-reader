@@ -22,12 +22,15 @@ extension RelayUITests {
         XCTAssertTrue(app.alerts.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", "Sign-in was not completed")).firstMatch.exists)
     }
     func testConditionalWizardKeepsAReviewStep() {
+        continueAfterFailure = false
         let app = XCUIApplication(); app.launchArguments = ["--ui-contract"]; app.launch()
         app.buttons["Wizard request"].tap()
-        let include = app.switches["Include details"]
+        let include = app.switches["field-include"]
         XCTAssertTrue(include.waitForExistence(timeout: 5))
-        include.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)).tap()
-        XCTAssertTrue(NSPredicate(format: "value == %@", "1").evaluate(with: include))
+        XCTAssertLessThan(include.frame.width, 100, "The query must target the switch control, not the whole labeled row")
+        include.tap()
+        let selected = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == %@", "1"), object: include)
+        XCTAssertEqual(XCTWaiter.wait(for: [selected], timeout: 5), .completed)
         let next = app.buttons["review-response"]
         XCTAssertTrue(next.waitForExistence(timeout: 5)); XCTAssertEqual(next.label, "Next"); next.tap()
         let details = app.textFields["Details"]; XCTAssertTrue(details.waitForExistence(timeout: 5))
@@ -37,8 +40,9 @@ extension RelayUITests {
         XCTAssertTrue(app.buttons["Send response"].exists)
         XCTAssertFalse(app.alerts.firstMatch.exists)
         app.buttons["Edit response"].tap(); app.buttons["Previous"].tap()
-        include.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)).tap()
-        XCTAssertEqual(include.value as? String, "0")
+        include.tap()
+        let deselected = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == %@", "0"), object: include)
+        XCTAssertEqual(XCTWaiter.wait(for: [deselected], timeout: 5), .completed)
         XCTAssertTrue(app.buttons["review-response"].exists)
         app.buttons["review-response"].tap()
         XCTAssertFalse(app.staticTexts["Synthetic response"].exists)

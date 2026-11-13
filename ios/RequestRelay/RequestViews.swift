@@ -55,7 +55,7 @@ struct CodeResponse: View {
                     let result = try await model.loadSMS(id); request = result
                     draft = model.draft(id, expiresAt: result.manualEntryDeadline ?? result.expiresAt)
                     if !result.active { draft?.clear(); break }
-                } catch { failed = true; model.error = (error as? RelayFailure)?.localizedDescription ?? "Could not open the request. Try again."; break }
+                } catch { failed = model.reportResponseFailure(error, fallback: "Could not open the request. Try again."); break }
                 try? await Task.sleep(for: .seconds(3))
             }
         }
@@ -110,7 +110,7 @@ struct FormResponse: View {
                         let _: EmptyReply = try await model.api.call("/v2/devices/\(model.deviceID)/requests/\(id)/events", method: "POST", body: ["type":event])
                     }
                     if result.status != "pending" { break }
-                } catch { failed = true; model.error = (error as? RelayFailure)?.localizedDescription ?? "Could not refresh the request. Try again."; break }
+                } catch { failed = model.reportResponseFailure(error, fallback: "Could not refresh the request. Try again."); break }
                 try? await Task.sleep(for: .seconds(3))
             }
         }
@@ -199,7 +199,13 @@ struct NativeField: View {
     var body: some View {
         Group {
             switch field.type {
-            case "checkbox": Toggle(field.label, isOn: Binding(get: { values[field.id]?.bool ?? false }, set: { values[field.id] = .boolean($0) }))
+            case "checkbox":
+                HStack {
+                    Text(field.label)
+                    Spacer()
+                    Toggle(field.label, isOn: Binding(get: { values[field.id]?.bool ?? false }, set: { values[field.id] = .boolean($0) }))
+                        .labelsHidden().fixedSize().accessibilityIdentifier("field-\(field.id)")
+                }
             case "single_choice": Picker(field.label, selection: text) { Text("Choose…").tag(""); ForEach(field.options ?? []) { Text($0.label).tag($0.id) } }
             case "multiple_choice":
                 VStack(alignment: .leading) { Text(field.label).font(.headline); ForEach(field.options ?? []) { option in

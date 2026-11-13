@@ -184,6 +184,12 @@ final class RelayModel: ObservableObject {
     func discard(_ id: String) { drafts[id]?.clear(); drafts.removeValue(forKey: id); expiries.removeValue(forKey: id); formDraftIDs.remove(id) }
     func clearResponses() { drafts.values.forEach { $0.clear() }; drafts = [:]; expiries = [:]; formDraftIDs = [] }
     func expireDrafts() { for (id, expiry) in expiries where expiry <= Date().timeIntervalSince1970 * 1000 { discard(id) } }
+    @discardableResult
+    func reportResponseFailure(_ failure: Error, fallback: String) -> Bool {
+        guard !Task.isCancelled else { return false }
+        error = (failure as? RelayFailure)?.localizedDescription ?? fallback
+        return true
+    }
     func perform(_ action: () async throws -> Void) async {
         guard !busy else { return }; busy = true; error = nil
         defer { busy = false }
@@ -305,7 +311,13 @@ final class RelayModel: ObservableObject {
         guard deny || validCode(code) else { throw RelayFailure.rejected("invalid_code") }
         let body: [String: Any] = deny ? ["status":"denied"] : ["status":"completed","source":"manual","code":code]
         let state: SMSRequest = try await api.call("/v1/devices/\(deviceID)/requests/\(request.id)/events", method: "POST", body: body)
-        if !state.active { discard(request.id); notice = state.reason == "handled_on_another_device" ? "Handled on another device." : "Response accepted." }
+        if !state.active {
+            discard(request.id)
+            if state.reason == "handled_on_another_device" { notice = "Handled on another device." }
+            else if state.status == "completed" { notice = "Response accepted." }
+            else if state.status == "denied" { notice = "Request declined." }
+            else { notice = "This request is \(state.status). Your code was not sent." }
+        }
         receiveSMS(state); await refresh()
     }
     func submitForm(_ request: FormRequest, action: FormAction, draft: ResponseDraft) async throws -> FormRequest {
@@ -314,7 +326,12 @@ final class RelayModel: ObservableObject {
         guard action.type == "decline" || request.errors(values).isEmpty else { throw RelayFailure.rejected("invalid_form") }
         let encoded = try JSONEncoder().encode(values), object = try JSONSerialization.jsonObject(with: encoded)
         let result: FormRequest = try await api.call("/v2/devices/\(deviceID)/requests/\(request.id)/submissions", method: "POST", body: ["submissionId":draft.submissionID,"action":action.id,"values":object])
-        if result.status != "pending" { discard(request.id); notice = result.completedByDeviceId == deviceID ? "Response accepted." : "Handled on another device." }
+        if result.status != "pending" {
+            discard(request.id)
+            if ["submitted", "declined"].contains(result.status), let winner = result.completedByDeviceId {
+                notice = winner != deviceID ? "Handled on another device." : result.status == "submitted" ? "Response accepted." : "Request declined."
+            } else { notice = "This request is \(result.status). Your response was not sent." }
+        }
         await refresh(); return result
     }
     func deleteAccount() async throws {
