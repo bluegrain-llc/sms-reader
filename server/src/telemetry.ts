@@ -4,6 +4,7 @@ import type { Firestore, Query } from 'firebase-admin/firestore';
 
 export type Kind = 'sms' | 'form' | 'webhook';
 export type Category = 'quota' | 'timeout' | 'destination' | 'rejected' | 'unavailable' | 'internal';
+export type RecoveryGatePhase = 'credential' | 'initial_read' | 'watch_setup' | 'watch';
 type Event =
   | { event: 'onboarding_outcome'; phase: 'registration' | 'approval' | 'delivery' | 'setup'; outcome: string; count: number }
   | { event: 'http_completed'; method: string; route: string; status_class: string; duration_ms: number }
@@ -11,6 +12,7 @@ type Event =
   | { event: 'fcm_send'; phase: 'started' | 'http_started' | 'completed' | 'transport_closed'; attempt_id: string; kind: 'sms' | 'form';
       duration_ms: number; http_attempts: number; outcome?: 'accepted' | 'failed'; category?: Category }
   | { event: 'wakeup_failed'; category: Category }
+  | { event: 'recovery_gate_unavailable'; phase: RecoveryGatePhase; category: Category; error_code?: number | 'app/invalid-credential' }
   | { event: 'maintenance_completed'; duration_ms: number }
   | { event: 'deletion_failed' | 'maintenance_failed' | 'backlog_sampling_failed' | 'request_failed' | 'mcp_tool_failed'; category: Category }
   | { event: 'backlog_snapshot'; kind: Kind | 'results' | 'form_results' | 'deletion' | 'legacy_deletion'; count: number; oldest_due_age_s: number };
@@ -20,7 +22,7 @@ const defaultSink: Sink = entry => console.info(JSON.stringify(entry));
 export class Telemetry {
   constructor(readonly sink: Sink = defaultSink, readonly now = Date.now) {}
   emit(event: Event) {
-    const severity = event.event.endsWith('_failed') ? 'ERROR' : (event.event === 'delivery_attempt' || event.event === 'fcm_send') && event.outcome === 'failed' ? 'WARNING' : 'INFO';
+    const severity = event.event.endsWith('_failed') || event.event === 'recovery_gate_unavailable' ? 'ERROR' : (event.event === 'delivery_attempt' || event.event === 'fcm_send') && event.outcome === 'failed' ? 'WARNING' : 'INFO';
     try { this.sink({ ...event, component: 'relay', severity }); } catch { /* Logging failure must not change committed outcomes. */ }
   }
   http = (req: Request, res: Response, next: NextFunction) => {
@@ -44,6 +46,11 @@ export class Telemetry {
   delivery(kind: Kind, createdAt: number, outcome: 'accepted' | 'failed', error?: unknown) {
     this.emit({ event: 'delivery_attempt', kind, outcome,
       ...(outcome === 'accepted' ? {} : { category: category(error) }), age_ms: Math.max(0, this.now() - createdAt) });
+  }
+  recoveryGateUnavailable(phase: RecoveryGatePhase, error: unknown) {
+    const code = recoveryErrorCode(error);
+    this.emit({ event: 'recovery_gate_unavailable', phase, category: category({ code }),
+      ...(code === undefined ? {} : { error_code: code }) });
   }
   async maintenance(work: () => Promise<void>, db: Firestore) {
     const started = this.now();
@@ -78,6 +85,30 @@ export class Telemetry {
     }
     for (const sample of combined.values()) this.emit({ event: 'backlog_snapshot', ...sample });
   }
+}
+/** Inspect only error status fields, never error messages, metadata, causes or serialized objects. */
+function recoveryErrorCode(error: unknown): number | 'app/invalid-credential' | undefined {
+  const read = (value: unknown, key: string): unknown => {
+    try { return value && typeof value === 'object' ? (value as Record<string, unknown>)[key] : undefined; }
+    catch { return undefined; }
+  };
+  const normalize = (value: unknown): number | 'app/invalid-credential' | undefined => {
+    if (value === 'app/invalid-credential') return value;
+    if (typeof value === 'string') {
+      if (value.length > 32) return undefined;
+      // Canonical gRPC status names and numeric strings become bounded numbers.
+      const grpc = ['cancelled', 'unknown', 'invalid-argument', 'deadline-exceeded', 'not-found', 'already-exists',
+        'permission-denied', 'resource-exhausted', 'failed-precondition', 'aborted', 'out-of-range',
+        'unimplemented', 'internal', 'unavailable', 'data-loss', 'unauthenticated'];
+      const index = grpc.indexOf(value.toLowerCase().replaceAll('_', '-'));
+      if (index >= 0) return index + 1;
+      if (!/^\d{1,3}$/.test(value)) return undefined;
+      value = Number(value);
+    }
+    return typeof value === 'number' && Number.isInteger(value) &&
+      ((value >= 1 && value <= 16) || (value >= 400 && value <= 599)) ? value : undefined;
+  };
+  return normalize(read(error, 'code')) ?? normalize(read(error, 'status')) ?? normalize(read(read(error, 'response'), 'status'));
 }
 export function category(error: unknown): Category {
   const message = error instanceof Error ? error.message : undefined;
