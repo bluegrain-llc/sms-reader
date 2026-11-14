@@ -122,7 +122,12 @@ class RelayViewModel @JvmOverloads constructor(application: Application, private
         mutable.update { it.copy(signedIn = repo.signedIn, email = repo.email, registered = repo.registered, autoConnect = repo.autoConnect) }
         if (!repo.signedIn) return
         // Administration never owns or recovers the Inbox's SMS listening session.
-        if (!administrationOnly) recover()
+        if (!administrationOnly) {
+            recover()
+            // Failure reporting can leave a bound request after its poll has stopped.
+            // Refresh it before deciding whether discovery must preserve the listener.
+            boundId?.let { sync(it) }
+        }
         val devices = repo.devices()
         val d = (0 until devices.length()).map { devices.getJSONObject(it) }.find { it.optString("deviceId") == repo.deviceId }
         if (d == null && repo.registered) repo.autoConnect = false
@@ -211,11 +216,13 @@ class RelayViewModel @JvmOverloads constructor(application: Application, private
     fun open(id: String) = viewModelScope.async {
         while (state.value.busy || state.value.opening) delay(50)
         if (administrationOnly || !RelayNotifications.validId.matches(id) || !app.configured || !repo.signedIn) return@async false
-        if (state.value.request.blocksSmsOpen(boundId, id)) { error("Finish or cancel the current request first."); return@async false }
         mutable.update { it.copy(busy = true, opening = true, error = null) }
         var loaded = false
         try {
             recover()
+            if (!canOpenSms(id, { state.value.request }, { boundId }, ::sync)) {
+                error("Finish or cancel the current request first."); return@async false
+            }
             val r = repo.request(id)
             if (boundId != id) clearSensitive()
             mutable.update { it.copy(request = r, error = null) }
@@ -321,7 +328,13 @@ class RelayViewModel @JvmOverloads constructor(application: Application, private
     private fun listeningWindowEnded(now: Long): Boolean = listenerWindow?.expired()
         ?: state.value.request?.let { now >= (it.listeningDeadline ?: it.expiresAt) } ?: false
     private suspend fun sync(id: String) {
-        applyRequest(repo.request(id))
+        val binding = boundId
+        val window = listenerWindow
+        refreshSmsRequest(
+            current = { state.value.request?.takeIf { it.id == id && boundId == binding && listenerWindow === window } },
+            fetch = repo::request,
+            apply = ::applyRequest,
+        )
     }
     private fun applyRequest(r: PhoneRequest) {
         val id = r.id
