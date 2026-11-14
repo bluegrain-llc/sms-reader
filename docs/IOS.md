@@ -1,5 +1,7 @@
 # Native iOS companion
 
+The redesign uses the shared [UI contract](UX.md), [inventory](ui/INVENTORY.md), and [glossary](ui/GLOSSARY.md). Follow [IOS platform differences](ui/FLOWS.md#ios), [FLOW-SMS-IOS](ui/FLOWS.md#flow-sms-ios), and [FLOW-PHONE](ui/FLOWS.md#flow-phone); do not copy Android consent/listener behavior. Existing screen descriptions below are an implementation record, not proof of redesign completion.
+
 The `ios` directory contains a SwiftUI iOS 17+ companion. Inbox contains SMS responses and information/decision requests; Administration contains connection permissions, agent creation/ticket export, devices, history, provider linking and account deletion. Native `Form`, `List`, `NavigationStack`, text styles and controls follow system appearance and Dynamic Type. Agent approval runs in a separate sheet so navigating onboarding does not replace in-memory Inbox drafts.
 
 ## Build and configuration

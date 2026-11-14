@@ -1,5 +1,7 @@
 # Provider adapters
 
+The UI design's [glossary](../docs/ui/GLOSSARY.md), [page/control inventory](../docs/ui/INVENTORY.md), and [flow guide](../docs/ui/README.md) cross-reference the agent-specific paths: [FLOW-DIRECT-CONNECT](../docs/ui/FLOWS.md#flow-direct-connect) for private script/terminal setup, [FLOW-TUI-TOOLS](../docs/ui/FLOWS.md#flow-tui-tools) for local coding-agent MCP tools, and [FLOW-HOSTED-CONNECT](../docs/ui/FLOWS.md#flow-hosted-connect) for provider-managed OAuth. These paths do not imply live provider acceptance.
+
 `connectProviderTools` reads one selected recipient connection from private CLI storage, connects to `/mcp`, and produces function declarations for OpenAI, Anthropic, Google, xAI Responses and Microsoft Azure OpenAI Responses. No credential is returned in those declarations. Registration, service management and delivery consumption run in software outside the model tool loop. Configure the model provider's SDK separately; these adapters make no inference calls and print no responses.
 
 ```js
