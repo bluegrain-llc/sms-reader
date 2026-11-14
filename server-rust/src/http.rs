@@ -1,3 +1,4 @@
+use crate::worker_context::WorkerContext;
 use crate::{
     connections::user_code,
     error::{Error, Result, ensure},
@@ -42,6 +43,7 @@ impl Authentication for Google {
 }
 #[derive(Clone)]
 pub struct Options {
+    pub project_id: Option<String>,
     pub auth: Arc<dyn Authentication>,
     pub serving: Option<Arc<dyn Serving>>,
     pub public_url: Option<String>,
@@ -75,6 +77,21 @@ pub fn app(relay: Relay, options: Options) -> Router {
 }
 fn header<'a>(h: &'a HeaderMap, k: &str) -> Option<&'a str> {
     h.get(k).and_then(|v| v.to_str().ok())
+}
+fn worker_header_context(project: Option<&str>, headers: &HeaderMap) -> Option<WorkerContext> {
+    fn single<'a>(headers: &'a HeaderMap, name: &str) -> std::result::Result<Option<&'a str>, ()> {
+        let mut values = headers.get_all(name).iter();
+        match (values.next(), values.next()) {
+            (None, None) => Ok(None),
+            (Some(value), None) => value.to_str().map(Some).map_err(|_| ()),
+            _ => Err(()),
+        }
+    }
+    WorkerContext::from_headers(
+        project,
+        single(headers, "traceparent").ok()?,
+        single(headers, "x-cloud-trace-context").ok()?,
+    )
 }
 pub fn bearer(h: &HeaderMap) -> Result<String> {
     let token = header(h, "authorization").and_then(|s| s.strip_prefix("Bearer "));
@@ -241,7 +258,10 @@ fn measured_response(
     path: &str,
     started: Instant,
 ) -> Response {
-    let event = json!({"event":"http_completed","method":method,"route":crate::telemetry::route_template(path),"status_class":format!("{}xx",response.status().as_u16()/100)});
+    let mut event = json!({"event":"http_completed","method":method,"route":crate::telemetry::route_template(path),"status_class":format!("{}xx",response.status().as_u16()/100)});
+    if let Some(context) = response.extensions().get::<WorkerContext>() {
+        event["logging.googleapis.com/trace"] = json!(context.trace());
+    }
     let (parts, body) = response.into_parts();
     Response::from_parts(
         parts,
@@ -264,7 +284,8 @@ async fn handle(State(s): State<App>, request: Request) -> Response {
         let base = s.options.public_url.as_ref()?;
         Some(format!("Bearer resource_metadata=\"{}/.well-known/oauth-protected-resource/mcp/services/{id}\"", base.trim_end_matches('/')))
     });
-    let mut response = match route(s, request).await {
+    let mut worker_context = None;
+    let mut response = match route(s, request, &mut worker_context).await {
         Ok(r) => r,
         Err(e) => {
             if !matches!(e, Error::Api(_, _)) {
@@ -331,6 +352,9 @@ async fn handle(State(s): State<App>, request: Request) -> Response {
         response
             .headers_mut()
             .insert("WWW-Authenticate", challenge.parse().unwrap());
+    }
+    if let Some(context) = worker_context {
+        response.extensions_mut().insert(context);
     }
     response
 }
@@ -611,7 +635,11 @@ fn validate_event(v: &Value) -> Result<()> {
     };
     strict(v, &allowed)
 }
-async fn route(s: App, request: Request) -> Result<Response> {
+async fn route(
+    s: App,
+    request: Request,
+    worker_context: &mut Option<WorkerContext>,
+) -> Result<Response> {
     let method = request.method().clone();
     let raw_path = request.uri().path();
     let raw_oauth_path = raw_path.to_owned();
@@ -1433,11 +1461,14 @@ async fn route(s: App, request: Request) -> Result<Response> {
                 .worker(&token)
                 .await
                 .map_err(|_| Error::Api(401, reason))?;
+            let context = worker_header_context(s.options.project_id.as_deref(), &headers);
+            *worker_context = context.clone();
             if *operation == "delivery" {
                 r.deletion_dispatch(s.options.auth.clone()).await?;
-                r.dispatch().await?;
+                r.dispatch_with_context(context.as_ref()).await?;
             } else {
-                r.telemetry_maintenance(s.options.auth.clone()).await?;
+                r.telemetry_maintenance_with_context(s.options.auth.clone(), context.as_ref())
+                    .await?;
             }
             json!({"ok":true})
         }
@@ -1805,6 +1836,52 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+    #[test]
+    fn worker_headers_reject_ambiguous_or_present_non_ascii_fields() {
+        use axum::http::HeaderValue;
+        let parent = "00-1234567890abcdef1234567890abcdef-0000000000000001-00";
+        let legacy = "1234567890abcdef1234567890abcdef/1;o=0";
+        let mut incorrectly_correlated = Vec::new();
+        for (name, valid, other_name, other_valid, conflicting) in [
+            (
+                "traceparent",
+                parent,
+                "x-cloud-trace-context",
+                legacy,
+                "00-fedcba0987654321fedcba0987654321-0000000000000001-00",
+            ),
+            (
+                "x-cloud-trace-context",
+                legacy,
+                "traceparent",
+                parent,
+                "fedcba0987654321fedcba0987654321/1;o=0",
+            ),
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.insert(name, HeaderValue::from_static(valid));
+            assert!(worker_header_context(Some("demo-sms-relay"), &headers).is_some());
+            headers.insert(other_name, HeaderValue::from_static(other_valid));
+            assert!(worker_header_context(Some("demo-sms-relay"), &headers).is_some());
+            for second in [valid, conflicting] {
+                let mut repeated = headers.clone();
+                repeated.append(name, HeaderValue::from_static(second));
+                if worker_header_context(Some("demo-sms-relay"), &repeated).is_some() {
+                    incorrectly_correlated.push(format!("duplicate {name}: {second}"));
+                }
+            }
+            headers.insert(name, HeaderValue::from_bytes(&[0x80]).unwrap());
+            if worker_header_context(Some("demo-sms-relay"), &headers).is_some() {
+                incorrectly_correlated.push(format!("non-ASCII {name} fell back to {other_name}"));
+            }
+        }
+        assert!(worker_header_context(Some("demo-sms-relay"), &HeaderMap::new()).is_none());
+        assert!(
+            incorrectly_correlated.is_empty(),
+            "{incorrectly_correlated:?}"
+        );
+    }
+
     struct ProbeGate(AtomicBool);
     impl Serving for ProbeGate {
         fn assert_serving(&self) -> futures::future::BoxFuture<'_, Result<()>> {
@@ -1839,6 +1916,7 @@ mod tests {
         let router = app(
             relay,
             Options {
+                project_id: Some("demo-startup-probe".into()),
                 auth: Arc::new(ProbeAuth),
                 serving: Some(gate.clone()),
                 public_url: None,
@@ -2092,6 +2170,36 @@ mod tests {
         ) -> futures::future::BoxFuture<'a, Result<()>> {
             Box::pin(async { Ok(()) })
         }
+    }
+
+    #[tokio::test]
+    async fn failed_worker_response_completion_retains_trusted_context() {
+        let (logger, mut events) = tokio::sync::mpsc::unbounded_channel();
+        let context = WorkerContext::from_headers(
+            Some("demo-sms-relay"),
+            Some("00-1234567890abcdef1234567890abcdef-0000000000000001-00"),
+            None,
+        )
+        .unwrap();
+        let mut response = json_response(json!({"error":"internal_error"}), 500);
+        response.extensions_mut().insert(context.clone());
+        let measured = measured_response(
+            response,
+            Arc::new(Capture(logger)),
+            "POST",
+            "/internal/delivery",
+            Instant::now(),
+        );
+        axum::body::to_bytes(measured.into_body(), 1024)
+            .await
+            .unwrap();
+        let entry = tokio::time::timeout(Duration::from_secs(1), events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(entry["event"], "http_completed");
+        assert_eq!(entry["status_class"], "5xx");
+        assert_eq!(entry["logging.googleapis.com/trace"], context.trace());
     }
 
     #[tokio::test]

@@ -18,6 +18,7 @@ const notifier = new FcmNotifier({ projectId: firebase.options.projectId });
 const relay = new Relay(getFirestore(), notifier.notify, Date.now, taskWakeup(), securityLedger(process.env.SECURITY_LEDGER_BUCKET));
 const gate = new RecoveryGate(getFirestore(), () => credential.getAccessToken());
 const server = app(relay, {
+  projectId: firebase.options.projectId,
   assertServing: () => gate.assertServing(),
   verifyOwner: async token => {
     const identity = await auth.verifyIdToken(token, true);

@@ -1,3 +1,4 @@
+import { WorkerContext } from './worker-context.js';
 import { telemetry, category } from './telemetry.js';
 import express, { Request, Response, NextFunction } from 'express';
 import { z, ZodError } from 'zod';
@@ -16,6 +17,7 @@ import { deviceRegistrationSchema, smsEventSchema, codeSchema, hasCapability, en
 
 export interface Identity { uid: string; authTime: number }
 export interface HttpOptions {
+  projectId?: string;
   assertServing?: () => void;
   verifyOwner: (token: string) => Promise<Identity>;
   verifyScheduler: (token: string) => Promise<void>;
@@ -165,14 +167,18 @@ export function app(relay: Relay, options: HttpOptions) {
   });
   app.post('/internal/delivery', async (req, res) => {
     try { await options.verifyScheduler(bearer(req)); } catch { throw new RelayError(401, 'invalid_worker_identity'); }
+    const context = WorkerContext.fromHeaders(options.projectId, req.get('traceparent'), req.get('x-cloud-trace-context'));
+    res.locals.workerContext = context;
     await relay.deletions.dispatch(options.deleteIdentity);
-    await relay.forms.dispatch(); res.json({ ok: true });
+    await relay.forms.dispatch(context); res.json({ ok: true });
   });
   app.post('/internal/maintenance', async (req, res) => {
     try { await options.verifyScheduler(bearer(req)); } catch { throw new RelayError(401, 'invalid_scheduler_identity'); }
+    const context = WorkerContext.fromHeaders(options.projectId, req.get('traceparent'), req.get('x-cloud-trace-context'));
+    res.locals.workerContext = context;
     await telemetry.maintenance(async () => {
       await relay.deletions.dispatch(options.deleteIdentity);
-      await relay.maintenance();
+      await relay.maintenance(context);
     }, relay.db); res.json({ ok: true });
   });
   app.post(['/mcp', '/mcp/services/:serviceId'], async (req, res) => {

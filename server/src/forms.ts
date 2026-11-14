@@ -1,3 +1,4 @@
+import { WorkerContext } from './worker-context.js';
 import { telemetry, category } from './telemetry.js';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { Transaction } from 'firebase-admin/firestore';
@@ -9,7 +10,7 @@ import { sendWebhook, validateDestination } from './webhooks.js';
 
 type Hook = { id: string; url: string; secret: string; events: RelayEvent['type'][] };
 type FormGrant = Grant & { formsApproved?: boolean; formsCancellationPending?: boolean; eventSequence?: number; webhooks?: Hook[] };
-type Job = { id: string; ownerId: string; grantId: string; requestId: string; eventId: string; kind: 'push' | 'webhook'; deviceId?: string; hookId?: string; nextAt: number; lease: string | null; attempts: number; purgeAt: Date };
+type Job = { id: string; ownerId: string; grantId: string; requestId: string; eventId: string; kind: 'push' | 'webhook'; deviceId?: string; hookId?: string; nextAt: number; lease: string | null; claimTrace?: string | null; attempts: number; purgeAt: Date };
 export const publicEvent = ({ ownerId: _o, grantId: _g, purgeAt: _p, ...event }: RelayEvent) => event;
 const canonical = (v: unknown): string => JSON.stringify(v, (_key, value) => value && typeof value === 'object' && !Array.isArray(value) ? Object.fromEntries(Object.keys(value).sort().map(k => [k, value[k]])) : value);
 const requiresSms = (definition: FormRequest['definition']) => definition.fields.some(f => 'input' in f && f.input === 'sms_code');
@@ -223,7 +224,7 @@ export class Forms {
       return (g.webhooks ?? []).filter(h => h.id !== remove).map(({ secret: _secret, ...h }) => h);
     });
   }
-  async deliver(id: string) {
+  async deliver(id: string, context?: WorkerContext) {
     const lease = randomUUID();
     const claim = await this.db.runTransaction(async tx => {
       const j = (await tx.get(this.ref('deliveryOutbox', id))).data() as Job | undefined;
@@ -237,10 +238,11 @@ export class Forms {
       if (!r || !e || !this.retained(j.purgeAt) || account?.deleting || !(g && allowed(g, r.definition)) || !await this.relay.validGrant(tx, g) || (j.kind === 'push' && (r.status !== 'pending' || r.expiresAt <= this.now() || !d || d.deleted || d.paused || d.ownerId !== j.ownerId || (r.definition.steps && d.wizardVersion !== 1))) || (j.kind === 'webhook' && !hook)) {
         tx.delete(this.ref('deliveryOutbox', id)); return null;
       }
-      tx.update(this.ref('deliveryOutbox', id), { lease, nextAt: this.now() + MINUTE, attempts: j.attempts + 1 });
+      tx.update(this.ref('deliveryOutbox', id), { lease, claimTrace: context?.trace ?? null, nextAt: this.now() + MINUTE, attempts: j.attempts + 1 });
       return { j, r, e, token: d?.fcmToken as string | undefined, hook };
     });
     if (!claim) return;
+    telemetry.emit({ event: 'delivery_lease_claimed', kind: claim.j.kind === 'push' ? 'form' : 'webhook' }, context);
     let sent = false;
     try {
       if (claim.j.kind === 'push') await this.relay.notify(claim.token!, claim.r.id, claim.r.expiresAt - this.now(), 'form');
@@ -273,12 +275,12 @@ export class Forms {
     });
     if (!snap.empty) await this.kick();
   }
-  async dispatch() {
+  async dispatch(context?: WorkerContext) {
     const count = await this.relay.pages.run('form-delivery', this.db.collection('deliveryOutbox').where('nextAt', '<=', this.now()),
-      'nextAt', 50, id => this.deliver(id), 10);
+      'nextAt', 50, id => this.deliver(id, context), 10);
     if (count === 50) await this.kick();
   }
-  async maintenance() {
+  async maintenance(context?: WorkerContext) {
     await this.relay.pages.run('revoked-forms', this.db.collection('grants').where('formsCancellationPending', '==', true),
       null, 250, id => this.cancelGrant(id));
     await this.relay.pages.run('helper-timeouts', this.db.collection('formRequests').where('status', '==', 'pending').where('helperNextAt', '<=', this.now()),
@@ -299,7 +301,7 @@ export class Forms {
       const g = (await tx.get(this.ref('grants', r.grantId))).data() as FormGrant;
       if (r.status === 'pending' && g) await this.expire(tx, r, g, allowed(g, r.definition) && await this.relay.validGrant(tx, g));
     }));
-    await this.dispatch();
+    await this.dispatch(context);
     for (const collection of ['formResults', 'formRequests', 'requestEvents', 'deliveryOutbox']) await this.relay.pages.purge(collection, this.now());
   }
 }

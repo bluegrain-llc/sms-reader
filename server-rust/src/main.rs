@@ -64,6 +64,7 @@ async fn run() -> Result<(), StartupFailure> {
     let router = app(
         relay,
         Options {
+            project_id: Some(project.clone()),
             serving: Some(gate.clone()),
             auth: google,
             public_url: std::env::var("SERVICE_URL").ok(),

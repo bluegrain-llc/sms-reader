@@ -1,3 +1,4 @@
+use crate::worker_context::WorkerContext;
 use crate::{error::Result, forms_model::public_event, model::*, relay::*, store::Query};
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -72,17 +73,31 @@ if flag(p,"sent")||num(p,"lease")>s.now()||num(p,"nextAt")>s.now(){continue;}p["
         Ok(())
     }
     pub async fn deliver_form(&self, id: String) -> Result<()> {
+        self.deliver_form_with_context(id, None).await
+    }
+    pub async fn deliver_form_with_context(
+        &self,
+        id: String,
+        context: Option<&WorkerContext>,
+    ) -> Result<()> {
         let lease = Uuid::new_v4().to_string();
         let s = self.clone();
         let (rid, l) = (id.clone(), lease.clone());
-        let claim=self.store.tx(move|tx|{let(s,id,lease)=(s.clone(),rid.clone(),l.clone());Box::pin(async move{
+        let claim_trace = context.map(|c| c.trace().to_owned());
+        let claim=self.store.tx(move|tx|{let(s,id,lease,claim_trace)=(s.clone(),rid.clone(),l.clone(),claim_trace.clone());Box::pin(async move{
  let j=tx.get("deliveryOutbox",&id).await?;if j.is_null()||num(&j,"nextAt")>s.now(){return Ok(Value::Null);}let g=tx.get("grants",text(&j,"grantId")).await?;let r=tx.get("formRequests",text(&j,"requestId")).await?;let a=tx.get("accounts",text(&j,"ownerId")).await?;let e=tx.get("requestEvents",text(&j,"eventId")).await?;let d=if text(&j,"deviceId").is_empty(){Value::Null}else{tx.get("devices",text(&j,"deviceId")).await?};let hook=arr(&g,"webhooks").into_iter().find(|h|h["id"]==j["hookId"]);
  if r.is_null()||e.is_null()||num(&j,"purgeAt")<=s.now()||flag(&a,"deleting")||!crate::forms::allowed(&g,&r["definition"])||!s.valid_grant(tx, &g).await?||(text(&j,"kind")=="push"&&(text(&r,"status")!="pending"||num(&r,"expiresAt")<=s.now()||d.is_null()||flag(&d,"deleted")||flag(&d,"paused")||d["ownerId"]!=j["ownerId"]||(r["definition"].get("steps").is_some()&&d["wizardVersion"]!=1)))||(text(&j,"kind")=="webhook"&&hook.is_none()){tx.delete("deliveryOutbox",&id)?;return Ok(Value::Null);}
- tx.merge("deliveryOutbox",&id,json!({"lease":lease,"nextAt":s.now()+MINUTE,"attempts":num(&j,"attempts")+1}))?;Ok(json!({"j":j,"r":r,"e":e,"token":d["fcmToken"],"hook":hook}))})}).await?;
+ tx.merge("deliveryOutbox",&id,json!({"lease":lease,"claimTrace":claim_trace,"nextAt":s.now()+MINUTE,"attempts":num(&j,"attempts")+1}))?;Ok(json!({"j":j,"r":r,"e":e,"token":d["fcmToken"],"hook":hook}))})}).await?;
         if claim.is_null() {
             return Ok(());
         }
         let push = text(&claim["j"], "kind") == "push";
+        let mut event =
+            json!({"event":"delivery_lease_claimed","kind":if push { "form" } else { "webhook" }});
+        if let Some(context) = context {
+            event["logging.googleapis.com/trace"] = json!(context.trace());
+        }
+        self.delivery.record(event).await;
         let delivery_result = if push {
             self.delivery
                 .notify(
@@ -117,6 +132,9 @@ if flag(p,"sent")||num(p,"lease")>s.now()||num(p,"nextAt")>s.now(){continue;}p["
         Ok(())
     }
     pub async fn dispatch(&self) -> Result<()> {
+        self.dispatch_with_context(None).await
+    }
+    pub async fn dispatch_with_context(&self, context: Option<&WorkerContext>) -> Result<()> {
         let count = self
             .maintenance_page(
                 "form-delivery",
@@ -124,7 +142,7 @@ if flag(p,"sent")||num(p,"lease")>s.now()||num(p,"nextAt")>s.now(){continue;}p["
                 Some("nextAt"),
                 50,
                 10,
-                |id| self.deliver_form(id),
+                |id| self.deliver_form_with_context(id, context),
             )
             .await?;
         if count == 50 {
@@ -133,6 +151,9 @@ if flag(p,"sent")||num(p,"lease")>s.now()||num(p,"nextAt")>s.now(){continue;}p["
         Ok(())
     }
     pub async fn maintenance(&self) -> Result<()> {
+        self.maintenance_with_context(None).await
+    }
+    pub async fn maintenance_with_context(&self, context: Option<&WorkerContext>) -> Result<()> {
         self.onboarding_cleanup().await?;
         self.maintenance_page(
             "active-owners",
@@ -173,10 +194,16 @@ if flag(p,"sent")||num(p,"lease")>s.now()||num(p,"nextAt")>s.now(){continue;}p["
         ] {
             self.maintenance_purge(collection, self.now()).await?;
         }
-        self.form_maintenance().await?;
+        self.form_maintenance_with_context(context).await?;
         self.access_cleanup().await
     }
     pub async fn form_maintenance(&self) -> Result<()> {
+        self.form_maintenance_with_context(None).await
+    }
+    pub async fn form_maintenance_with_context(
+        &self,
+        context: Option<&WorkerContext>,
+    ) -> Result<()> {
         self.maintenance_page(
             "revoked-forms",
             Query::new("grants").eq("formsCancellationPending", true),
@@ -210,7 +237,7 @@ if flag(p,"sent")||num(p,"lease")>s.now()||num(p,"nextAt")>s.now(){continue;}p["
             |id| self.maintenance_form_expire(id),
         )
         .await?;
-        self.dispatch().await?;
+        self.dispatch_with_context(context).await?;
         for collection in [
             "formResults",
             "formRequests",
