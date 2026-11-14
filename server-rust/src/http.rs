@@ -78,6 +78,21 @@ pub fn app(relay: Relay, options: Options) -> Router {
 fn header<'a>(h: &'a HeaderMap, k: &str) -> Option<&'a str> {
     h.get(k).and_then(|v| v.to_str().ok())
 }
+fn worker_header_context(project: Option<&str>, headers: &HeaderMap) -> Option<WorkerContext> {
+    fn single<'a>(headers: &'a HeaderMap, name: &str) -> std::result::Result<Option<&'a str>, ()> {
+        let mut values = headers.get_all(name).iter();
+        match (values.next(), values.next()) {
+            (None, None) => Ok(None),
+            (Some(value), None) => value.to_str().map(Some).map_err(|_| ()),
+            _ => Err(()),
+        }
+    }
+    WorkerContext::from_headers(
+        project,
+        single(headers, "traceparent").ok()?,
+        single(headers, "x-cloud-trace-context").ok()?,
+    )
+}
 pub fn bearer(h: &HeaderMap) -> Result<String> {
     let token = header(h, "authorization").and_then(|s| s.strip_prefix("Bearer "));
     ensure(
@@ -1446,11 +1461,7 @@ async fn route(
                 .worker(&token)
                 .await
                 .map_err(|_| Error::Api(401, reason))?;
-            let context = WorkerContext::from_headers(
-                s.options.project_id.as_deref(),
-                header(&headers, "traceparent"),
-                header(&headers, "x-cloud-trace-context"),
-            );
+            let context = worker_header_context(s.options.project_id.as_deref(), &headers);
             *worker_context = context.clone();
             if *operation == "delivery" {
                 r.deletion_dispatch(s.options.auth.clone()).await?;
@@ -1824,6 +1835,52 @@ where
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    #[test]
+    fn worker_headers_reject_ambiguous_or_present_non_ascii_fields() {
+        use axum::http::HeaderValue;
+        let parent = "00-1234567890abcdef1234567890abcdef-0000000000000001-00";
+        let legacy = "1234567890abcdef1234567890abcdef/1;o=0";
+        let mut incorrectly_correlated = Vec::new();
+        for (name, valid, other_name, other_valid, conflicting) in [
+            (
+                "traceparent",
+                parent,
+                "x-cloud-trace-context",
+                legacy,
+                "00-fedcba0987654321fedcba0987654321-0000000000000001-00",
+            ),
+            (
+                "x-cloud-trace-context",
+                legacy,
+                "traceparent",
+                parent,
+                "fedcba0987654321fedcba0987654321/1;o=0",
+            ),
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.insert(name, HeaderValue::from_static(valid));
+            assert!(worker_header_context(Some("demo-sms-relay"), &headers).is_some());
+            headers.insert(other_name, HeaderValue::from_static(other_valid));
+            assert!(worker_header_context(Some("demo-sms-relay"), &headers).is_some());
+            for second in [valid, conflicting] {
+                let mut repeated = headers.clone();
+                repeated.append(name, HeaderValue::from_static(second));
+                if worker_header_context(Some("demo-sms-relay"), &repeated).is_some() {
+                    incorrectly_correlated.push(format!("duplicate {name}: {second}"));
+                }
+            }
+            headers.insert(name, HeaderValue::from_bytes(&[0x80]).unwrap());
+            if worker_header_context(Some("demo-sms-relay"), &headers).is_some() {
+                incorrectly_correlated.push(format!("non-ASCII {name} fell back to {other_name}"));
+            }
+        }
+        assert!(worker_header_context(Some("demo-sms-relay"), &HeaderMap::new()).is_none());
+        assert!(
+            incorrectly_correlated.is_empty(),
+            "{incorrectly_correlated:?}"
+        );
+    }
 
     struct ProbeGate(AtomicBool);
     impl Serving for ProbeGate {

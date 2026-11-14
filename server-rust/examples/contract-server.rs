@@ -504,7 +504,17 @@ async fn main() {
         std::env::var("FIRESTORE_EMULATOR_HOST").is_ok(),
         "test host requires emulator"
     );
-    let store = Store::new("demo-sms-relay").await.unwrap();
+    let project =
+        std::env::var("RELAY_TEST_PROJECT_ID").unwrap_or_else(|_| "demo-sms-relay".into());
+    assert!(
+        project.starts_with("demo-")
+            && project.len() <= 30
+            && project
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-'),
+        "test host requires a demo project"
+    );
+    let store = Store::new(&project).await.unwrap();
     let h = Host {
         store,
         stops: Arc::new(Mutex::new(HashMap::new())),
