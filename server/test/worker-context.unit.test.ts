@@ -21,7 +21,8 @@ test('standard context is immutable, bounded and never takes a project from a he
   assert.equal(WorkerContext.fromHeaders(project, 'bad', `${id}/1`), undefined);
 });
 function harness({ retry = false, abort = false, future = false } = {}) {
-  let now = 10000, txCalls = 0, callbacks = 0; const records: any[] = [];
+  let now = 10000, txCalls = 0, callbacks = 0, inTransaction = false; const records: any[] = [];
+  const claimStates: { inTransaction: boolean; lease: unknown; claimTrace: unknown; attempts: unknown }[] = [];
   const data = new Map<string, any>([
     ['deliveryOutbox/job', { id: 'job', kind: 'webhook', requestId: 'private-form', ownerId: 'private-owner', grantId: 'grant', eventId: 'private-event', hookId: 'hook', nextAt: future ? 999999 : 0, lease: null, attempts: 0, claimTrace: 'old-private-trace', purgeAt: new Date(999999) }],
     ['grants/grant', { formsApproved: true, webhooks: [{ id: 'hook', url: 'https://example.invalid', secret: 'private-token' }] }],
@@ -32,16 +33,24 @@ function harness({ retry = false, abort = false, future = false } = {}) {
     txCalls++; const execute = async () => {
       const writes: (() => void)[] = [];
       const tx = { get: async (ref: any) => ({ data: () => structuredClone(data.get(ref.path)) }), update: (ref: any, fields: any) => writes.push(() => data.set(ref.path, { ...data.get(ref.path), ...fields })), delete: (ref: any) => writes.push(() => data.delete(ref.path)) };
-      return { result: await fn(tx), writes };
+      inTransaction = true;
+      try { return { result: await fn(tx), writes }; }
+      finally { inTransaction = false; }
     };
     if (txCalls === 1 && retry) await execute(); // SDK retries without committing the first attempt.
     const run = await execute(); if (txCalls === 1 && abort) throw Error('synthetic transaction abort'); run.writes.forEach(f => f()); return run.result;
   } };
   const relay = { db, now: () => now, ref: (c: string, id: string) => db.collection(c).doc(id), validGrant: async () => true } as unknown as Relay;
   const forms = new Forms(relay, async () => {}, async () => { callbacks++; throw Error('webhook_timeout'); });
-  const original = telemetry.emit; const logger = new Telemetry(entry => { if (entry.event === 'delivery_lease_claimed') assert.ok(data.get('deliveryOutbox/job').lease); records.push(entry); });
+  const original = telemetry.emit; const logger = new Telemetry(entry => {
+    records.push(entry);
+    if (entry.event === 'delivery_lease_claimed') {
+      const job = data.get('deliveryOutbox/job');
+      claimStates.push({ inTransaction, lease: job?.lease, claimTrace: job?.claimTrace, attempts: job?.attempts });
+    }
+  });
   telemetry.emit = logger.emit.bind(logger);
-  return { forms, data, records, callbacks: () => callbacks, advance: () => { now += 5000; }, close: () => { telemetry.emit = original; } };
+  return { forms, data, records, claimStates, callbacks: () => callbacks, advance: () => { now += 5000; }, close: () => { telemetry.emit = original; } };
 }
 test('actual successful transaction joins claim trace atomically and emits once despite a transaction retry', async () => {
   const h = harness({ retry: true }); try {
@@ -50,6 +59,10 @@ test('actual successful transaction joins claim trace atomically and emits once 
     assert.equal(h.data.get('deliveryOutbox/job').attempts, 1); assert.equal(h.callbacks(), 1);
     const claims = h.records.filter(r => r.event === 'delivery_lease_claimed'); assert.equal(claims.length, 1);
     assert.equal(claims[0]['logging.googleapis.com/trace'], context().trace);
+    assert.equal(h.claimStates.length, 1);
+    assert.equal(h.claimStates[0]!.inTransaction, false);
+    assert.equal(typeof h.claimStates[0]!.lease, 'string'); assert.ok(h.claimStates[0]!.lease);
+    assert.equal(h.claimStates[0]!.claimTrace, context().trace); assert.equal(h.claimStates[0]!.attempts, 1);
     assert.ok(!JSON.stringify(h.records).includes('private'));
   } finally { h.close(); }
 });
@@ -63,7 +76,7 @@ test('skipped or aborted claim does not write context or emit a claimed record',
   for (const setup of [{ future: true }, { abort: true }]) { const h = harness(setup); try {
     if (setup.abort) await assert.rejects(h.forms.deliver('job', context())); else await h.forms.deliver('job', context());
     assert.equal(h.data.get('deliveryOutbox/job').claimTrace, 'old-private-trace'); assert.equal(h.data.get('deliveryOutbox/job').attempts, 0);
-    assert.equal(h.callbacks(), 0); assert.equal(h.records.length, 0);
+    assert.equal(h.callbacks(), 0); assert.equal(h.records.length, 0); assert.equal(h.claimStates.length, 0);
   } finally { h.close(); } }
 });
 
