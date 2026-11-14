@@ -26,6 +26,40 @@ test('provider errors produce bounded categories without serializing payloads or
   assert.doesNotThrow(() => new Telemetry(() => { throw Error(secret); }).delivery('sms', 0, 'accepted'));
 });
 
+test('recovery diagnostics allow only canonical error codes and never serialize error context', () => {
+  const records: unknown[] = [];
+  const telemetry = new Telemetry(entry => records.push(entry));
+  const secret = 'Bearer private-token owner@example.test https://private.example/?code=private-code';
+  const errors: [unknown, number | string | undefined, string][] = [
+    [Object.assign(new Error(secret), { code: 7 }), 7, 'internal'],
+    [{ code: '14' }, 14, 'unavailable'],
+    [{ code: 'DEADLINE_EXCEEDED' }, 4, 'timeout'],
+    [{ code: 'resource-exhausted' }, 8, 'quota'],
+    [{ code: 'app/invalid-credential' }, 'app/invalid-credential', 'internal'],
+    [{ code: 'ERR_BAD_REQUEST', response: { status: 403, data: { error: secret }, headers: { authorization: secret } } }, 403, 'internal'],
+    [{ status: '503' }, 503, 'unavailable'],
+    [{ code: secret, status: secret }, undefined, 'internal'],
+    [{ code: { toString: () => { throw Error(secret); } } }, undefined, 'internal'],
+    [{ code: Infinity }, undefined, 'internal'],
+    [{ code: 7.5 }, undefined, 'internal'],
+    [{ code: 200 }, undefined, 'internal'],
+    [{ code: 600 }, undefined, 'internal'],
+    [undefined, undefined, 'internal'],
+    [new Proxy({}, { get: () => { throw Error(secret); } }), undefined, 'internal'],
+  ];
+  for (const [error] of errors) {
+    if (error && typeof error === 'object') {
+      Object.assign(error, { message: secret, cause: { code: 7, token: secret }, stack: secret,
+        metadata: { authorization: secret }, toJSON: () => { throw Error('raw error must never be serialized'); } });
+    }
+    telemetry.recoveryGateUnavailable('credential', error);
+  }
+  assert.deepEqual(records, errors.map(([, code, category]) => ({ event: 'recovery_gate_unavailable', phase: 'credential', category,
+    ...(code === undefined ? {} : { error_code: code }), component: 'relay', severity: 'ERROR' })));
+  assert.ok(!JSON.stringify(records).includes('private'));
+  assert.doesNotThrow(() => new Telemetry(() => { throw Error(secret); }).recoveryGateUnavailable('watch', { code: 14 }));
+});
+
 test('HTTP metrics retain route templates while excluding caller paths queries and headers', { timeout: 5000 }, async () => {
   const records: unknown[] = [];
   const api = express();
