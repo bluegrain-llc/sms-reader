@@ -1,3 +1,4 @@
+import { WorkerContext } from './worker-context.js';
 import { dueSmsQueries } from './delivery-queries.js';
 import type { Request, Response, NextFunction } from 'express';
 import type { Firestore, Query } from 'firebase-admin/firestore';
@@ -6,6 +7,7 @@ export type Kind = 'sms' | 'form' | 'webhook';
 export type Category = 'quota' | 'timeout' | 'destination' | 'rejected' | 'unavailable' | 'internal';
 export type RecoveryGatePhase = 'credential' | 'initial_read' | 'watch_setup' | 'watch';
 type Event =
+  | { event: 'delivery_lease_claimed'; kind: 'form' | 'webhook' }
   | { event: 'onboarding_outcome'; phase: 'registration' | 'approval' | 'delivery' | 'setup'; outcome: string; count: number }
   | { event: 'http_completed'; method: string; route: string; status_class: string; duration_ms: number }
   | { event: 'delivery_attempt'; kind: Kind; outcome: 'accepted' | 'failed'; category?: Category; age_ms: number }
@@ -16,14 +18,14 @@ type Event =
   | { event: 'maintenance_completed'; duration_ms: number }
   | { event: 'deletion_failed' | 'maintenance_failed' | 'backlog_sampling_failed' | 'request_failed' | 'mcp_tool_failed'; category: Category }
   | { event: 'backlog_snapshot'; kind: Kind | 'results' | 'form_results' | 'deletion' | 'legacy_deletion'; count: number; oldest_due_age_s: number };
-export type Sink = (entry: Readonly<Event & { severity: 'INFO' | 'WARNING' | 'ERROR'; component: 'relay' }>) => void;
+export type Sink = (entry: Readonly<Event & { severity: 'INFO' | 'WARNING' | 'ERROR'; component: 'relay'; 'logging.googleapis.com/trace'?: string }>) => void;
 const defaultSink: Sink = entry => console.info(JSON.stringify(entry));
 /** Only fixed-schema fields reach logs. Never include raw errors, URLs, headers or document identities. */
 export class Telemetry {
   constructor(readonly sink: Sink = defaultSink, readonly now = Date.now) {}
-  emit(event: Event) {
+  emit(event: Event, context?: WorkerContext) {
     const severity = event.event.endsWith('_failed') || event.event === 'recovery_gate_unavailable' ? 'ERROR' : (event.event === 'delivery_attempt' || event.event === 'fcm_send') && event.outcome === 'failed' ? 'WARNING' : 'INFO';
-    try { this.sink({ ...event, component: 'relay', severity }); } catch { /* Logging failure must not change committed outcomes. */ }
+    try { this.sink({ ...event, component: 'relay', severity, ...(context instanceof WorkerContext ? { 'logging.googleapis.com/trace': context.trace } : {}) }); } catch { /* Logging failure must not change committed outcomes. */ }
   }
   http = (req: Request, res: Response, next: NextFunction) => {
     const started = this.now();
@@ -39,7 +41,7 @@ export class Telemetry {
       const route = typeof registered === 'string' ? registered : Array.isArray(registered) ? (req.path.startsWith('/mcp/services/') ? '/mcp/services/:serviceId' : req.path === '/mcp' ? '/mcp' : '/health') : 'unmatched';
       const method = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'].includes(req.method) ? req.method : 'OTHER';
       if (lifecycle) this.emit(lifecycle);
-      this.emit({ event: 'http_completed', method, route, status_class: `${Math.floor(res.statusCode / 100)}xx`, duration_ms: Math.max(0, this.now() - started) });
+      this.emit({ event: 'http_completed', method, route, status_class: `${Math.floor(res.statusCode / 100)}xx`, duration_ms: Math.max(0, this.now() - started) }, res.locals.workerContext);
     });
     next();
   };

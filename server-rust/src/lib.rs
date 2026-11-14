@@ -24,3 +24,5 @@ pub mod security;
 pub mod store;
 pub mod telemetry;
 pub mod webhooks;
+
+pub mod worker_context;

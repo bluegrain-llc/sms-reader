@@ -1,3 +1,4 @@
+import type { WorkerContext } from './worker-context.js';
 import { dueSmsQueries } from './delivery-queries.js';
 import { telemetry } from './telemetry.js';
 import { randomUUID } from 'node:crypto';
@@ -368,7 +369,7 @@ export class Relay {
     r.notificationSent = !unsent.length;
     r.nextNotificationAt = unsent.length ? Math.min(...unsent.map(p => Math.max(p.nextAt, p.lease))) : r.expiresAt;
   }
-  async maintenance() {
+  async maintenance(context?: WorkerContext) {
     await this.onboarding.cleanup();
     await this.pages.run('active-owners', this.db.collection('accounts').where('hasWork', '==', true), null, 250, async id => {
       if (!(await this.ref('accounts', id).get()).data()?.deleting) await this.advance(id);
@@ -377,7 +378,7 @@ export class Relay {
       await this.pages.run(`sms-${index}`, query, 'nextNotificationAt', 250, id => this.deliver(id), 10);
     }
     for (const collection of ['results', 'requests', 'audit', 'connections', 'connectionCodes', 'connectionRates']) await this.pages.purge(collection, this.now());
-    await this.forms.maintenance();
+    await this.forms.maintenance(context);
     await this.access.cleanup();
   }
 }

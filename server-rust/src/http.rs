@@ -1,3 +1,4 @@
+use crate::worker_context::WorkerContext;
 use crate::{
     connections::user_code,
     error::{Error, Result, ensure},
@@ -42,6 +43,7 @@ impl Authentication for Google {
 }
 #[derive(Clone)]
 pub struct Options {
+    pub project_id: Option<String>,
     pub auth: Arc<dyn Authentication>,
     pub serving: Option<Arc<dyn Serving>>,
     pub public_url: Option<String>,
@@ -241,7 +243,10 @@ fn measured_response(
     path: &str,
     started: Instant,
 ) -> Response {
-    let event = json!({"event":"http_completed","method":method,"route":crate::telemetry::route_template(path),"status_class":format!("{}xx",response.status().as_u16()/100)});
+    let mut event = json!({"event":"http_completed","method":method,"route":crate::telemetry::route_template(path),"status_class":format!("{}xx",response.status().as_u16()/100)});
+    if let Some(context) = response.extensions().get::<WorkerContext>() {
+        event["logging.googleapis.com/trace"] = json!(context.trace());
+    }
     let (parts, body) = response.into_parts();
     Response::from_parts(
         parts,
@@ -264,7 +269,8 @@ async fn handle(State(s): State<App>, request: Request) -> Response {
         let base = s.options.public_url.as_ref()?;
         Some(format!("Bearer resource_metadata=\"{}/.well-known/oauth-protected-resource/mcp/services/{id}\"", base.trim_end_matches('/')))
     });
-    let mut response = match route(s, request).await {
+    let mut worker_context = None;
+    let mut response = match route(s, request, &mut worker_context).await {
         Ok(r) => r,
         Err(e) => {
             if !matches!(e, Error::Api(_, _)) {
@@ -331,6 +337,9 @@ async fn handle(State(s): State<App>, request: Request) -> Response {
         response
             .headers_mut()
             .insert("WWW-Authenticate", challenge.parse().unwrap());
+    }
+    if let Some(context) = worker_context {
+        response.extensions_mut().insert(context);
     }
     response
 }
@@ -611,7 +620,11 @@ fn validate_event(v: &Value) -> Result<()> {
     };
     strict(v, &allowed)
 }
-async fn route(s: App, request: Request) -> Result<Response> {
+async fn route(
+    s: App,
+    request: Request,
+    worker_context: &mut Option<WorkerContext>,
+) -> Result<Response> {
     let method = request.method().clone();
     let raw_path = request.uri().path();
     let raw_oauth_path = raw_path.to_owned();
@@ -1433,11 +1446,18 @@ async fn route(s: App, request: Request) -> Result<Response> {
                 .worker(&token)
                 .await
                 .map_err(|_| Error::Api(401, reason))?;
+            let context = WorkerContext::from_headers(
+                s.options.project_id.as_deref(),
+                header(&headers, "traceparent"),
+                header(&headers, "x-cloud-trace-context"),
+            );
+            *worker_context = context.clone();
             if *operation == "delivery" {
                 r.deletion_dispatch(s.options.auth.clone()).await?;
-                r.dispatch().await?;
+                r.dispatch_with_context(context.as_ref()).await?;
             } else {
-                r.telemetry_maintenance(s.options.auth.clone()).await?;
+                r.telemetry_maintenance_with_context(s.options.auth.clone(), context.as_ref())
+                    .await?;
             }
             json!({"ok":true})
         }
@@ -1839,6 +1859,7 @@ mod tests {
         let router = app(
             relay,
             Options {
+                project_id: Some("demo-startup-probe".into()),
                 auth: Arc::new(ProbeAuth),
                 serving: Some(gate.clone()),
                 public_url: None,
@@ -2092,6 +2113,36 @@ mod tests {
         ) -> futures::future::BoxFuture<'a, Result<()>> {
             Box::pin(async { Ok(()) })
         }
+    }
+
+    #[tokio::test]
+    async fn failed_worker_response_completion_retains_trusted_context() {
+        let (logger, mut events) = tokio::sync::mpsc::unbounded_channel();
+        let context = WorkerContext::from_headers(
+            Some("demo-sms-relay"),
+            Some("00-1234567890abcdef1234567890abcdef-0000000000000001-00"),
+            None,
+        )
+        .unwrap();
+        let mut response = json_response(json!({"error":"internal_error"}), 500);
+        response.extensions_mut().insert(context.clone());
+        let measured = measured_response(
+            response,
+            Arc::new(Capture(logger)),
+            "POST",
+            "/internal/delivery",
+            Instant::now(),
+        );
+        axum::body::to_bytes(measured.into_body(), 1024)
+            .await
+            .unwrap();
+        let entry = tokio::time::timeout(Duration::from_secs(1), events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(entry["event"], "http_completed");
+        assert_eq!(entry["status_class"], "5xx");
+        assert_eq!(entry["logging.googleapis.com/trace"], context.trace());
     }
 
     #[tokio::test]

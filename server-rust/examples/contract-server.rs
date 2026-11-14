@@ -435,6 +435,7 @@ async fn start(State(h): State<Host>, Json(v): Json<Value>) -> Json<Value> {
     r.clock = live_clock(clock_url);
     let o = &v["options"];
     let options = Options {
+        project_id: o["projectId"].as_str().map(str::to_owned),
         auth: callback(&v),
         serving: v["hasServing"]
             .as_bool()

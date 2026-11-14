@@ -147,6 +147,13 @@ pub fn entry(event: Value) -> Option<Value> {
             };
             json!({"event":name,"method":method,"route":route,"status_class":status,"duration_ms":nonnegative(&event["duration_ms"])})
         }
+        "delivery_lease_claimed" => {
+            let kind = text(&event, "kind");
+            if !["form", "webhook"].contains(&kind) {
+                return None;
+            }
+            json!({"event":name,"kind":kind})
+        }
         "delivery_attempt" => {
             let kind = match text(&event, "kind") {
                 k @ ("sms" | "form" | "webhook") => k,
@@ -231,6 +238,16 @@ pub fn entry(event: Value) -> Option<Value> {
         }
         _ => return None,
     };
+    if (name == "delivery_lease_claimed"
+        || (name == "http_completed"
+            && ["/internal/delivery", "/internal/maintenance"].contains(&text(&record, "route"))))
+        && crate::worker_context::WorkerContext::valid_trace(text(
+            &event,
+            "logging.googleapis.com/trace",
+        ))
+    {
+        record["logging.googleapis.com/trace"] = event["logging.googleapis.com/trace"].clone();
+    }
     record["component"] = json!("relay");
     record["severity"] = json!(if name.ends_with("_failed") {
         "ERROR"
@@ -353,10 +370,17 @@ impl Relay {
     }
 
     pub async fn telemetry_maintenance(&self, auth: Arc<dyn Authentication>) -> Result<()> {
+        self.telemetry_maintenance_with_context(auth, None).await
+    }
+    pub async fn telemetry_maintenance_with_context(
+        &self,
+        auth: Arc<dyn Authentication>,
+        context: Option<&crate::worker_context::WorkerContext>,
+    ) -> Result<()> {
         let started = self.now();
         let result: Result<()> = async {
             self.deletion_dispatch(auth).await?;
-            self.maintenance().await
+            self.maintenance_with_context(context).await
         }
         .await;
         if let Err(error) = result {
@@ -458,6 +482,28 @@ pub fn onboarding_outcome(path: &str, method: &str, status: u16, value: &Value) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn worker_claim_and_finish_allow_only_standard_trace_metadata() {
+        let trace = "projects/demo-sms-relay/traces/1234567890abcdef1234567890abcdef";
+        for event in [
+            json!({"event":"delivery_lease_claimed","kind":"webhook"}),
+            json!({"event":"http_completed","method":"POST","route":"/internal/delivery","status_class":"5xx","duration_ms":5}),
+        ] {
+            let mut input = event;
+            input["logging.googleapis.com/trace"] = json!(trace);
+            input["ownerId"] = json!("private-owner");
+            input["lease"] = json!("private-lease");
+            input["query"] = json!("private-query");
+            let out = entry(input).unwrap();
+            assert_eq!(out["logging.googleapis.com/trace"], trace);
+            assert!(!out.to_string().contains("private"));
+        }
+        let invalid = entry(json!({"event":"delivery_lease_claimed","kind":"form","logging.googleapis.com/trace":"projects/private/path/traces/token"})).unwrap();
+        assert!(invalid.get("logging.googleapis.com/trace").is_none());
+        let public = entry(json!({"event":"http_completed","method":"POST","route":"/v1/requests","status_class":"2xx","logging.googleapis.com/trace":trace})).unwrap();
+        assert!(public.get("logging.googleapis.com/trace").is_none());
+    }
 
     #[test]
     fn fcm_lifecycle_keeps_only_attempt_metadata() {
