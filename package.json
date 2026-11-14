@@ -18,7 +18,10 @@
     "test:capacity-tools": "python3 scripts/test-capacity-tools.py && node --test scripts/capacity-observation.test.mjs",
     "test:cli": "npm test -w cli",
     "test:browser": "playwright test",
-    "contracts:onboarding": "node --import tsx scripts/onboarding-contract.mts"
+    "contracts:onboarding": "node --import tsx scripts/onboarding-contract.mts",
+    "docs:ui": "node scripts/ui-contract.mjs --write",
+    "check:ui": "node scripts/ui-contract.mjs",
+    "test:ui": "node --test scripts/ui-contract.test.mjs"
   },
   "devDependencies": {
     "esbuild": "^0.28.2",

@@ -4,6 +4,10 @@ Production publication follows the [Google Play release gates and preparation pa
 
 An Android 8+ request inbox and Firebase-backed Cloud Run service for owner-approved, upcoming SMS codes. One installation provides two independent launcher entries: **Inbox** for requests and **Administration** for access, devices and history. Each has its own Android task and navigation. Lists update automatically; pull down from the top to refresh immediately. Apps and bots pair directly through a link approved in Administration; each user/app connection gets its own credential for REST or MCP. The relay never triggers an SMS and never reads the inbox.
 
+UI changes must follow the [UI contract](docs/UX.md) and [agent instructions](AGENTS.md): one purpose per page, an Android Settings-style administrative hierarchy with settings search, and history exclusively in Administration. The contract defines the redesign target; existing screens and navigation examples may still reflect the earlier UI.
+
+The linked [user flows, page/control IDs, glossary, and validation guide](docs/ui/README.md) distinguish Android, iOS, and browser tasks and script, terminal, and hosted agents. Run `npm run check:ui` and `npm run test:ui` to verify references, platform/agent coverage, generated documentation, and declared flow exits.
+
 
 Apps and agents can also ask for information and decisions through native forms: Markdown messages, text, numbers, checkboxes, choices and dates, with explicit Submit/Approve/Decline/Acknowledge actions. Forms can also become multi-step wizards with Next/Previous, conditional steps, a retained in-memory draft, and one final review/submission. Pending forms remain available in any order while SMS capture stays serialized. Each existing connection starts with SMS-only permission; enable interactive requests explicitly in **Administration → Access**. The additive `/v2` API and MCP tools provide request/result operations, durable event polling, SSE and signed webhooks. Answers are retrieved separately and expire after 24 hours. See the [request inbox API, delivery contract and rollout](docs/REQUEST_INBOX.md).
 

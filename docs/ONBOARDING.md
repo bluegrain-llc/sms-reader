@@ -1,5 +1,7 @@
 # Service onboarding
 
+For the governing redesign, use the cross-linked [user flows](ui/FLOWS.md), [page/control inventory](ui/INVENTORY.md), [glossary](ui/GLOSSARY.md), and [validation guide](ui/README.md). Start with [FLOW-DIRECT-CONNECT](ui/FLOWS.md#flow-direct-connect) for scripts/terminal agents or [FLOW-HOSTED-CONNECT](ui/FLOWS.md#flow-hosted-connect) for hosted agents. Navigation labels below describe the implementation record and may predate that target.
+
 This is the implementation and rollout record for QR/link service onboarding. It preserves `/v1` SMS and `/v2` forms operations. It also implements a separate OAuth authorization layer for named-service MCP connections. Every flow uses the configured relay server; “hosted” describes where the requesting agent’s connector runs.
 
 ## Register and connect
