@@ -6,7 +6,8 @@ import { after } from 'node:test';
 import { RelayError } from '../src/model.js';
 import type { Relay, Notify } from '../src/relay.js';
 import type { HttpOptions } from '../src/http.js';
-import type { Firestore } from 'firebase-admin/firestore';
+import { getApps } from 'firebase-admin/app';
+import { getFirestore, type Firestore } from 'firebase-admin/firestore';
 import { sendWebhook } from '../src/webhooks.js';
 import { telemetry } from '../src/telemetry.js';
 import type { RecordSecurity } from '../src/security-ledger.js';
@@ -16,6 +17,11 @@ let hostProject: string | undefined;
 const clients = new Map<number, RustRelay>();
 let nextDelete = 0;
 const deleteCallbacks = new Map<number, (uid: string) => Promise<void>>();
+export function projectFor(db: Firestore): string {
+  const project = getApps().find(app => getFirestore(app) === db)?.options.projectId;
+  if (!project || !/^demo-[a-z0-9-]+$/.test(project) || project.length > 30) throw Error('Rust test host requires a client bound to an explicit demo app project');
+  return project;
+}
 async function init(project: string) {
   if (hostProject && hostProject !== project) throw Error('Rust test host cannot mix Firestore projects');
   hostProject = project;
@@ -86,9 +92,9 @@ export class RustRelay {
     } : (...args: unknown[]) => this.call(`access.${String(method)}`, args) });
     return new Proxy(this, { get: (target, key) => key in target ? Reflect.get(target, key) : (...args: unknown[]) => target.call(String(key), args) });
   }
-  async payload() { await init(this.db.projectId); return { now: this.now(), callback: `http://127.0.0.1:${callbackPort}/${this.id}` }; }
+  async payload() { await init(projectFor(this.db)); return { now: this.now(), callback: `http://127.0.0.1:${callbackPort}/${this.id}` }; }
   async call(method: string, args: unknown[], deleteIdentity?: (uid: string) => Promise<void>) {
-    const base = await init(this.db.projectId), payload = await this.payload();
+    const base = await init(projectFor(this.db)), payload = await this.payload();
     const deleteId = deleteIdentity ? ++nextDelete : undefined;
     if (deleteId) { deleteCallbacks.set(deleteId, deleteIdentity!); payload.callback += `?delete=${deleteId}`; }
     try {
@@ -111,7 +117,7 @@ class RustServer extends EventEmitter {
   constructor(private readonly relay: RustRelay, options: HttpOptions) {
     super(); relay.options = options;
     this.pending = (async () => {
-      const response = await fetch(`${await init(relay.db.projectId)}/start`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      const response = await fetch(`${await init(projectFor(relay.db))}/start`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ ...await relay.payload(), options, hasServing: typeof options.assertServing === 'function' }), signal: AbortSignal.timeout(15_000) });
       const result = await response.json() as { port: number; id: string }; this.port = result.port; this.id = result.id; this.emit('listening');
     })();
@@ -120,7 +126,7 @@ class RustServer extends EventEmitter {
   address() { return { address: '127.0.0.1', family: 'IPv4', port: this.port }; }
   private stop() {
     return this.stopped ??= this.pending.then(async () => {
-      const response = await fetch(`${await init(this.relay.db.projectId)}/stop`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: this.id }), signal: AbortSignal.timeout(15_000) });
+      const response = await fetch(`${await init(projectFor(this.relay.db))}/stop`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: this.id }), signal: AbortSignal.timeout(15_000) });
       if (!response.ok) throw Error('Rust test server shutdown failed');
     });
   }
